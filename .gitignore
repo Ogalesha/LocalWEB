@@ -1,0 +1,32 @@
+/target/
+/dist/
+/packaging/runtime-root/
+/packaging/php-builds/
+/packaging/ci-inputs/
+.opencode/
+.agents/
+.claude/
+AGENTS.md
+.better-ui.md
+.impeccable.md
+*.deb
+# Local working files, not part of the project
+.better-web-ui.md
+.impeccable/
+PRODUCT.md
+[Pp][Rr][Oo][Dd][Uu][Cc][Tt].md
+DESIGN.md
+TASKS.md
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+# OS
+.DS_Store
+Thumbs.db
+# Logs / temp / env
+*.log
+*.tmp
+.env
+.env.*

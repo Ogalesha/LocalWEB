@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "target": "ubuntu-26.04-amd64",
+  "built_at": "2026-09-26T00:00:00Z",
+  "components": [
+    {
+      "name": "php",
+      "version": "8.5.x",
+      "provider": "bundled-ubuntu-build",
+      "source": "Ubuntu 26.04 archive",
+      "sha256": "generated-by-stage-runtime"
+    }
+  ]
+}

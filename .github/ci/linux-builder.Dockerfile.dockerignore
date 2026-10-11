@@ -1,0 +1,17 @@
+.git
+target
+dist
+packaging/runtime-root
+packaging/php-builds
+packaging/ci-inputs
+PRODUCT.md
+DESIGN.md
+TASKS.md
+.better-web-ui.md
+.better-ui.md
+.impeccable
+.impeccable.md
+.opencode
+.agents
+.claude
+AGENTS.md

@@ -1,0 +1,65 @@
+#!/bin/sh
+set -e
+
+refresh_caches() {
+    if command -v update-desktop-database >/dev/null 2>&1; then
+        update-desktop-database /usr/share/applications 2>/dev/null || true
+    fi
+    if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+        gtk-update-icon-cache -f -t /usr/share/icons/hicolor 2>/dev/null || true
+    fi
+}
+
+case "${1:-}" in
+    remove|purge|disappear)
+        if [ -d /var/lib/localweb/users ]; then
+            for registry in /var/lib/localweb/users/*.paths; do
+                [ -f "$registry" ] || continue
+                uid=${registry##*/}
+                uid=${uid%.paths}
+                home=$(getent passwd "$uid" | cut -d: -f6)
+                [ -n "$home" ] || continue
+                while IFS= read -r path; do
+                    case "$path" in
+                        "$home"/*|/run/user/"$uid"/localweb)
+                            rm -rf -- "$path"
+                            ;;
+                    esac
+                done < "$registry"
+            done
+        fi
+
+        uid_min=$(awk '$1 == "UID_MIN" { print $2; exit }' /etc/login.defs)
+        uid_min=${uid_min:-1000}
+        getent passwd | while IFS=: read -r user _ uid _ _ home _; do
+            [ "$uid" -ge "$uid_min" ] 2>/dev/null || continue
+            [ "$uid" -lt 65534 ] || continue
+            [ -n "$home" ] && [ "$home" != / ] || continue
+            rm -rf -- \
+                "$home/.config/localweb" \
+                "$home/.local/share/localweb" \
+                "$home/.local/state/localweb" \
+                "$home/.config/systemd/user/localwebd.service" \
+                "$home/.config/systemd/user/default.target.wants/localwebd.service"
+            rm -rf -- "/run/user/$uid/localweb"
+        done
+
+        rm -rf -- /var/lib/localweb /var/log/localweb /usr/lib/localweb
+
+        for runtime_dir in /run/user/[0-9]*; do
+            [ -d "$runtime_dir" ] || continue
+            uid=${runtime_dir##*/}
+            user=$(getent passwd "$uid" | cut -d: -f1)
+            [ -n "$user" ] || continue
+            [ -S "$runtime_dir/bus" ] || continue
+            runuser -u "$user" -- env \
+                XDG_RUNTIME_DIR="$runtime_dir" \
+                DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime_dir/bus" \
+                systemctl --user daemon-reload 2>/dev/null || true
+        done
+
+        refresh_caches
+        ;;
+esac
+
+exit 0

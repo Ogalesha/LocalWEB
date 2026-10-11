@@ -1,0 +1,18 @@
+[package]
+name = "localweb-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "Native desktop client for LocalWeb"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+eframe.workspace = true
+localweb-core.workspace = true
+mimalloc.workspace = true
+tokio.workspace = true

@@ -1,0 +1,85 @@
+name: Native packages and acceptance
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: native-packages-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Ubuntu 26.04 amd64
+            image: ubuntu:26.04
+            artifact: ubuntu-amd64
+          - name: Arch Linux (Omarchy base) amd64
+            image: archlinux:base-devel
+            artifact: arch-omarchy-amd64
+    steps:
+      - uses: actions/checkout@v5
+      - name: Prepare isolated CI build host
+        run: docker build --build-arg BASE_IMAGE=${{ matrix.image }} -f .github/ci/linux-builder.Dockerfile -t localweb-builder .
+      - name: Build, install and exercise the full native stack
+        run: |
+          trap 'python3 .github/ci/report-failure.py native-build.log' ERR
+          exec > >(tee native-build.log) 2>&1
+          docker run --name lw-ci --privileged --security-opt seccomp=unconfined --cgroupns=private --tmpfs /run --tmpfs /run/lock -d localweb-builder
+          for attempt in {1..60}; do docker exec lw-ci systemctl is-active dbus.service && break; sleep 1; done
+          docker exec lw-ci systemctl is-active dbus.service
+          docker exec lw-ci bash -ec 'cp /etc/hosts /tmp/lw-hosts; umount /etc/hosts; cp /tmp/lw-hosts /etc/hosts; loginctl enable-linger builder'
+          for attempt in {1..60}; do docker exec lw-ci test -S /run/user/1000/bus && break; sleep 1; done
+          docker exec lw-ci test -S /run/user/1000/bus
+          docker exec lw-ci runuser -u builder -- env XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus bash /workspace/scripts/ci-native-linux.sh
+          docker cp lw-ci:/workspace/dist ./dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: localweb-${{ matrix.artifact }}
+          path: dist/
+          if-no-files-found: error
+      - name: Stop isolated CI host
+        if: always()
+        run: docker logs lw-ci || true; docker rm -f lw-ci || true
+
+  release:
+    name: Publish verified installers
+    needs: linux
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v5
+        with:
+          pattern: localweb-*
+          path: release-files
+      - name: Publish packages for the tested commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test "$(git rev-parse v0.1.0^{commit})" = "$GITHUB_SHA"
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib
+          root = Path('release-files')
+          packages = [p for p in root.rglob('*') if p.is_file() and p.name.endswith(('.deb', '.pkg.tar.zst'))]
+          assert len(packages) == 2, packages
+          Path('SHA256SUMS').write_text(''.join(f'{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}\n' for p in sorted(packages)))
+          PY
+          if ! gh release view v0.1.0 >/dev/null 2>&1; then
+            gh release create v0.1.0 --verify-tag --title 'LocalWeb 0.1.0' --notes-file CHANGELOG.md
+          fi
+          gh release upload v0.1.0 release-files/*/*.deb release-files/*/*.pkg.tar.zst SHA256SUMS --clobber

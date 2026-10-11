@@ -1,0 +1,125 @@
+# Arch install/remove hooks for LocalWeb. Removal mirrors the Debian
+# maintainer scripts: stop everything LocalWeb owns, drop its system
+# integration, and wipe its data. Project source directories are never
+# touched. Validated on Arch Linux x86_64 with package install,
+# 48-combination HTTPS acceptance, removal and system-state cleanup.
+
+post_install() {
+    if command -v setcap >/dev/null 2>&1; then
+        setcap cap_net_bind_service=+ep /usr/lib/localweb/localweb-gateway || true
+    fi
+    if command -v update-desktop-database >/dev/null 2>&1; then
+        update-desktop-database /usr/share/applications 2>/dev/null || true
+    fi
+    if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+        gtk-update-icon-cache -f -t /usr/share/icons/hicolor 2>/dev/null || true
+    fi
+}
+
+pre_remove() {
+    for runtime_dir in /run/user/[0-9]*; do
+        [ -d "$runtime_dir" ] || continue
+        uid=${runtime_dir##*/}
+        user=$(getent passwd "$uid" | cut -d: -f1)
+        [ -n "$user" ] || continue
+        [ -S "$runtime_dir/bus" ] || continue
+        units=$(runuser -u "$user" -- env \
+            XDG_RUNTIME_DIR="$runtime_dir" \
+            DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime_dir/bus" \
+            systemctl --user list-units --all --type=service --plain --no-legend 'localweb-*' 2>/dev/null \
+            | awk '{print $1}')
+        if [ -n "$units" ]; then
+            # shellcheck disable=SC2086
+            runuser -u "$user" -- env \
+                XDG_RUNTIME_DIR="$runtime_dir" \
+                DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime_dir/bus" \
+                systemctl --user stop $units 2>/dev/null || true
+        fi
+        runuser -u "$user" -- env \
+            XDG_RUNTIME_DIR="$runtime_dir" \
+            DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime_dir/bus" \
+            systemctl --user disable --now localwebd.service 2>/dev/null || true
+    done
+
+    for process in /proc/[0-9]*; do
+        [ -e "$process/exe" ] || continue
+        executable=$(readlink "$process/exe" 2>/dev/null || true)
+        case "$executable" in
+            /usr/lib/localweb/*)
+                kill -KILL "${process##*/}" 2>/dev/null || true
+                ;;
+        esac
+    done
+
+    # Drop the managed /etc/hosts block, preserving everything else.
+    if [ -f /etc/hosts ]; then
+        awk '
+            /^# BEGIN LOCALWEB - DO NOT EDIT$/ { skip=1; next }
+            /^# END LOCALWEB$/ { skip=0; next }
+            !skip { print }
+        ' /etc/hosts > /etc/hosts.localweb-tmp &&
+            cat /etc/hosts.localweb-tmp > /etc/hosts &&
+            rm -f /etc/hosts.localweb-tmp
+    fi
+
+    # Drop the LocalWeb CA from the p11-kit trust store.
+    rm -f /etc/ca-certificates/trust-source/anchors/localweb-development-ca.crt
+    if command -v trust >/dev/null 2>&1; then
+        trust extract-compat 2>/dev/null || true
+    fi
+}
+
+post_remove() {
+    if [ -d /var/lib/localweb/users ]; then
+        for registry in /var/lib/localweb/users/*.paths; do
+            [ -f "$registry" ] || continue
+            uid=${registry##*/}
+            uid=${uid%.paths}
+            home=$(getent passwd "$uid" | cut -d: -f6)
+            [ -n "$home" ] || continue
+            while IFS= read -r path; do
+                case "$path" in
+                    "$home"/*|/run/user/"$uid"/localweb)
+                        rm -rf -- "$path"
+                        ;;
+                esac
+            done < "$registry"
+        done
+    fi
+
+    uid_min=$(awk '$1 == "UID_MIN" { print $2; exit }' /etc/login.defs)
+    uid_min=${uid_min:-1000}
+    getent passwd | while IFS=: read -r user _ uid _ _ home _; do
+        [ "$uid" -ge "$uid_min" ] 2>/dev/null || continue
+        [ "$uid" -lt 65534 ] || continue
+        [ -n "$home" ] && [ "$home" != / ] || continue
+        rm -rf -- \
+            "$home/.config/localweb" \
+            "$home/.local/share/localweb" \
+            "$home/.local/state/localweb" \
+            "$home/.config/systemd/user/localwebd.service" \
+            "$home/.config/systemd/user/default.target.wants/localwebd.service"
+        rm -rf -- "/run/user/$uid/localweb"
+    done
+
+    rm -rf -- /var/lib/localweb /var/log/localweb
+
+    for runtime_dir in /run/user/[0-9]*; do
+        [ -d "$runtime_dir" ] || continue
+        uid=${runtime_dir##*/}
+        user=$(getent passwd "$uid" | cut -d: -f1)
+        [ -n "$user" ] || continue
+        [ -S "$runtime_dir/bus" ] || continue
+        runuser -u "$user" -- env \
+            XDG_RUNTIME_DIR="$runtime_dir" \
+            DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime_dir/bus" \
+            systemctl --user daemon-reload 2>/dev/null || true
+    done
+
+    if command -v update-desktop-database >/dev/null 2>&1; then
+        update-desktop-database /usr/share/applications 2>/dev/null || true
+    fi
+    if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+        gtk-update-icon-cache -f -t /usr/share/icons/hicolor 2>/dev/null || true
+    fi
+}

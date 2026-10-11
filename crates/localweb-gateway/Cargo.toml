@@ -1,0 +1,26 @@
+[package]
+name = "localweb-gateway"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "LocalWeb HTTPS-only loopback reverse proxy"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+localweb-core.workspace = true
+mimalloc.workspace = true
+tokio.workspace = true
+serde_json.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+http-body-util.workspace = true
+bytes.workspace = true
+rustls.workspace = true
+rustls-pemfile.workspace = true
+tokio-rustls.workspace = true
+clap.workspace = true

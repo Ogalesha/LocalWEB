@@ -1,0 +1,201 @@
+# LocalWeb
+
+A native local development environment for web developers. Choose a source
+folder, a PHP version, a web server and the services your app needs. Run
+projects side by side on local domains over HTTPS, without Docker
+or virtual machines.
+
+Use WordPress, Laravel, Symfony, Drupal, another PHP framework or CMS, or
+your own application. Presets are shortcuts, not a list of supported apps.
+The **Generic PHP** preset lets you choose the document root, database,
+cache, worker command and scheduled tasks yourself. Your application's
+requirements still determine which PHP and database versions it can use.
+
+## Tools and features
+
+| Tool | What LocalWeb provides |
+| --- | --- |
+| **PHP 8.0–8.5** | Per-project CLI and PHP-FPM selection. PHP 8.0 and 8.1 are end-of-life compatibility versions and receive no upstream security fixes; 8.2 is in security-only support until 31 Dec 2026. Use a supported branch for current work. The desktop indicates which versions are included. PHP 8.6 will be added after its stable release. |
+| **nginx** | Per-project web configuration for a LEMP stack. |
+| **Apache 2.4** | Per-project web configuration for a LAMP stack; can run alongside nginx. |
+| **MariaDB** | Shared local server with a database and credentials for each project; the reference payload uses MariaDB 11.8 LTS. |
+| **MySQL** | Shared local server with a database and credentials for each project; the reference payload uses MySQL 8.4 LTS. |
+| **PostgreSQL** | Private local cluster with a database and login for each project. |
+| **SQLite** | A LocalWeb-owned database file for each project, accessed through PHP. |
+| **Redis** | A separate local cache process for each project. |
+| **Composer 2** | Runs with the project's selected PHP. |
+| **Node.js 24, npm and npx** | Bundled LTS build tools. Node.js 22 and 20 can also be selected when matching system installations are available; Node.js 20 is EOL. |
+| **Mailpit** | Per-project SMTP server and browser inbox for development email. |
+| **Background workers** | Supervisor-style process management using the native service manager; Laravel queue and Symfony Messenger presets, or a custom executable and arguments. |
+| **Scheduled tasks** | Five-field cron schedules, framework presets, logs and overlap protection while the project is active. |
+| **Local domains** | Exact project entries in `/etc/hosts`, with `.dev` as the default suffix. |
+| **HTTPS-only domains** | A local TLS gateway and development certificate authority. Install the CA once to trust local HTTPS; no plain-HTTP project listener is exposed. |
+| **Desktop app** | Project search, runtime/service selection, start/stop/restart, browser and Mailpit opening, details and connection settings. |
+| **CLI** | Project management, PHP/Composer/Node commands, shell access, environment values and diagnostics. |
+| **Autostart** | Optional login startup and per-project startup preferences. |
+
+The native build pipeline assembles all six PHP CLI/FPM pairs from the
+pinned sources in `packaging/php-sources.txt`. A smaller development package
+may include only PHP 8.5. Selecting another version does not download it:
+its matching CLI and FPM must already be in the runtime or on the system.
+PostgreSQL likewise needs its complete runtime payload and PHP's
+`pdo_pgsql` extension. **Memcached is not implemented.**
+
+See [runtime management](docs/runtime-management.md) for extension,
+version and runtime-location details.
+
+## Platforms and distribution
+
+LocalWeb's source, changes and downloadable packages are published **only
+on [GitHub](https://github.com/Ogalesha/LocalWEB)**. There is no LocalWeb
+package in a distro repository, AUR or COPR. OS packages and upstream
+downloads are build inputs, not alternative LocalWeb distribution channels.
+
+| Platform | Package | Native integration |
+| --- | --- | --- |
+| Ubuntu 26.04 amd64 | `.deb` | systemd, system certificate store and system authorization |
+| Arch Linux amd64 | `.pkg.tar.zst` | systemd, Arch certificate store and system authorization |
+| Omarchy amd64 | Arch package | Uses the same Arch base and integration |
+
+The package carries LocalWeb's private web stack. It does not replace the
+machine's PHP, web servers, databases or caches. A normal desktop session
+with systemd is required.
+
+### Validation status
+
+The earlier Ubuntu/PHP 8.5 package has passed live stack and removal tests.
+The expanded stack and platform ports are checked by
+[Native packages and acceptance](https://github.com/Ogalesha/LocalWEB/actions/workflows/native-builds.yml).
+For the source revision you are installing, check that its platform job
+passed. Arch CI covers the base used by Omarchy; an Omarchy desktop session
+still needs its own final acceptance check.
+
+Each job builds and installs the package, tests PHP 8.0–8.5 with both web
+servers and all four database choices over HTTPS, checks Redis,
+Mailpit and the PHP CLI, then exercises stop, removal and source-folder
+preservation. Packages are uploaded as workflow artifacts only after the
+job passes. They can then be attached to a GitHub Release.
+
+## Install and get started
+
+Download the package for your OS from [GitHub Releases](https://github.com/Ogalesha/LocalWEB/releases)
+when available, or from a successful native-build workflow. Check its
+SHA-256 against the accompanying `SHA256SUMS` file.
+
+```bash
+sudo apt install ./localweb_0.1.0_amd64.deb       # Ubuntu
+sudo pacman -U ./localweb-0.1.0-1-x86_64.pkg.tar.zst  # Arch / Omarchy
+```
+
+Open the desktop app and choose **Set up LocalWeb**, then **Install CA**.
+Or use the same workflow from a terminal:
+
+```bash
+localweb setup
+localweb ca install
+localweb start
+```
+
+System authorization is used for CA installation, cleanup registration and
+local-domain changes. Project services run as your desktop user.
+
+## Add your first project
+
+In the desktop app, choose **Add project**, select an existing source
+folder, check its preset and document root, choose the runtime and services,
+then select **Add to LocalWeb**. The source files are kept where they are.
+Select **Start** to run the project and **Open** to visit it.
+
+For a terminal workflow:
+
+```bash
+localweb project add ~/Code/acme --php 8.5 --web nginx \
+  --db mariadb --cache redis --document-root public --domain acme.dev
+localweb project start acme
+localweb php acme -- -v
+localweb composer acme -- install
+```
+
+Choose a different stack for another project:
+
+```bash
+localweb project add ~/Code/blog --php 8.3 --web apache \
+  --db postgres --document-root public --domain blog.dev
+localweb project start blog
+```
+
+PHP 8.3 and PostgreSQL must be present in the installed runtime for that
+example. **Details → Show connection settings** gives you the database,
+Redis and email values. **Copy as .env** copies them; LocalWeb does not edit
+your app's configuration file. From the CLI:
+
+```bash
+localweb env acme --format dotenv
+```
+
+All LocalWeb project domains are HTTPS-only. `.dev` domains additionally
+use browsers' built-in HSTS policy; `.test` is available when that policy
+would interfere with a development workflow.
+
+## Background work
+
+| Preset | Worker | Scheduled task |
+| --- | --- | --- |
+| Laravel | `artisan queue:work` | `artisan schedule:run` every minute |
+| Symfony | `bin/console messenger:consume async` | Supply a schedule if your app needs one |
+| WordPress | Custom command if needed | `wp-cron.php` every five minutes; disable WordPress's page-triggered cron in your app configuration |
+| Drupal | Custom command if needed | `vendor/bin/drush cron` every fifteen minutes; install Drush in the project |
+| Other apps | Custom executable and arguments | Custom schedule and command |
+
+Enable a preset with `--supervisor` or `--cron-preset`. A custom worker uses
+`--supervisor-command` and one `--supervisor-arg` per literal argument.
+`@php` uses the project's selected PHP and private PHP configuration.
+The desktop exposes the same presets and custom-command fields.
+
+## Common commands
+
+```bash
+localweb status
+localweb doctor
+localweb runtime list
+localweb project list
+localweb project info acme
+localweb project restart acme
+localweb project stop acme
+localweb node acme -- --version
+localweb npm acme -- run build
+localweb npx acme -- --version
+localweb exec acme -- php artisan about
+localweb shell acme
+localweb autostart enable
+localweb shutdown
+```
+
+Closing the desktop window leaves projects running. **Stop LocalWeb** stops
+the managed environment; **Stop** on a project affects that project.
+The displayed project state is the daemon's active-project state, not a
+continuous health check of every service. Gateway state is checked through
+the native service manager. Worker counts describe configured workers.
+
+## Remove LocalWeb
+
+```bash
+sudo apt remove localweb     # Ubuntu
+sudo pacman -R localweb      # Arch / Omarchy
+```
+
+Package removal deletes LocalWeb's services, settings, databases, logs,
+certificates and host mappings. **Source project folders are kept.** Export
+any LocalWeb database data you want to retain first.
+Package upgrades preserve LocalWeb state.
+
+## Build and contribute
+
+Use stable Rust and the native build inputs described in
+[DEVELOPMENT.md](DEVELOPMENT.md). The runtime staging tools need Python 3
+on the **build host**; the installed application does not use Python,
+Electron or a browser shell.
+
+See [installation](docs/installation.md), [troubleshooting](docs/troubleshooting.md),
+[architecture](ARCHITECTURE.md), [security](SECURITY.md) and
+[packaging notes](packaging/distros.md).

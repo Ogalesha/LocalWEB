@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=LocalWeb
+Comment=Native local web development environment
+Exec=/usr/bin/localweb-gui
+Icon=io.localweb.LocalWeb
+Terminal=false
+Categories=Development;WebDevelopment;
+StartupNotify=true
+
