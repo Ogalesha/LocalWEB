@@ -1,0 +1,15 @@
+[Unit]
+Description=LocalWeb user daemon
+Documentation=file:/usr/share/doc/localweb/README.md
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=/usr/lib/localweb/localwebd
+Restart=on-failure
+RestartSec=2s
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=default.target

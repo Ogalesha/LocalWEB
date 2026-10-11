@@ -1,0 +1,48 @@
+# Maintainer: Ogalesha <mirgen.pervathi@gmail.com>
+# LocalWeb on Arch Linux (and Arch-based systems such as Omarchy).
+# Status: definition only — the first Arch-host build and acceptance run
+# are still pending. Confirm the makedepends names on a current Arch
+# host before that build; adjust them here if the archive moved on.
+pkgname=localweb
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Native local web development environment (self-contained stack)"
+arch=('x86_64')
+url="https://github.com/Ogalesha/LocalWEB"
+license=('MIT')
+depends=('glibc' 'gcc-libs' 'systemd' 'polkit' 'ca-certificates'
+         'libcap' 'libx11' 'libxcb' 'libxkbcommon' 'wayland' 'libgl'
+         'xdg-utils')
+makedepends=('cargo' 'nginx' 'php' 'php-fpm' 'mariadb' 'mariadb-clients'
+              'redis' 'apache' 'nodejs' 'npm' 'php-gd' 'php-intl' 'postgresql' 'python')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+install=localweb.install
+
+build() {
+  cd "LocalWEB-$pkgver"
+  : "${COMPOSER_PHAR:?Set COMPOSER_PHAR to a verified official Composer 2 PHAR}"
+  : "${COMPOSER_SHA256:?Set COMPOSER_SHA256 to Composer's published SHA-256 digest}"
+  : "${MAILPIT_BIN:?Set MAILPIT_BIN to a verified official Mailpit binary}"
+  : "${MAILPIT_SHA256:?Set MAILPIT_SHA256 to the expected checksum}"
+  SOURCE_DATE_EPOCH=0 sh ./scripts/stage-runtime.sh
+  cargo build --manifest-path Cargo.toml --workspace --release --locked
+}
+
+package() {
+  cd "LocalWEB-$pkgver"
+  install -d "$pkgdir/usr/bin" "$pkgdir/usr/lib/localweb" \
+    "$pkgdir/usr/lib/systemd/user" "$pkgdir/usr/share/applications" \
+    "$pkgdir/usr/share/icons/hicolor/scalable/apps" \
+    "$pkgdir/usr/share/polkit-1/actions" "$pkgdir/usr/share/doc/localweb"
+  for binary in localweb localwebd localweb-gateway localweb-helper localweb-gui; do
+    install -m 0755 "target/release/$binary" "$pkgdir/usr/lib/localweb/$binary"
+    ln -s "../lib/localweb/$binary" "$pkgdir/usr/bin/$binary"
+  done
+  cp -a packaging/runtime-root "$pkgdir/usr/lib/localweb/runtime"
+  install -m 0644 packaging/systemd/localwebd.service "$pkgdir/usr/lib/systemd/user/localwebd.service"
+  install -m 0644 packaging/polkit/io.localweb.helper.policy "$pkgdir/usr/share/polkit-1/actions/io.localweb.helper.policy"
+  install -m 0644 packaging/desktop/io.localweb.LocalWeb.desktop "$pkgdir/usr/share/applications/io.localweb.LocalWeb.desktop"
+  install -m 0644 packaging/icons/io.localweb.LocalWeb.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/io.localweb.LocalWeb.svg"
+  install -m 0644 README.md ARCHITECTURE.md SECURITY.md "$pkgdir/usr/share/doc/localweb/"
+}
