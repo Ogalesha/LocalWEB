@@ -42,7 +42,9 @@ struct State {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    use std::io::IsTerminal as _;
     tracing_subscriber::fmt()
+        .with_ansi(std::io::stdout().is_terminal())
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("localwebd=info")),
@@ -981,19 +983,27 @@ fn apply_services(state: &State, active: &BTreeSet<String>) -> localweb_core::Re
     write_routes(state, active)?;
     let gateway = std::env::current_exe()?
         .with_file_name(format!("localweb-gateway{}", std::env::consts::EXE_SUFFIX));
-    if !is_active("localweb-gateway")
-        && std::net::TcpStream::connect_timeout(
-            &std::net::SocketAddr::from(([127, 0, 0, 1], 443)),
-            Duration::from_millis(100),
-        )
-        .is_ok()
-    {
+    if gateway_should_skip(is_active("localweb-gateway"), port_in_use(443)) {
         info!("HTTPS gateway skipped because port 443 is already in use");
         return Ok(());
     }
     Services::start_or_restart("localweb-gateway", &gateway, &[])?;
     services::wait_for_unit_active("localweb-gateway", "HTTPS gateway")?;
     Ok(())
+}
+
+/// Returns true when the gateway unit is down and another process owns port
+/// 443, in which case `LocalWeb` keeps serving projects over direct HTTP.
+fn gateway_should_skip(unit_active: bool, port_443_busy: bool) -> bool {
+    !unit_active && port_443_busy
+}
+
+fn port_in_use(port: u16) -> bool {
+    std::net::TcpStream::connect_timeout(
+        &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+        Duration::from_millis(100),
+    )
+    .is_ok()
 }
 
 fn write_routes(state: &State, active: &BTreeSet<String>) -> localweb_core::Result<()> {
@@ -1492,6 +1502,23 @@ mod tests {
         assert_eq!(status, Some(500));
         assert!(!healthy_status(status.unwrap()));
         server.await.unwrap();
+    }
+
+    #[test]
+    fn gateway_is_skipped_only_when_443_is_owned_by_another_stack() {
+        assert!(gateway_should_skip(false, true));
+        assert!(!gateway_should_skip(false, false));
+        assert!(!gateway_should_skip(true, false));
+        assert!(!gateway_should_skip(true, true));
+    }
+
+    #[test]
+    fn port_probe_detects_a_listening_socket() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        assert!(port_in_use(port));
+        drop(listener);
+        assert!(!port_in_use(port));
     }
 
     #[test]

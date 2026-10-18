@@ -119,7 +119,13 @@ try:
                 with opener.open(f"https://{name}.test", timeout=20) as response:
                     body = response.read().decode()
                     assert body == f"8.{minor} database OK", f"https://{name}.test returned {body!r}"
-                assert request("project_get", {"name": name})["running"]
+                status = request("project_get", {"name": name})
+                assert status["running"]
+                web_port = status["project"]["web_port"]
+                assert web_port, "the project has no direct HTTP port"
+                with opener.open(f"http://127.0.0.1:{web_port}/", timeout=20) as response:
+                    body = response.read().decode()
+                    assert body == f"8.{minor} database OK", f"direct HTTP port {web_port} returned {body!r}"
                 try:
                     socket.create_connection(("127.0.0.1", 80), timeout=0.5)
                 except OSError:
