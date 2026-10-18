@@ -30,6 +30,7 @@ All notable changes to this project are documented here. The format follows
 - Native CI pins Rust 1.99.1 and the MCP tests no longer trigger Clippy's `assert_is_empty`, which caused the exit-101 failure in run 39146985057 after the PHP builds.
 - MariaDB and MySQL render their runtime socket into `my.cnf` and the daemon waits for the socket before provisioning projects, so acceptance no longer fails with `ERROR 2002` when the service runs in a private temporary namespace.
 - The daemon logs under its real binary name (`localwebd=info`, overridable with `RUST_LOG`) and keeps serving when a transient accept error occurs, instead of exiting and dropping client connections.
+- Projects running when the daemon is killed are restored on restart without tripping the busy-port preflight, and acceptance now SIGKILLs the daemon and verifies recovery end to end.
 - `localweb data purge` refuses directories that are not owned by the current user and removes user directories without following symlinks.
 - Daemon state changes are transactional: web/database proxy restarts keep the previous proxy until the new configuration passes health checks, `persist_running` failures trigger rollback, stop persists only after all project-owned services stopped, and shutdown preserves the desired state when it cannot stop everything.
 - CI diagnostics now emit timestamped phase markers, per-version PHP configure/make/install logs, and upload a sanitized diagnostics artifact when a native job fails.

@@ -76,7 +76,7 @@ async fn main() -> Result<()> {
         shutdown: Notify::new(),
     });
     for name in restore {
-        if let Err(error) = start_project(&state, &name).await {
+        if let Err(error) = restore_project(&state, &name).await {
             error!(project = %name, %error, "project restore failed");
         }
     }
@@ -382,19 +382,29 @@ fn install_shim(link: &std::path::Path, target: &std::path::Path) -> localweb_co
 
 async fn start_project(state: &Arc<State>, name: &str) -> localweb_core::Result<()> {
     let _operations = state.operations.lock().await;
-    start_project_locked(state, name, false).await
+    start_project_locked(state, name, false, true).await
+}
+
+/// Restarts a project that was running before the daemon restarted.
+///
+/// The preflight that rejects a busy web port is skipped because the daemon's
+/// own nginx or Apache unit may still be serving the port after a crash.
+async fn restore_project(state: &Arc<State>, name: &str) -> localweb_core::Result<()> {
+    let _operations = state.operations.lock().await;
+    start_project_locked(state, name, false, false).await
 }
 
 async fn restart_project(state: &Arc<State>, name: &str) -> localweb_core::Result<()> {
     let _operations = state.operations.lock().await;
     let running = state.running.lock().await.contains(name);
-    start_project_locked(state, name, running).await
+    start_project_locked(state, name, running, !running).await
 }
 
 async fn start_project_locked(
     state: &Arc<State>,
     name: &str,
     restart: bool,
+    preflight_ports: bool,
 ) -> localweb_core::Result<()> {
     let project = find_project(&state.paths, name)?;
     if !project.enabled {
@@ -408,6 +418,7 @@ async fn start_project_locked(
     next.insert(name.to_owned());
     let fresh = !old.contains(name);
     if fresh
+        && preflight_ports
         && let Some(port) = project.web_port
         && !port_available(port)
     {

@@ -55,14 +55,23 @@ def mcp_call(process, payload):
     return json.loads(line)
 
 
+def wait_for_daemon(process):
+    for _ in range(240):
+        if sock.is_socket():
+            try:
+                request("status")
+                return
+            except OSError:
+                pass
+        assert process.poll() is None, "Daemon did not start"
+        time.sleep(0.25)
+    raise AssertionError("Daemon did not accept connections")
+
+
 mcp = None
 daemon = subprocess.Popen([str(binary_dir / "localwebd")], env=env)
 try:
-    for _ in range(120):
-        if sock.is_socket():
-            break
-        assert daemon.poll() is None, "Daemon did not start"
-        time.sleep(0.25)
+    wait_for_daemon(daemon)
     mcp = subprocess.Popen(
         [str(binary_dir / "localweb-mcp")],
         stdin=subprocess.PIPE,
@@ -126,6 +135,21 @@ try:
                 with opener.open(f"http://127.0.0.1:{web_port}/", timeout=20) as response:
                     body = response.read().decode()
                     assert body == f"8.{minor} database OK", f"direct HTTP port {web_port} returned {body!r}"
+                if name == "php8-0-nginx-mariadb":
+                    daemon.kill()
+                    daemon.wait(timeout=30)
+                    daemon = subprocess.Popen([str(binary_dir / "localwebd")], env=env)
+                    wait_for_daemon(daemon)
+                    for _ in range(120):
+                        if request("project_get", {"name": name})["running"]:
+                            break
+                        time.sleep(0.5)
+                    else:
+                        raise AssertionError("the restored project did not become running")
+                    with opener.open(f"https://{name}.test", timeout=20) as response:
+                        body = response.read().decode()
+                        assert body == f"8.{minor} database OK", f"recovered project returned {body!r}"
+                    print("PASS daemon SIGKILL recovery: project restored and serving", flush=True)
                 try:
                     socket.create_connection(("127.0.0.1", 80), timeout=0.5)
                 except OSError:
