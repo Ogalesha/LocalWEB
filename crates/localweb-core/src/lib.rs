@@ -73,6 +73,14 @@ impl LocalWebError {
 /// Result type for `LocalWeb` operations.
 pub type Result<T> = std::result::Result<T, LocalWebError>;
 
+/// Returns the effective POSIX user id of the current process.
+#[cfg(unix)]
+#[must_use]
+pub fn current_uid() -> u32 {
+    // SAFETY: geteuid has no preconditions and always succeeds.
+    unsafe { libc::geteuid() }
+}
+
 /// Per-user directories `LocalWeb` reads and writes.
 #[derive(Debug, Clone)]
 pub struct Paths {

@@ -726,11 +726,8 @@ async fn data_purge(paths: &Paths, dry_run: bool, yes: bool) -> Result<()> {
         bail!("the LocalWeb daemon is running; run `localweb shutdown` before purging data");
     }
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        if std::fs::metadata("/proc/self").is_ok_and(|metadata| metadata.uid() == 0) {
-            bail!("run `localweb data purge` as the account that owns the data, not as root");
-        }
+    if localweb_core::current_uid() == 0 {
+        bail!("run `localweb data purge` as the account that owns the data, not as root");
     }
     if CaPaths::new(paths).cert.is_file() {
         println!(
@@ -743,6 +740,8 @@ async fn data_purge(paths: &Paths, dry_run: bool, yes: bool) -> Result<()> {
         ("state", paths.state.clone()),
         ("runtime", paths.runtime.clone()),
     ];
+    #[cfg(unix)]
+    let current_uid = localweb_core::current_uid();
     let mut existing = Vec::new();
     for (label, path) in targets {
         let metadata = match std::fs::symlink_metadata(&path) {
@@ -763,6 +762,17 @@ async fn data_purge(paths: &Paths, dry_run: bool, yes: bool) -> Result<()> {
                 "refusing to purge {} because it is not a directory",
                 path.display()
             );
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            if metadata.uid() != current_uid {
+                bail!(
+                    "refusing to purge {} because it is owned by uid {}, not by the current user",
+                    path.display(),
+                    metadata.uid()
+                );
+            }
         }
         let size = directory_size(&path);
         existing.push((label, path, size));

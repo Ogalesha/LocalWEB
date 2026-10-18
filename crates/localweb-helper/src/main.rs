@@ -339,7 +339,7 @@ fn install_ca(input: Option<&Path>) -> Result<()> {
         ensure_regular_root_owned(&trust)?;
         if fs::read(&trust)? != pem_bytes {
             bail!(
-                "a different LocalWeb CA is already trusted; refusing to overwrite it.                  Run `localweb ca remove` from the account that installed it after                  confirming no other account still relies on it"
+                "a different LocalWeb CA is already trusted; refusing to overwrite it. Run `localweb ca remove` from the account that installed it after confirming no other account still relies on it"
             );
         }
         store.trust_certificate()?;
