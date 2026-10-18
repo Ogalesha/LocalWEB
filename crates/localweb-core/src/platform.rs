@@ -1,12 +1,23 @@
-//! Native certificate-store integration for supported Linux distributions.
+//! Native certificate-store integration for supported operating systems.
 
 use crate::{LocalWebError, Result};
 use std::{fs, path::Path, process::Command};
+
+/// Common name embedded in every generated `LocalWeb` development CA.
+pub const CA_COMMON_NAME: &str = "LocalWeb Development CA";
+
+#[cfg(target_os = "macos")]
+const MACOS_CERTIFICATE_PATH: &str =
+    "/Library/Application Support/LocalWeb/localweb-development-ca.crt";
+#[cfg(target_os = "macos")]
+const MACOS_KEYCHAIN: &str = "/Library/Keychains/System.keychain";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrustStore {
     Ubuntu,
     Arch,
+    #[cfg(target_os = "macos")]
+    Macos,
 }
 
 impl TrustStore {
@@ -15,7 +26,14 @@ impl TrustStore {
     /// # Errors
     /// Returns an error for an unreadable or unsupported OS definition.
     pub fn detect() -> Result<Self> {
-        Self::from_os_release(&fs::read_to_string("/etc/os-release")?)
+        #[cfg(target_os = "macos")]
+        {
+            Ok(Self::Macos)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Self::from_os_release(&fs::read_to_string("/etc/os-release")?)
+        }
     }
 
     /// Detects the trust-store family from an OS release definition.
@@ -54,34 +72,157 @@ impl TrustStore {
 
     #[must_use]
     pub fn certificate_path(self) -> &'static Path {
-        Path::new(match self {
-            Self::Ubuntu => "/usr/local/share/ca-certificates/localweb-development-ca.crt",
-            Self::Arch => "/etc/ca-certificates/trust-source/anchors/localweb-development-ca.crt",
-        })
+        #[cfg(target_os = "macos")]
+        {
+            let _ = self;
+            Path::new(MACOS_CERTIFICATE_PATH)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Path::new(match self {
+                Self::Ubuntu => "/usr/local/share/ca-certificates/localweb-development-ca.crt",
+                Self::Arch => {
+                    "/etc/ca-certificates/trust-source/anchors/localweb-development-ca.crt"
+                }
+            })
+        }
     }
 
-    /// Updates the native trust database after installing the certificate.
+    /// Adds the installed certificate to the native trust database.
     ///
     /// # Errors
     /// Returns an error if the native trust command fails.
-    pub fn refresh(self) -> Result<()> {
-        let (program, args): (&str, Vec<&str>) = match self {
-            Self::Ubuntu => ("/usr/sbin/update-ca-certificates", vec![]),
-            Self::Arch => ("/usr/bin/trust", vec!["extract-compat"]),
-        };
-        if !Command::new(program).args(args).status()?.success() {
-            return Err(LocalWebError::Service(format!(
-                "{program} failed to update certificate trust"
-            )));
+    pub fn trust_certificate(self) -> Result<()> {
+        #[cfg(target_os = "macos")]
+        {
+            let _ = self;
+            macos_trust()
         }
-        Ok(())
+        #[cfg(not(target_os = "macos"))]
+        {
+            let (program, args): (&str, Vec<&str>) = match self {
+                Self::Ubuntu => ("/usr/sbin/update-ca-certificates", vec![]),
+                Self::Arch => ("/usr/bin/trust", vec!["extract-compat"]),
+            };
+            if !Command::new(program).args(args).status()?.success() {
+                return Err(LocalWebError::Service(format!(
+                    "{program} failed to update certificate trust"
+                )));
+            }
+            Ok(())
+        }
+    }
+
+    /// Removes `LocalWeb`'s certificate from the native trust database.
+    ///
+    /// # Errors
+    /// Returns an error if the native trust command fails.
+    pub fn untrust_certificate(self) -> Result<()> {
+        #[cfg(target_os = "macos")]
+        {
+            let _ = self;
+            macos_untrust()
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            self.trust_certificate()
+        }
     }
 
     #[must_use]
     pub fn trusted(self, certificate: &Path) -> bool {
-        fs::read(certificate).ok().filter(|bytes| !bytes.is_empty())
-            == fs::read(self.certificate_path()).ok()
+        #[cfg(target_os = "macos")]
+        {
+            let Ok(bytes) = fs::read(certificate) else {
+                return false;
+            };
+            if bytes.is_empty() || fs::read(self.certificate_path()).ok() != Some(bytes) {
+                return false;
+            }
+            macos_keychain_contains(certificate)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            fs::read(certificate).ok().filter(|bytes| !bytes.is_empty())
+                == fs::read(self.certificate_path()).ok()
+        }
     }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_trust() -> Result<()> {
+    let certificate = TrustStore::Macos.certificate_path();
+    if macos_keychain_contains(certificate) {
+        return Ok(());
+    }
+    let status = Command::new("/usr/bin/security")
+        .args(["add-trusted-cert", "-d", "-r", "trustRoot", "-k"])
+        .arg(MACOS_KEYCHAIN)
+        .arg(certificate)
+        .status()?;
+    if !status.success() {
+        return Err(LocalWebError::Service(
+            "security add-trusted-cert failed to trust the LocalWeb CA".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn macos_untrust() -> Result<()> {
+    let status = Command::new("/usr/bin/security")
+        .args(["delete-certificate", "-c", CA_COMMON_NAME, MACOS_KEYCHAIN])
+        .status()?;
+    if !status.success() {
+        // `security` exits non-zero when the certificate is already absent.
+        return Ok(());
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn macos_keychain_contains(certificate: &Path) -> bool {
+    let Some(fingerprint) = sha1_fingerprint(certificate) else {
+        return false;
+    };
+    let Ok(output) = Command::new("/usr/bin/security")
+        .args(["find-certificate", "-Z", "-a", "-c", CA_COMMON_NAME])
+        .arg(MACOS_KEYCHAIN)
+        .output()
+    else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.split_once(':'))
+        .any(|(_, value)| normalize_fingerprint(value) == fingerprint)
+}
+
+#[cfg(target_os = "macos")]
+fn sha1_fingerprint(certificate: &Path) -> Option<String> {
+    let output = Command::new("/usr/bin/openssl")
+        .args(["x509", "-noout", "-fingerprint", "-sha1", "-in"])
+        .arg(certificate)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let (_, value) = text.split_once('=')?;
+    Some(normalize_fingerprint(value))
+}
+
+#[cfg(target_os = "macos")]
+fn normalize_fingerprint(value: &str) -> String {
+    value
+        .chars()
+        .filter(char::is_ascii_hexdigit)
+        .collect::<String>()
+        .to_uppercase()
 }
 
 #[cfg(test)]
@@ -98,6 +239,6 @@ mod tests {
         ] {
             assert_eq!(TrustStore::from_os_release(text).unwrap(), expected);
         }
-        assert!(TrustStore::from_os_release("ID=unknown").is_err());
+        TrustStore::from_os_release("ID=unknown").unwrap_err();
     }
 }

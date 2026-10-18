@@ -1,6 +1,11 @@
+mod brand;
+mod icons;
 mod lang;
+mod theme;
+mod widgets;
 
 use eframe::egui::{self, Color32, RichText, Stroke, Vec2};
+use icons::Icon;
 use lang::Lang;
 use localweb_core::{
     CaStatus, Cache, Database, GlobalConfig, NewProject, Paths, Profile, ProjectStatus, Request,
@@ -17,29 +22,42 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+use theme::{
+    ACCENT, ACCENT_SOFT, ACCENT_SOFT_PRESSED, ACCENT_TEXT, BORDER, BORDER_STRONG, CANVAS, DANGER,
+    DANGER_SOFT, FOCUS, INK, INK_MUTED, NAV, NAV_MUTED, RADIUS_CARD, RADIUS_CONTROL, RAIL_WIDTH,
+    STATUS_OFF, SUCCESS, SUCCESS_SOFT, SURFACE, SURFACE_HOVER, SURFACE_MUTED, WARNING,
+    configure_style, medium_family, strong_family,
+};
+use widgets::{
+    Pill, PillKind, callout, card_frame, check_row, empty_card, focus_ring, form_label,
+    icon_button, icon_tile, medium, page_header, rail_item, raised_frame, section_heading,
+    service_chip, state_chip, status_mark, strong, truncate_middle,
+};
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-const CANVAS: Color32 = Color32::from_rgb(247, 245, 239);
-const SURFACE: Color32 = Color32::from_rgb(255, 254, 250);
-const SURFACE_MUTED: Color32 = Color32::from_rgb(240, 241, 236);
-const INK: Color32 = Color32::from_rgb(18, 28, 37);
-const INK_MUTED: Color32 = Color32::from_rgb(82, 94, 105);
-const NAV: Color32 = Color32::from_rgb(23, 35, 31);
-const NAV_MUTED: Color32 = Color32::from_rgb(171, 187, 180);
-const ACCENT: Color32 = Color32::from_rgb(8, 122, 77);
-const ACCENT_SOFT: Color32 = Color32::from_rgb(224, 243, 233);
-const SUCCESS: Color32 = Color32::from_rgb(8, 122, 77);
-const WARNING: Color32 = Color32::from_rgb(154, 91, 10);
-const DANGER: Color32 = Color32::from_rgb(199, 39, 53);
-const BORDER: Color32 = Color32::from_rgb(216, 220, 214);
+/// How long an informational toast stays visible before it fades out.
+const TOAST_LIFETIME: Duration = Duration::from_secs(4);
+/// How long the window may sit idle before the status refreshes again.
+const REFRESH_INTERVAL: Duration = Duration::from_secs(3);
+/// Duration in seconds of the cross-fade applied when the centered view changes.
+const VIEW_FADE_SECONDS: f32 = 0.16;
+/// Repaint cadence while the view cross-fade is still running.
+const FADE_REPAINT_INTERVAL: Duration = Duration::from_millis(16);
+/// Repaint cadence once the interface is fully settled.
+const IDLE_REPAINT_INTERVAL: Duration = Duration::from_millis(250);
+/// Reply budget for interactive daemon requests such as start or stop.
+const DAEMON_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+/// Reply budget for background refreshes that must not block the UI.
+const DAEMON_BACKGROUND_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1_080.0, 720.0])
-            .with_min_inner_size([840.0, 560.0]),
+            .with_inner_size([1_280.0, 800.0])
+            .with_min_inner_size([840.0, 560.0])
+            .with_icon(brand::icon_data()),
         ..Default::default()
     };
     eframe::run_native(
@@ -54,6 +72,7 @@ enum View {
     Dashboard,
     Projects,
     AddProject,
+    Settings,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -68,7 +87,6 @@ enum Connection {
 enum EnvironmentState {
     Checking,
     Ready,
-    GatewayStopped,
     Unavailable,
     Stopped,
 }
@@ -139,10 +157,12 @@ struct LocalWebApp {
     projects_loaded: bool,
     projects_error: Option<String>,
     ca_error: Option<String>,
+    mcp_path: Option<PathBuf>,
     project_search: String,
     form: AddProjectForm,
     picker: Option<DirectoryPicker>,
     remove_confirmation: Option<String>,
+    stop_confirmation: bool,
     details: Option<String>,
     environment: Option<BTreeMap<String, String>>,
     environment_error: Option<String>,
@@ -152,6 +172,8 @@ struct LocalWebApp {
     daemon_transition: Option<DaemonTransition>,
     project_transition: Option<(String, ProjectTransition)>,
     last_refresh: Instant,
+    last_view: View,
+    view_changed_at: Option<Instant>,
 }
 
 impl LocalWebApp {
@@ -185,10 +207,12 @@ impl LocalWebApp {
             projects_loaded: false,
             projects_error: None,
             ca_error: None,
+            mcp_path: find_program("localweb-mcp"),
             project_search: String::new(),
             form: AddProjectForm::default(),
             picker: None,
             remove_confirmation: None,
+            stop_confirmation: false,
             details: None,
             environment: None,
             environment_error: None,
@@ -198,6 +222,8 @@ impl LocalWebApp {
             daemon_transition: None,
             project_transition: None,
             last_refresh: Instant::now(),
+            last_view: View::Dashboard,
+            view_changed_at: None,
         }
     }
 
@@ -228,13 +254,14 @@ impl LocalWebApp {
                 .map_err(|error| error.to_string())
                 .and_then(|runtime| {
                     runtime.block_on(async {
-                        let seconds = if action.background() { 5 } else { 120 };
-                        tokio::time::timeout(
-                            Duration::from_secs(seconds),
-                            send_request(&paths, request),
-                        )
+                        let reply_timeout = if action.background() {
+                            DAEMON_BACKGROUND_TIMEOUT
+                        } else {
+                            DAEMON_REQUEST_TIMEOUT
+                        };
+                        tokio::time::timeout(reply_timeout, send_request(&paths, request))
                         .await
-                        .map_err(|_| {
+                        .map_err(|_elapsed| {
                             "The daemon did not reply in time. Refresh the state before retrying."
                                 .to_owned()
                         })?
@@ -360,6 +387,7 @@ impl LocalWebApp {
                 self.connection = Connection::Stopped;
                 self.daemon_online = false;
                 self.status = None;
+                self.stop_confirmation = false;
                 self.projects
                     .iter_mut()
                     .for_each(|project| project.running = false);
@@ -475,145 +503,181 @@ impl LocalWebApp {
 
     #[expect(
         clippy::too_many_lines,
-        reason = "sidebar owns the navigation and the fixed-height footer layout"
+        reason = "sidebar owns the navigation rail and its docked footer"
     )]
     fn sidebar(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang;
+        let status_label = if self.connection == Connection::Checking {
+            lang.checking_status()
+        } else if self.daemon_online {
+            lang.nav_running()
+        } else if self.connection != Connection::Stopped {
+            lang.daemon_unavailable()
+        } else {
+            lang.nav_stopped()
+        };
         egui::Panel::left("navigation")
-            .exact_size(224.0)
+            .exact_size(RAIL_WIDTH)
             .resizable(false)
             .frame(
                 egui::Frame::NONE
                     .fill(NAV)
-                    .inner_margin(egui::Margin::symmetric(18, 22)),
+                    .inner_margin(egui::Margin::symmetric(16, 20)),
             )
             .show(ui, |ui| {
-                let sidebar_size = Vec2::new(
-                    ui.available_width(),
-                    (ui.ctx().content_rect().height() - 44.0).max(480.0),
-                );
-                ui.allocate_ui_with_layout(
-                    sidebar_size,
-                    egui::Layout::top_down(egui::Align::LEFT),
-                    |ui| {
-                        ui.visuals_mut().widgets.active.bg_stroke = Stroke::new(2.0, CANVAS);
-                        ui.horizontal(|ui| {
-                            brand_mark(ui, 26.0);
-                            ui.add_space(5.0);
-                            ui.label(
-                                RichText::new("LocalWeb")
-                                    .size(22.0)
-                                    .strong()
-                                    .color(Color32::WHITE),
-                            );
-                        });
-                        ui.add_space(6.0);
-                        ui.label(
-                            RichText::new(lang.nav_tagline())
-                                .size(12.0)
-                                .color(NAV_MUTED),
-                        );
-                        ui.add_space(30.0);
-                        nav_button(ui, &mut self.view, View::Dashboard, lang.nav_dashboard());
-                        ui.add_space(5.0);
-                        nav_button(ui, &mut self.view, View::Projects, lang.nav_projects());
-                        ui.add_space(5.0);
-                        nav_button(ui, &mut self.view, View::AddProject, lang.nav_add());
-                        let panel_rect = ui.max_rect();
-                        let footer_height = 196.0;
-                        let footer_rect = egui::Rect::from_min_size(
-                            egui::pos2(panel_rect.left(), panel_rect.bottom() - footer_height),
-                            Vec2::new(panel_rect.width(), footer_height),
-                        );
-                        ui.scope_builder(egui::UiBuilder::new().max_rect(footer_rect), |ui| {
-                            ui.vertical(|ui| {
-                                for (code, label) in
-                                    [("en", "English"), ("it", "Italiano"), ("sq", "Shqip")]
-                                {
-                                    let selected = self.lang.code() == code;
-                                    if ui
-                                        .add_sized(
-                                            [ui.available_width(), 36.0],
-                                            egui::Button::new(
-                                                RichText::new(label).size(12.0).color(
-                                                    if selected {
-                                                        Color32::WHITE
-                                                    } else {
-                                                        NAV_MUTED
-                                                    },
-                                                ),
-                                            )
-                                            .selected(selected)
-                                            .fill(if selected {
-                                                ACCENT
-                                            } else {
-                                                Color32::TRANSPARENT
-                                            })
-                                            .corner_radius(6.0),
-                                        )
-                                        .clicked()
-                                    {
-                                        self.lang = Lang::from_code(code);
-                                        if let Some(paths) = &self.paths {
-                                            self.lang.save(&paths.config);
-                                        }
+                ui.horizontal(|ui| {
+                    brand::app_icon(ui, 26.0);
+                    ui.add_space(6.0);
+                    ui.label(
+                        RichText::new("LocalWeb")
+                            .size(21.0)
+                            .family(strong_family())
+                            .color(Color32::WHITE),
+                    );
+                });
+                ui.add_space(28.0);
+                if rail_item(
+                    ui,
+                    lang.nav_dashboard(),
+                    Icon::Overview,
+                    self.view == View::Dashboard,
+                )
+                .clicked()
+                {
+                    self.view = View::Dashboard;
+                }
+                ui.add_space(4.0);
+                if rail_item(
+                    ui,
+                    lang.nav_projects(),
+                    Icon::Folder,
+                    matches!(self.view, View::Projects | View::AddProject),
+                )
+                .clicked()
+                {
+                    self.view = View::Projects;
+                }
+                ui.add_space(4.0);
+                if rail_item(
+                    ui,
+                    lang.nav_settings(),
+                    Icon::Settings,
+                    self.view == View::Settings,
+                )
+                .clicked()
+                {
+                    self.view = View::Settings;
+                }
+                egui::Panel::bottom("rail_footer")
+                    .frame(egui::Frame::NONE)
+                    .show_separator_line(false)
+                    .show(ui, |ui| {
+                        ui.add_space(14.0);
+                        let mut next_lang = self.lang;
+                        ui.scope(|ui| {
+                            let widgets = &mut ui.style_mut().visuals.widgets;
+                            widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
+                            widgets.inactive.bg_stroke = Stroke::NONE;
+                            widgets.inactive.fg_stroke.color = NAV_MUTED;
+                            widgets.hovered.weak_bg_fill = theme::NAV_HOVER;
+                            widgets.hovered.bg_stroke = Stroke::NONE;
+                            widgets.hovered.fg_stroke.color = Color32::WHITE;
+                            widgets.active.weak_bg_fill = theme::ACCENT_HOVER;
+                            widgets.active.bg_stroke = Stroke::NONE;
+                            widgets.active.fg_stroke.color = INK;
+                            widgets.open.weak_bg_fill = ACCENT;
+                            widgets.open.bg_stroke = Stroke::NONE;
+                            widgets.open.fg_stroke.color = INK;
+                            ui.spacing_mut().interact_size.y = 36.0;
+                            let mut popup_style = (*ui.ctx().style_of(egui::Theme::Light)).clone();
+                            popup_style.visuals.window_fill = theme::SURFACE;
+                            popup_style.visuals.panel_fill = theme::SURFACE;
+                            popup_style.visuals.window_stroke =
+                                Stroke::new(1.0, theme::BORDER_STRONG);
+                            popup_style.visuals.widgets.hovered.bg_fill = SURFACE_MUTED;
+                            popup_style.visuals.widgets.hovered.weak_bg_fill = SURFACE_MUTED;
+                            popup_style.visuals.widgets.hovered.bg_stroke =
+                                Stroke::new(1.0, theme::BORDER_STRONG);
+                            popup_style.visuals.widgets.hovered.fg_stroke.color = INK;
+                            popup_style.visuals.widgets.active.bg_fill = ACCENT_SOFT_PRESSED;
+                            popup_style.visuals.widgets.active.weak_bg_fill = ACCENT_SOFT_PRESSED;
+                            popup_style.visuals.widgets.active.bg_stroke =
+                                Stroke::new(1.0, theme::FOCUS);
+                            popup_style.visuals.widgets.active.fg_stroke.color = INK;
+                            popup_style.visuals.selection.bg_fill = ACCENT_SOFT;
+                            popup_style.visuals.selection.stroke = Stroke::new(1.0, theme::FOCUS);
+                            egui::ComboBox::from_id_salt("language_select")
+                                .selected_text(self.lang.initials())
+                                .width(ui.available_width())
+                                .popup_style(popup_style.into())
+                                .show_ui(ui, |ui| {
+                                    for lang in Lang::ALL {
+                                        ui.selectable_value(&mut next_lang, lang, lang.initials());
                                     }
-                                }
-                            });
-                            ui.add_space(4.0);
-                            ui.label(
+                                });
+                        });
+                        if next_lang != self.lang {
+                            self.lang = next_lang;
+                            if let Some(paths) = &self.paths {
+                                self.lang.save(&paths.config);
+                            }
+                        }
+                        ui.add_space(14.0);
+                        ui.horizontal(|ui| {
+                            status_mark(
+                                ui,
+                                if self.daemon_online {
+                                    SUCCESS
+                                } else {
+                                    STATUS_OFF
+                                },
+                            );
+                            ui.label(medium(status_label).size(12.5).color(
+                                if self.daemon_online {
+                                    Color32::WHITE
+                                } else {
+                                    NAV_MUTED
+                                },
+                            ));
+                        });
+                        ui.add_space(8.0);
+                        ui.add(
+                            egui::Label::new(
                                 RichText::new(lang.nav_close_note())
                                     .size(12.0)
                                     .color(NAV_MUTED),
-                            );
-                            ui.add_space(8.0);
-                            ui.horizontal(|ui| {
-                                status_dot(ui, self.daemon_online);
-                                ui.label(
-                                    RichText::new(if self.connection == Connection::Checking {
-                                        lang.checking_status()
-                                    } else if self.daemon_online {
-                                        lang.nav_running()
-                                    } else if self.connection != Connection::Stopped {
-                                        lang.daemon_unavailable()
-                                    } else {
-                                        lang.nav_stopped()
-                                    })
-                                    .strong()
-                                    .color(Color32::WHITE),
-                                );
-                            });
-                            ui.add_space(12.0);
-                            ui.separator();
-                        });
-                    },
-                );
+                            )
+                            .wrap(),
+                        );
+                    });
             });
     }
 
-    fn global_action(&mut self, ui: &mut egui::Ui) {
+    fn daemon_action(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang;
         if self.daemon_online {
             let stopping = matches!(self.daemon_transition, Some(DaemonTransition::Stopping));
-            let stop = egui::Button::new(
-                RichText::new(if stopping {
+            let response = Pill::new(
+                if stopping {
                     lang.op_stopping()
                 } else {
                     lang.stop_localweb()
-                })
-                .color(Color32::WHITE)
-                .strong(),
+                },
+                PillKind::Danger,
             )
-            .fill(DANGER)
-            .corner_radius(9.0)
-            .min_size(Vec2::new(154.0, 42.0));
-            if ui
-                .add_enabled(self.pending == 0 && !stopping, stop)
-                .on_hover_text(lang.stop_hint())
-                .clicked()
-            {
-                self.daemon_transition = Some(DaemonTransition::Stopping);
-                self.request(Action::Shutdown, Request::Shutdown);
+            .icon(Icon::Stop)
+            .min_width(158.0)
+            .height(40.0)
+            .enabled(self.pending == 0 && !stopping)
+            .show(ui)
+            .on_hover_text(lang.stop_hint());
+            if response.clicked() {
+                if self.projects.iter().any(|project| project.running) {
+                    self.stop_confirmation = true;
+                } else {
+                    self.daemon_transition = Some(DaemonTransition::Stopping);
+                    self.request(Action::Shutdown, Request::Shutdown);
+                }
             }
         } else {
             let label = match self.daemon_transition {
@@ -623,15 +687,17 @@ impl LocalWebApp {
                 None if self.setup_complete() => lang.start_localweb(),
                 None => lang.configure_localweb(),
             };
-            if ui
-                .add_enabled(
+            let response = Pill::new(label, PillKind::Primary)
+                .icon(Icon::Play)
+                .min_width(158.0)
+                .height(40.0)
+                .enabled(
                     self.connection != Connection::Checking
                         && self.pending == 0
                         && self.daemon_transition.is_none(),
-                    primary_button(label),
                 )
-                .clicked()
-            {
+                .show(ui);
+            if response.clicked() {
                 if self.setup_complete() {
                     self.start_daemon();
                 } else {
@@ -645,54 +711,77 @@ impl LocalWebApp {
         &mut self,
         ui: &mut egui::Ui,
         title: &str,
-        description: &str,
         show_add_project: bool,
+        show_global: bool,
     ) {
         let lang = self.lang;
+        let mut open_add = false;
         if ui.available_width() < 700.0 {
             ui.vertical(|ui| {
-                page_header(ui, title, description);
-                ui.add_space(10.0);
-                ui.horizontal(|ui| {
-                    if show_add_project && ui.add(primary_button(lang.nav_add())).clicked() {
-                        self.view = View::AddProject;
-                    }
-                    self.global_action(ui);
-                });
+                page_header(ui, title);
+                if show_add_project || show_global {
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        if show_add_project {
+                            open_add |= Pill::new(
+                                lang.nav_add(),
+                                if self.daemon_online {
+                                    PillKind::Primary
+                                } else {
+                                    PillKind::Secondary
+                                },
+                            )
+                            .icon(Icon::Plus)
+                            .enabled(self.daemon_online)
+                            .show(ui)
+                            .clicked();
+                        }
+                        if show_global {
+                            self.daemon_action(ui);
+                        }
+                    });
+                }
             });
         } else {
             ui.horizontal(|ui| {
-                page_header(ui, title, description);
+                page_header(ui, title);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    self.global_action(ui);
+                    if show_global {
+                        self.daemon_action(ui);
+                    }
                     if show_add_project {
                         ui.add_space(8.0);
-                        if ui.add(primary_button(lang.nav_add())).clicked() {
-                            self.view = View::AddProject;
-                        }
+                        open_add |= Pill::new(
+                            lang.nav_add(),
+                            if self.daemon_online {
+                                PillKind::Primary
+                            } else {
+                                PillKind::Secondary
+                            },
+                        )
+                        .icon(Icon::Plus)
+                        .enabled(self.daemon_online)
+                        .show(ui)
+                        .clicked();
                     }
                 });
             });
+        }
+        if open_add {
+            self.view = View::AddProject;
         }
     }
 
     fn dashboard(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang;
-        self.page_toolbar(ui, lang.dash_title(), lang.dash_sub(), false);
+        self.page_toolbar(ui, lang.dash_title(), false, self.daemon_online);
         ui.add_space(22.0);
 
         self.environment_overview(ui);
 
         ui.add_space(26.0);
-        ui.horizontal(|ui| {
-            ui.heading(RichText::new(lang.nav_projects()).size(25.0).color(INK));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.add(primary_button(lang.nav_add())).clicked() {
-                    self.view = View::AddProject;
-                }
-            });
-        });
-        ui.add_space(10.0);
+        ui.label(strong(lang.nav_projects()).size(19.0).color(INK));
+        ui.add_space(12.0);
         if !self.projects_loaded {
             ui.label(if self.daemon_online {
                 lang.loading_projects()
@@ -700,63 +789,36 @@ impl LocalWebApp {
                 lang.stopped_body()
             });
         } else if self.projects.is_empty() {
-            empty_projects(ui, lang, self.daemon_online);
+            if empty_card(
+                ui,
+                Icon::Folder,
+                lang.empty_title(),
+                if self.daemon_online {
+                    lang.empty_online()
+                } else {
+                    lang.empty_offline()
+                },
+                self.daemon_online.then_some((lang.nav_add(), Icon::Plus)),
+            ) {
+                self.view = View::AddProject;
+            }
         } else {
             let preview = self.projects.iter().take(5).cloned().collect::<Vec<_>>();
-            if ui.available_width() >= 1_120.0 {
-                project_ledger_header(ui, lang);
-            }
-            for project in preview {
-                self.project_ledger_row(ui, &project);
-            }
-            if self.projects.len() > 5 && ui.button(lang.view_all_projects()).clicked() {
-                self.view = View::Projects;
+            self.project_ledger(ui, &preview);
+            if self.projects.len() > 5 {
+                ui.add_space(6.0);
+                if Pill::new(lang.view_all_projects(), PillKind::Ghost)
+                    .show(ui)
+                    .clicked()
+                {
+                    self.view = View::Projects;
+                }
             }
         }
 
-        if self.daemon_online && self.ca.as_ref().is_some_and(|ca| !ca.trusted) {
-            ui.add_space(16.0);
-            callout(ui, WARNING, |ui| {
-                ui.vertical(|ui| {
-                    ui.label(RichText::new(lang.ca_callout_title()).strong());
-                    ui.label(lang.ca_callout_body());
-                    if ui
-                        .add_enabled(self.pending == 0, secondary_button(lang.install_ca()))
-                        .clicked()
-                    {
-                        self.install_ca();
-                    }
-                });
-            });
-        }
-        ui.add_space(12.0);
-        ui.horizontal_wrapped(|ui| {
-            if ui
-                .add_enabled(
-                    self.background_pending == 0,
-                    secondary_button(lang.refresh()),
-                )
-                .clicked()
-            {
-                self.refresh_all();
-            }
-            if ui
-                .add_enabled(
-                    self.pending == 0 && self.daemon_online,
-                    secondary_button(lang.sync_domains()),
-                )
-                .clicked()
-            {
-                self.sync_hosts();
-            }
-            if ui
-                .add_enabled(self.pending == 0, secondary_button(lang.repair_setup()))
-                .clicked()
-            {
-                self.setup();
-            }
-        });
-        if let Some(error) = &self.ca_error {
+        if self.daemon_online
+            && let Some(error) = &self.ca_error
+        {
             ui.label(lang.ca_load_failed());
             ui.collapsing(lang.technical_details(), |ui| {
                 ui.label(error);
@@ -764,109 +826,118 @@ impl LocalWebApp {
         }
     }
 
-    fn environment_overview(&self, ui: &mut egui::Ui) {
+    fn environment_overview(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang;
-        let gateway_running = self
-            .status
-            .as_ref()
-            .is_some_and(|status| self.daemon_online && status.gateway_running);
-        let active = self
-            .projects
-            .iter()
-            .filter(|project| project.running)
-            .count();
-        let supervised = self
-            .projects
-            .iter()
-            .filter(|project| project.project.supervisor.enabled)
-            .count();
-        let (ca_label, ca_active) = match self.ca.as_ref() {
-            Some(ca) if ca.trusted => (lang.ca_trusted(), true),
-            Some(ca) if ca.exists => (lang.ca_pending(), false),
-            Some(_) => (lang.ca_missing(), false),
-            None => (lang.checking_status(), false),
+        let state = match self.connection {
+            Connection::Checking => EnvironmentState::Checking,
+            Connection::Unavailable => EnvironmentState::Unavailable,
+            Connection::Stopped => EnvironmentState::Stopped,
+            Connection::Connected => EnvironmentState::Ready,
         };
-        environment_banner(
-            ui,
-            lang,
-            match self.connection {
-                Connection::Checking => EnvironmentState::Checking,
-                Connection::Unavailable => EnvironmentState::Unavailable,
-                Connection::Stopped => EnvironmentState::Stopped,
-                Connection::Connected if gateway_running => EnvironmentState::Ready,
-                Connection::Connected => EnvironmentState::GatewayStopped,
-            },
-            active,
-            |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    service_card(
-                        ui,
-                        Lang::svc_daemon(),
-                        if self.connection == Connection::Checking {
-                            lang.checking_status()
-                        } else if self.daemon_online {
-                            lang.val_running()
-                        } else if self.connection != Connection::Stopped {
-                            lang.daemon_unavailable()
-                        } else {
-                            lang.val_stopped()
-                        },
-                        self.daemon_online,
-                    );
-                    service_card(
-                        ui,
-                        Lang::svc_gateway(),
-                        if gateway_running {
-                            lang.gateway_on()
-                        } else {
-                            lang.val_stopped()
-                        },
-                        gateway_running,
-                    );
-                    service_card(ui, Lang::svc_ca(), ca_label, ca_active);
-                    service_card(
-                        ui,
-                        lang.svc_projects(),
-                        &lang.projects_summary(active, self.projects.len()),
-                        active > 0,
-                    );
-                    service_card(
-                        ui,
-                        lang.configured_workers(),
-                        &lang.supervised_summary(supervised),
-                        false,
-                    );
-                });
-            },
-        );
-    }
-
-    fn projects(&mut self, ui: &mut egui::Ui) {
-        let lang = self.lang;
-        self.page_toolbar(ui, lang.projects_title(), lang.projects_sub(), true);
-        ui.add_space(22.0);
-        if !self.daemon_online {
-            callout(ui, DANGER, |ui| {
-                ui.vertical(|ui| {
-                    ui.label(
-                        RichText::new(if self.connection == Connection::Checking {
-                            lang.checking_status()
-                        } else if self.connection == Connection::Stopped {
-                            lang.stopped_title()
-                        } else {
-                            lang.daemon_unavailable()
-                        })
-                        .strong(),
-                    );
-                    ui.label(lang.stopped_body());
+        let ca_untrusted = self.daemon_online
+            && matches!(state, EnvironmentState::Ready)
+            && self.ca.as_ref().is_some_and(|ca| !ca.trusted);
+        let (mark_icon, mark_bg, mark_text) = if ca_untrusted {
+            (Icon::Warning, WARNING, Color32::WHITE)
+        } else {
+            match state {
+                EnvironmentState::Ready => (Icon::Check, SUCCESS, Color32::WHITE),
+                EnvironmentState::Unavailable => (Icon::Warning, DANGER, Color32::WHITE),
+                EnvironmentState::Checking | EnvironmentState::Stopped => {
+                    (Icon::Minus, SURFACE_MUTED, INK_MUTED)
+                }
+            }
+        };
+        let ca_installable =
+            self.daemon_online && self.ca.as_ref().is_some_and(|ca| ca.exists && !ca.trusted);
+        let (title, body) = if ca_untrusted {
+            (lang.ca_callout_title(), lang.ca_callout_body())
+        } else {
+            match state {
+                EnvironmentState::Checking => (lang.checking_status(), lang.loading_projects()),
+                EnvironmentState::Ready => (lang.env_on(), lang.env_on_body()),
+                EnvironmentState::Stopped => (lang.env_off(), lang.env_off_body()),
+                EnvironmentState::Unavailable => (lang.daemon_unavailable(), lang.env_off_body()),
+            }
+        };
+        raised_frame()
+            .inner_margin(egui::Margin::symmetric(24, 20))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    icon_tile(ui, mark_icon, mark_bg, mark_text, 52.0);
+                    ui.add_space(4.0);
+                    let has_action = !self.daemon_online || ca_installable;
+                    let right_width = if has_action { 190.0 } else { 0.0 };
+                    let text_width = (ui.available_width() - right_width).max(200.0);
+                    ui.allocate_ui(Vec2::new(text_width, 0.0), |ui| {
+                        ui.set_min_width(text_width);
+                        ui.vertical(|ui| {
+                            ui.label(strong(title).size(22.0).color(INK));
+                            ui.add(
+                                egui::Label::new(RichText::new(body).size(13.5).color(INK_MUTED))
+                                    .wrap(),
+                            );
+                        });
+                    });
+                    if !self.daemon_online {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            self.daemon_action(ui);
+                        });
+                    } else if ca_installable {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if Pill::new(lang.install_ca(), PillKind::Primary)
+                                .icon(Icon::Check)
+                                .height(36.0)
+                                .show(ui)
+                                .clicked()
+                            {
+                                self.install_ca();
+                            }
+                        });
+                    }
                 });
             });
-            if !self.projects_loaded {
-                return;
-            }
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the view owns the search card, empty state and the responsive ledger"
+    )]
+    fn projects(&mut self, ui: &mut egui::Ui) {
+        let lang = self.lang;
+        self.page_toolbar(
+            ui,
+            lang.projects_title(),
+            !(self.projects_loaded && self.projects.is_empty()),
+            true,
+        );
+        ui.add_space(22.0);
+        if !self.daemon_online {
+            callout(ui, Icon::Warning, |ui| {
+                ui.vertical(|ui| {
+                    ui.label(strong(if self.connection == Connection::Checking {
+                        lang.checking_status()
+                    } else if self.connection == Connection::Stopped {
+                        lang.stopped_title()
+                    } else {
+                        lang.daemon_unavailable()
+                    }));
+                    ui.label(RichText::new(lang.stopped_body()).color(INK_MUTED));
+                });
+            });
+            ui.add_space(14.0);
         }
         if !self.projects_loaded {
-            ui.label(lang.loading_projects());
+            if self.daemon_online {
+                if let Some(error) = &self.projects_error {
+                    ui.label(lang.projects_load_failed());
+                    ui.collapsing(lang.technical_details(), |ui| {
+                        ui.label(error);
+                    });
+                } else {
+                    ui.label(lang.loading_projects());
+                }
+            }
             return;
         }
         if let Some(error) = &self.projects_error {
@@ -875,35 +946,53 @@ impl LocalWebApp {
                 ui.label(error);
             });
         }
-        egui::Frame::NONE
-            .fill(SURFACE)
-            .stroke(Stroke::new(1.0, BORDER))
-            .corner_radius(9.0)
-            .inner_margin(egui::Margin::symmetric(12, 8))
-            .show(ui, |ui| {
-                let label = ui.label(lang.search_projects());
-                ui.horizontal_wrapped(|ui| {
-                    search_mark(ui);
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.project_search)
-                            .desired_width(ui.available_width().min(320.0) - 60.0)
-                            .hint_text(lang.search_hint()),
-                    )
-                    .labelled_by(label.id);
-                    if !self.project_search.is_empty() && ui.button(lang.clear_search()).clicked() {
-                        self.project_search.clear();
-                    }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(
-                            RichText::new(lang.configured_count(self.projects.len()))
-                                .color(INK_MUTED),
-                        );
+        let show_search = self.projects.len() > 5 || !self.project_search.is_empty();
+        if show_search {
+            card_frame()
+                .inner_margin(egui::Margin::symmetric(14, 8))
+                .show(ui, |ui| {
+                    let label = ui.label(
+                        RichText::new(lang.search_projects())
+                            .size(12.0)
+                            .color(INK_MUTED),
+                    );
+                    ui.horizontal(|ui| {
+                        let (rect, _) =
+                            ui.allocate_exact_size(Vec2::splat(18.0), egui::Sense::hover());
+                        icons::paint(ui.painter(), rect, Icon::Search, INK_MUTED, 1.5);
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.project_search)
+                                .frame(egui::Frame::NONE)
+                                .desired_width(ui.available_width().min(320.0) - 60.0)
+                                .hint_text(lang.search_hint()),
+                        )
+                        .labelled_by(label.id);
+                        if !self.project_search.is_empty()
+                            && Pill::new(lang.clear_search(), PillKind::Ghost)
+                                .height(36.0)
+                                .show(ui)
+                                .clicked()
+                        {
+                            self.project_search.clear();
+                        }
                     });
                 });
-            });
-        ui.add_space(14.0);
+            ui.add_space(14.0);
+        }
         if self.projects.is_empty() {
-            empty_projects(ui, lang, true);
+            if empty_card(
+                ui,
+                Icon::Folder,
+                lang.empty_title(),
+                if self.daemon_online {
+                    lang.empty_online()
+                } else {
+                    lang.empty_offline()
+                },
+                self.daemon_online.then_some((lang.nav_add(), Icon::Plus)),
+            ) {
+                self.view = View::AddProject;
+            }
             return;
         }
         let needle = self.project_search.trim().to_lowercase();
@@ -926,60 +1015,320 @@ impl LocalWebApp {
             .collect::<Vec<_>>();
         if projects.is_empty() {
             ui.label(lang.no_search_results(&self.project_search));
+            return;
+        }
+        if show_search {
+            ui.label(
+                RichText::new(lang.projects_summary(
+                    projects.iter().filter(|item| item.running).count(),
+                    projects.len(),
+                ))
+                .color(INK_MUTED),
+            );
+            ui.add_space(6.0);
+        }
+        self.project_ledger(ui, &projects);
+    }
+
+    fn settings(&mut self, ui: &mut egui::Ui) {
+        let lang = self.lang;
+        self.page_toolbar(ui, lang.nav_settings(), false, false);
+        ui.add_space(22.0);
+        self.settings_mcp(ui);
+        ui.add_space(24.0);
+        self.settings_environment(ui);
+        ui.add_space(24.0);
+        self.settings_maintenance(ui);
+        ui.add_space(20.0);
+        ui.label(
+            RichText::new(format!("LocalWeb {}", env!("CARGO_PKG_VERSION")))
+                .size(11.5)
+                .color(INK_MUTED),
+        );
+    }
+
+    fn settings_mcp(&mut self, ui: &mut egui::Ui) {
+        let lang = self.lang;
+        section_heading(ui, lang.settings_mcp_title(), lang.settings_mcp_body());
+        ui.add_space(10.0);
+        card_frame()
+            .inner_margin(egui::Margin::symmetric(20, 18))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    if self.mcp_path.is_some() {
+                        icon_tile(ui, Icon::Terminal, ACCENT_SOFT, ACCENT_TEXT, 42.0);
+                    } else {
+                        icon_tile(ui, Icon::Warning, DANGER_SOFT, DANGER, 42.0);
+                    }
+                    ui.add_space(4.0);
+                    ui.vertical(|ui| {
+                        ui.label(strong("localweb-mcp").size(15.0).color(INK));
+                        if let Some(path) = &self.mcp_path {
+                            let path = path.display().to_string();
+                            ui.label(
+                                RichText::new(truncate_middle(&path, 58))
+                                    .monospace()
+                                    .size(11.5)
+                                    .color(INK_MUTED),
+                            )
+                            .on_hover_text(&path);
+                        } else {
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(lang.settings_mcp_missing())
+                                        .size(12.5)
+                                        .color(DANGER),
+                                )
+                                .wrap(),
+                            );
+                        }
+                    });
+                });
+                ui.add_space(12.0);
+                egui::Frame::NONE
+                    .fill(SURFACE_MUTED)
+                    .stroke(Stroke::new(1.0, BORDER))
+                    .corner_radius(RADIUS_CONTROL)
+                    .inner_margin(egui::Margin::symmetric(14, 12))
+                    .show(ui, |ui| {
+                        ui.set_min_width((ui.available_width() - 28.0).max(260.0));
+                        ui.label(
+                            RichText::new(mcp_configuration())
+                                .monospace()
+                                .size(12.0)
+                                .color(INK),
+                        );
+                    });
+                ui.add_space(12.0);
+                if Pill::new(lang.settings_copy_mcp(), PillKind::Secondary)
+                    .icon(Icon::Copy)
+                    .height(36.0)
+                    .show(ui)
+                    .clicked()
+                {
+                    ui.ctx().copy_text(mcp_configuration().to_owned());
+                    self.notice = Some(Notice::success(lang.settings_copied()));
+                }
+            });
+    }
+
+    fn settings_environment(&mut self, ui: &mut egui::Ui) {
+        let lang = self.lang;
+        section_heading(
+            ui,
+            lang.settings_environment_title(),
+            lang.settings_read_only(),
+        );
+        ui.add_space(10.0);
+        let config = self.global_config();
+        let suffix = config.general.domain_suffix.trim_start_matches('.');
+        let scheme = if config.general.https {
+            "https"
         } else {
-            ui.label(lang.projects_summary(
-                projects.iter().filter(|item| item.running).count(),
-                projects.len(),
-            ));
-        }
-        if ui.available_width() >= 1_120.0 {
-            project_ledger_header(ui, lang);
-        }
-        for item in projects {
-            self.project_ledger_row(ui, &item);
+            "http"
+        };
+        let example = if suffix.is_empty() {
+            format!("{scheme}://my-project")
+        } else {
+            format!("{scheme}://my-project.{suffix}")
+        };
+        let defaults = format!(
+            "{} · PHP {} · {} · {}",
+            web_label(config.defaults.web_server),
+            config.defaults.php,
+            lang.database_name(config.defaults.database),
+            lang.cache_name(config.defaults.cache)
+        );
+        card_frame()
+            .inner_margin(egui::Margin::symmetric(20, 18))
+            .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                egui::Grid::new("settings_environment")
+                    .num_columns(2)
+                    .spacing([28.0, 12.0])
+                    .show(ui, |ui| {
+                        settings_label(ui, lang.settings_domain_suffix());
+                        ui.label(
+                            RichText::new(if suffix.is_empty() {
+                                "—".to_owned()
+                            } else {
+                                format!(".{suffix}")
+                            })
+                            .size(13.5)
+                            .color(INK),
+                        );
+                        ui.end_row();
+
+                        settings_label(ui, lang.settings_example_url());
+                        ui.label(
+                            RichText::new(example)
+                                .monospace()
+                                .size(12.5)
+                                .color(ACCENT_TEXT),
+                        );
+                        ui.end_row();
+
+                        settings_label(ui, lang.settings_defaults());
+                        ui.label(RichText::new(defaults).size(13.0).color(INK));
+                        ui.end_row();
+
+                        settings_label(ui, lang.settings_config_folder());
+                        if let Some(paths) = &self.paths {
+                            let path = paths.config.display().to_string();
+                            ui.label(
+                                RichText::new(truncate_middle(&path, 54))
+                                    .monospace()
+                                    .size(11.5)
+                                    .color(INK_MUTED),
+                            )
+                            .on_hover_text(path);
+                        } else {
+                            ui.label(RichText::new("—").size(13.0).color(INK_MUTED));
+                        }
+                        ui.end_row();
+                    });
+            });
+    }
+
+    fn settings_maintenance(&mut self, ui: &mut egui::Ui) {
+        let lang = self.lang;
+        ui.label(strong(lang.advanced()).size(18.0).color(INK));
+        ui.add_space(10.0);
+        card_frame()
+            .inner_margin(egui::Margin::symmetric(20, 18))
+            .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                ui.horizontal_wrapped(|ui| {
+                    if Pill::new(lang.refresh(), PillKind::Secondary)
+                        .icon(Icon::Refresh)
+                        .height(36.0)
+                        .enabled(self.background_pending == 0 && self.paths.is_some())
+                        .show(ui)
+                        .clicked()
+                    {
+                        self.refresh_all();
+                    }
+                    if Pill::new(lang.sync_domains(), PillKind::Secondary)
+                        .icon(Icon::Globe)
+                        .height(36.0)
+                        .enabled(self.pending == 0)
+                        .show(ui)
+                        .clicked()
+                    {
+                        self.sync_hosts();
+                    }
+                    if Pill::new(lang.repair_setup(), PillKind::Secondary)
+                        .height(36.0)
+                        .enabled(self.pending == 0)
+                        .show(ui)
+                        .clicked()
+                    {
+                        self.setup();
+                    }
+                });
+            });
+    }
+
+    fn project_ledger(&mut self, ui: &mut egui::Ui, items: &[ProjectStatus]) {
+        let lang = self.lang;
+        if ui.available_width() >= 940.0 {
+            card_frame()
+                .inner_margin(egui::Margin::same(0))
+                .show(ui, |ui| {
+                    ui.set_min_width(900.0);
+                    ledger_header(ui, lang);
+                    for (index, item) in items.iter().enumerate() {
+                        if index > 0 {
+                            let (line, _) = ui.allocate_exact_size(
+                                Vec2::new(ui.available_width(), 1.0),
+                                egui::Sense::hover(),
+                            );
+                            ui.painter().rect_filled(line, 0, BORDER);
+                        }
+                        self.project_row_wide(ui, item);
+                        if self.details.as_deref() == Some(&item.project.name) {
+                            egui::Frame::NONE
+                                .inner_margin(egui::Margin {
+                                    left: 16,
+                                    right: 16,
+                                    top: 2,
+                                    bottom: 14,
+                                })
+                                .show(ui, |ui| {
+                                    self.project_details(ui, item);
+                                });
+                        }
+                    }
+                });
+        } else {
+            for (index, item) in items.iter().enumerate() {
+                if index > 0 {
+                    ui.add_space(10.0);
+                }
+                let hover_id = ui.id().with(("project-card", &item.project.name));
+                let previous: bool = ui.data(|data| data.get_temp(hover_id).unwrap_or(false));
+                let tint = ui.ctx().animate_bool_with_time(hover_id, previous, 0.15);
+                let fill = SURFACE.lerp_to_gamma(SURFACE_HOVER, tint);
+                let inner = card_frame()
+                    .fill(fill)
+                    .inner_margin(egui::Margin::symmetric(18, 16))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(strong(&item.project.name).size(15.0).color(INK));
+                            if self.daemon_online {
+                                state_chip(
+                                    ui,
+                                    item.running,
+                                    lang.badge_active(),
+                                    lang.badge_stopped(),
+                                );
+                            } else {
+                                ui.label(
+                                    RichText::new(lang.last_known_state())
+                                        .size(12.0)
+                                        .color(INK_MUTED),
+                                );
+                            }
+                        });
+                        ui.add_space(2.0);
+                        ui.label(medium(&item.project.hostname).size(13.0).color(ACCENT_TEXT));
+                        ui.label(
+                            RichText::new(format!(
+                                "PHP {} · {} · {}",
+                                item.project.php,
+                                web_label(item.project.web_server),
+                                lang.database_name(item.project.database)
+                            ))
+                            .size(12.5)
+                            .color(INK_MUTED),
+                        );
+                        let path = item.project.path.display().to_string();
+                        ui.label(
+                            RichText::new(truncate_middle(&path, 56))
+                                .size(12.0)
+                                .color(INK_MUTED)
+                                .monospace(),
+                        )
+                        .on_hover_text(&path);
+                        ui.add_space(10.0);
+                        ui.horizontal_wrapped(|ui| self.project_actions(ui, item, false));
+                    });
+                let hovered = ui.rect_contains_pointer(inner.response.rect);
+                ui.data_mut(|data| data.insert_temp(hover_id, hovered));
+            }
         }
     }
 
     #[expect(
         clippy::too_many_lines,
-        reason = "wide and stacked layouts share one project action implementation"
+        reason = "wide row keeps its column layout in one place"
     )]
-    fn project_ledger_row(&mut self, ui: &mut egui::Ui, item: &ProjectStatus) {
+    fn project_row_wide(&mut self, ui: &mut egui::Ui, item: &ProjectStatus) {
         let lang = self.lang;
-        if ui.available_width() < 1_120.0 {
-            egui::Frame::NONE
-                .fill(SURFACE)
-                .inner_margin(egui::Margin::same(14))
-                .show(ui, |ui| {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(RichText::new(&item.project.name).strong());
-                        if self.daemon_online {
-                            state_badge(ui, item.running, lang);
-                        } else {
-                            ui.label(lang.last_known_state());
-                        }
-                        ui.label(format!(
-                            "PHP {} · {} · {}",
-                            item.project.php,
-                            web_label(item.project.web_server),
-                            lang.database_name(item.project.database)
-                        ));
-                    });
-                    ui.label(RichText::new(&item.project.hostname).monospace());
-                    ui.label(
-                        RichText::new(item.project.path.display().to_string())
-                            .size(12.0)
-                            .color(INK_MUTED),
-                    )
-                    .on_hover_text(item.project.path.display().to_string());
-                    ui.horizontal_wrapped(|ui| self.project_actions(ui, item));
-                });
-            if self.details.as_deref() == Some(&item.project.name) {
-                self.project_details(ui, item);
-            }
-            ui.separator();
-            return;
-        }
+        let hover_id = ui.id().with(("project-row", &item.project.name));
+        let previous: bool = ui.data(|data| data.get_temp(hover_id).unwrap_or(false));
+        let tint = ui.ctx().animate_bool_with_time(hover_id, previous, 0.12);
+        let fill = SURFACE.lerp_to_gamma(SURFACE_HOVER, tint);
         let cache = if item.project.supervisor.enabled {
             format!(
                 "{} · {}",
@@ -989,75 +1338,127 @@ impl LocalWebApp {
         } else {
             lang.cache_name(item.project.cache).to_owned()
         };
-        egui::Frame::NONE
-            .fill(SURFACE)
-            .inner_margin(egui::Margin::symmetric(14, 11))
+        let inner = egui::Frame::NONE
+            .fill(fill)
+            .inner_margin(egui::Margin::symmetric(16, 12))
             .show(ui, |ui| {
-                ui.set_min_width(730.0);
+                ui.set_min_width(840.0);
                 ui.horizontal(|ui| {
-                    ui.allocate_ui(Vec2::new(150.0, 42.0), |ui| {
-                        ui.label(RichText::new(&item.project.name).strong().color(INK));
-                        ui.label(
-                            RichText::new(format!(
-                                "PHP {} · {}",
-                                item.project.php,
-                                web_label(item.project.web_server)
-                            ))
-                            .size(12.0)
-                            .color(INK_MUTED),
-                        );
-                    });
-                    ui.allocate_ui(Vec2::new(184.0, 42.0), |ui| {
-                        ui.label(RichText::new(&item.project.hostname).color(ACCENT));
-                        ui.label(
-                            RichText::new(item.project.path.display().to_string())
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(140.0, 42.0),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            ui.set_min_width(140.0);
+                            ui.label(strong(&item.project.name).color(INK));
+                            ui.label(
+                                RichText::new(format!(
+                                    "PHP {} · {}",
+                                    item.project.php,
+                                    web_label(item.project.web_server)
+                                ))
                                 .size(12.0)
                                 .color(INK_MUTED),
-                        );
-                    });
-                    ui.allocate_ui(Vec2::new(132.0, 42.0), |ui| {
-                        ui.label(lang.database_name(item.project.database));
-                        ui.label(RichText::new(cache).size(12.0).color(INK_MUTED));
-                    });
-                    ui.allocate_ui(Vec2::new(92.0, 42.0), |ui| {
-                        let transition = self
-                            .project_transition
-                            .as_ref()
-                            .filter(|(name, _)| name == &item.project.name)
-                            .map(|(_, transition)| *transition);
-                        if let Some(transition) = transition {
-                            ui.horizontal(|ui| {
-                                ui.spinner();
-                                ui.label(
-                                    RichText::new(match transition {
-                                        ProjectTransition::Starting => lang.transition_starting(),
-                                        ProjectTransition::Stopping => lang.transition_stopping(),
-                                        ProjectTransition::Restarting => {
-                                            lang.transition_restarting()
-                                        }
-                                    })
+                            );
+                        },
+                    );
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(150.0, 42.0),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            ui.set_min_width(150.0);
+                            ui.label(medium(&item.project.hostname).size(13.0).color(ACCENT_TEXT));
+                            let path = item.project.path.display().to_string();
+                            ui.label(
+                                RichText::new(truncate_middle(&path, 20))
                                     .size(12.0)
-                                    .color(INK_MUTED),
+                                    .color(INK_MUTED)
+                                    .monospace(),
+                            )
+                            .on_hover_text(path);
+                        },
+                    );
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(108.0, 42.0),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            ui.set_min_width(108.0);
+                            ui.label(medium(lang.database_name(item.project.database)).size(13.0));
+                            ui.label(RichText::new(cache).size(12.0).color(INK_MUTED));
+                        },
+                    );
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(88.0, 42.0),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            ui.set_min_width(88.0);
+                            let transition = self
+                                .project_transition
+                                .as_ref()
+                                .filter(|(name, _)| name == &item.project.name)
+                                .map(|(_, transition)| *transition);
+                            if let Some(transition) = transition {
+                                ui.horizontal(|ui| {
+                                    ui.spinner();
+                                    ui.label(
+                                        RichText::new(match transition {
+                                            ProjectTransition::Starting => {
+                                                lang.transition_starting()
+                                            }
+                                            ProjectTransition::Stopping => {
+                                                lang.transition_stopping()
+                                            }
+                                            ProjectTransition::Restarting => {
+                                                lang.transition_restarting()
+                                            }
+                                        })
+                                        .size(12.0)
+                                        .color(INK_MUTED),
+                                    );
+                                });
+                            } else if self.daemon_online {
+                                state_chip(
+                                    ui,
+                                    item.running,
+                                    lang.badge_active(),
+                                    lang.badge_stopped(),
                                 );
-                            });
-                        } else {
-                            state_badge(ui, item.running, lang);
-                        }
-                    });
+                            } else {
+                                ui.label(
+                                    RichText::new(lang.last_known_state())
+                                        .size(12.0)
+                                        .color(INK_MUTED),
+                                );
+                            }
+                        },
+                    );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        self.project_actions(ui, item);
+                        self.project_actions(ui, item, true);
                     });
                 });
             });
-        ui.separator();
-        if self.details.as_deref() == Some(&item.project.name) {
-            self.project_details(ui, item);
-        }
+        let hovered = ui.rect_contains_pointer(inner.response.rect);
+        ui.data_mut(|data| data.insert_temp(hover_id, hovered));
     }
 
-    fn project_actions(&mut self, ui: &mut egui::Ui, item: &ProjectStatus) {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "wide and stacked rows share one action implementation"
+    )]
+    fn project_actions(&mut self, ui: &mut egui::Ui, item: &ProjectStatus, wide: bool) {
         let lang = self.lang;
-        if ui.add(compact_button(lang.project_details())).clicked() {
+        let details = if wide {
+            Pill::new("", PillKind::Ghost)
+                .icon(Icon::ChevronDown)
+                .height(36.0)
+                .show(ui)
+                .on_hover_text(lang.project_details())
+        } else {
+            Pill::new(lang.project_details(), PillKind::Ghost)
+                .icon(Icon::ChevronDown)
+                .height(36.0)
+                .show(ui)
+        };
+        if details.clicked() {
             if self.details.as_deref() == Some(&item.project.name) {
                 self.details = None;
             } else {
@@ -1073,16 +1474,23 @@ impl LocalWebApp {
             && name == &item.project.name
         {
             ui.spinner();
-            ui.label(match transition {
-                ProjectTransition::Starting => lang.transition_starting(),
-                ProjectTransition::Stopping => lang.transition_stopping(),
-                ProjectTransition::Restarting => lang.transition_restarting(),
-            });
+            ui.label(
+                RichText::new(match transition {
+                    ProjectTransition::Starting => lang.transition_starting(),
+                    ProjectTransition::Stopping => lang.transition_stopping(),
+                    ProjectTransition::Restarting => lang.transition_restarting(),
+                })
+                .size(12.0)
+                .color(INK_MUTED),
+            );
             return;
         }
         if item.running {
-            if ui
-                .add_enabled(self.pending == 0, compact_button(lang.action_stop()))
+            if Pill::new(lang.action_stop(), PillKind::Secondary)
+                .icon(Icon::Stop)
+                .height(36.0)
+                .enabled(self.pending == 0)
+                .show(ui)
                 .clicked()
             {
                 self.project_transition =
@@ -1094,8 +1502,11 @@ impl LocalWebApp {
                     },
                 );
             }
-            if ui
-                .add_enabled(self.pending == 0, compact_button(lang.action_restart()))
+            if Pill::new(lang.action_restart(), PillKind::Secondary)
+                .icon(Icon::Refresh)
+                .height(36.0)
+                .enabled(self.pending == 0)
+                .show(ui)
                 .clicked()
             {
                 self.project_transition =
@@ -1107,67 +1518,113 @@ impl LocalWebApp {
                     },
                 );
             }
-            if ui.add(compact_button(lang.action_open())).clicked() {
-                open_browser(&item.project.hostname, lang, &mut self.notice);
-            }
-            if let Some(url) = item.mail_web_url.as_deref()
-                && ui.add(compact_button("Mailpit")).clicked()
-            {
-                open_url(url, lang, &mut self.notice);
-            }
-        } else {
-            if ui
-                .add_enabled(self.pending == 0, compact_button(lang.action_remove()))
+            if Pill::new(lang.action_open(), PillKind::Secondary)
+                .icon(Icon::External)
+                .height(36.0)
+                .show(ui)
                 .clicked()
             {
-                self.remove_confirmation = Some(item.project.name.clone());
-            }
-            if ui
-                .add_enabled(
-                    self.pending == 0,
-                    compact_primary_button(lang.action_start()),
-                )
-                .clicked()
-            {
-                self.project_transition =
-                    Some((item.project.name.clone(), ProjectTransition::Starting));
-                self.request(
-                    Action::StartProject,
-                    Request::ProjectStart {
-                        name: item.project.name.clone(),
-                    },
+                let gateway_running = self
+                    .status
+                    .as_ref()
+                    .is_some_and(|status| status.gateway_running);
+                open_browser(
+                    &item.project.hostname,
+                    item.project.web_port,
+                    gateway_running,
+                    lang,
+                    &mut self.notice,
                 );
             }
+            if let Some(url) = item.mail_web_url.as_deref() {
+                let mail = if wide {
+                    Pill::new("", PillKind::Ghost)
+                        .icon(Icon::Mail)
+                        .height(36.0)
+                        .show(ui)
+                        .on_hover_text("Mailpit")
+                } else {
+                    Pill::new("Mailpit", PillKind::Secondary)
+                        .icon(Icon::Mail)
+                        .height(36.0)
+                        .show(ui)
+                };
+                if mail.clicked() {
+                    open_url(url, lang, &mut self.notice);
+                }
+            }
+        } else if Pill::new(lang.action_start(), PillKind::Primary)
+            .icon(Icon::Play)
+            .height(36.0)
+            .min_width(96.0)
+            .enabled(self.pending == 0)
+            .show(ui)
+            .clicked()
+        {
+            self.project_transition =
+                Some((item.project.name.clone(), ProjectTransition::Starting));
+            self.request(
+                Action::StartProject,
+                Request::ProjectStart {
+                    name: item.project.name.clone(),
+                },
+            );
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "metadata, environment disclosure and the destructive action share one panel"
+    )]
     fn project_details(&mut self, ui: &mut egui::Ui, item: &ProjectStatus) {
         let lang = self.lang;
         let project = &item.project;
-        ui.label(format!(
-            "{} · {} · Node.js {} · Composer {}",
-            lang.profile_name(project.profile),
-            project.document_root.display(),
-            project.node,
-            project.composer
-        ));
-        ui.label(format!(
-            "{} · {}",
-            lang.database_name(project.database),
-            lang.cache_name(project.cache)
-        ));
-        ui.label(lang.project_options(
-            project.supervisor.enabled,
-            project.cron.len(),
-            project.mail,
-            project.autostart,
-        ));
+        ui.label(
+            RichText::new(format!(
+                "{} · {}",
+                lang.profile_name(project.profile),
+                project.document_root.display()
+            ))
+            .size(12.5)
+            .color(INK_MUTED),
+        );
+        ui.label(
+            RichText::new(format!(
+                "Node.js {} · Composer {}",
+                project.node, project.composer
+            ))
+            .size(12.5)
+            .color(INK_MUTED),
+        );
+        ui.label(
+            RichText::new(lang.project_options(
+                project.supervisor.enabled,
+                project.cron.len(),
+                project.mail,
+                project.autostart,
+            ))
+            .size(12.5)
+            .color(INK_MUTED),
+        );
+        ui.label(
+            RichText::new(format!(
+                "HTTP 127.0.0.1:{} · DB 127.0.0.1:{}",
+                project
+                    .web_port
+                    .map_or_else(|| "-".to_owned(), |port| port.to_string()),
+                project
+                    .database_port
+                    .map_or_else(|| "-".to_owned(), |port| port.to_string()),
+            ))
+            .size(12.5)
+            .color(INK_MUTED),
+        );
+        ui.add_space(8.0);
         if self.environment.is_none() && self.environment_error.is_none() {
-            if ui
-                .add_enabled(
-                    self.daemon_online && self.background_pending == 0,
-                    secondary_button(lang.reveal_environment()),
-                )
+            if Pill::new(lang.reveal_environment(), PillKind::Secondary)
+                .height(36.0)
+                .enabled(self.daemon_online && self.background_pending == 0)
+                .show(ui)
                 .clicked()
             {
                 self.request(
@@ -1178,50 +1635,86 @@ impl LocalWebApp {
                 );
             }
         } else if let Some(values) = &self.environment {
-            ui.label(lang.environment_help());
+            ui.label(
+                RichText::new(lang.environment_help())
+                    .size(12.5)
+                    .color(INK_MUTED),
+            );
             let mut dotenv = String::new();
             for (key, value) in values {
                 let _ = writeln!(dotenv, "{key}={value}");
             }
-            if ui.button(lang.copy_environment()).clicked() {
+            if Pill::new(lang.copy_environment(), PillKind::Secondary)
+                .icon(Icon::Copy)
+                .height(36.0)
+                .show(ui)
+                .clicked()
+            {
                 ui.ctx().copy_text(dotenv.clone());
             }
-            ui.add(
-                egui::TextEdit::multiline(&mut dotenv)
-                    .font(egui::TextStyle::Monospace)
-                    .desired_width(f32::INFINITY)
-                    .desired_rows(values.len().min(12))
-                    .interactive(false),
-            );
+            ui.add_space(6.0);
+            egui::Frame::NONE
+                .fill(SURFACE_MUTED)
+                .corner_radius(RADIUS_CONTROL)
+                .inner_margin(egui::Margin::symmetric(12, 8))
+                .show(ui, |ui| {
+                    ui.set_min_width((ui.available_width() - 24.0).max(240.0));
+                    ui.add(
+                        egui::TextEdit::multiline(&mut dotenv)
+                            .font(egui::TextStyle::Monospace)
+                            .desired_width(f32::INFINITY)
+                            .desired_rows(values.len().min(12))
+                            .interactive(false)
+                            .frame(egui::Frame::NONE),
+                    );
+                });
         } else if let Some(error) = &self.environment_error {
-            ui.label(lang.environment_failed());
+            ui.label(
+                RichText::new(lang.environment_failed())
+                    .size(12.5)
+                    .color(DANGER),
+            );
             ui.collapsing(lang.technical_details(), |ui| {
                 ui.label(error);
             });
-            if ui.button(lang.refresh()).clicked() {
+            if Pill::new(lang.refresh(), PillKind::Secondary)
+                .height(36.0)
+                .show(ui)
+                .clicked()
+            {
                 self.environment_error = None;
             }
         }
+        if !item.running && self.daemon_online {
+            ui.add_space(6.0);
+            if Pill::new(lang.action_remove(), PillKind::GhostDanger)
+                .icon(Icon::Trash)
+                .height(36.0)
+                .enabled(self.pending == 0)
+                .show(ui)
+                .clicked()
+            {
+                self.remove_confirmation = Some(item.project.name.clone());
+            }
+        }
+        ui.add_space(6.0);
     }
 
     fn add_project(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang;
-        self.page_toolbar(ui, lang.add_title(), lang.add_sub(), false);
+        self.page_toolbar(ui, lang.add_title(), false, false);
         ui.add_space(22.0);
         if !self.daemon_online {
-            callout(ui, DANGER, |ui| {
+            callout(ui, Icon::Warning, |ui| {
                 ui.vertical(|ui| {
-                    ui.label(
-                        RichText::new(if self.connection == Connection::Checking {
-                            lang.checking_status()
-                        } else if self.connection == Connection::Stopped {
-                            lang.stopped_title()
-                        } else {
-                            lang.daemon_unavailable()
-                        })
-                        .strong(),
-                    );
-                    ui.label(lang.stopped_add_body());
+                    ui.label(strong(if self.connection == Connection::Checking {
+                        lang.checking_status()
+                    } else if self.connection == Connection::Stopped {
+                        lang.stopped_title()
+                    } else {
+                        lang.daemon_unavailable()
+                    }));
+                    ui.label(RichText::new(lang.stopped_add_body()).color(INK_MUTED));
                 });
             });
             return;
@@ -1232,12 +1725,20 @@ impl LocalWebApp {
         self.project_services_form(ui);
         ui.add_space(16.0);
         ui.horizontal(|ui| {
-            if ui.add(secondary_button(lang.cancel())).clicked() {
+            if Pill::new(lang.cancel(), PillKind::Ghost)
+                .height(40.0)
+                .show(ui)
+                .clicked()
+            {
                 self.form = AddProjectForm::default();
                 self.view = View::Projects;
             }
-            submit = ui
-                .add_enabled(self.pending == 0, primary_button(lang.create_project()))
+            submit = Pill::new(lang.create_project(), PillKind::Primary)
+                .icon(Icon::Check)
+                .height(40.0)
+                .min_width(150.0)
+                .enabled(self.pending == 0)
+                .show(ui)
                 .clicked();
             if self.pending > 0 {
                 ui.spinner();
@@ -1251,14 +1752,20 @@ impl LocalWebApp {
             }
         }
         if let Some(error) = &self.form.error {
-            ui.colored_label(DANGER, format!("{}: {error}", lang.check_form()));
+            let anchored = error == lang.error_no_path() || error == lang.error_no_executable();
+            if !anchored {
+                ui.add_space(10.0);
+                callout(ui, Icon::Warning, |ui| {
+                    ui.label(strong(format!("{}: {error}", lang.check_form())).color(DANGER));
+                });
+            }
         }
     }
 
     fn project_source_form(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang;
         let card_width = (ui.available_width() - 40.0).max(300.0);
-        card().show(ui, |ui| {
+        card_frame().show(ui, |ui| {
             ui.set_min_width(card_width);
             let field_width = (ui.available_width() - 290.0).clamp(180.0, 380.0);
             section_heading(ui, lang.source_title(), lang.source_body());
@@ -1273,6 +1780,7 @@ impl LocalWebApp {
                         let response = ui
                             .add(
                                 egui::TextEdit::singleline(&mut self.form.path)
+                                    .margin(egui::Margin::symmetric(10, 8))
                                     .desired_width(field_width)
                                     .hint_text("~/Code/acme"),
                             )
@@ -1283,15 +1791,29 @@ impl LocalWebApp {
                                 self.form.detect_path(&path, &self.domain_suffix());
                             }
                         }
-                        if ui.add(secondary_button(lang.browse())).clicked() {
+                        if response.changed() {
+                            self.form.error = None;
+                        }
+                        if Pill::new(lang.browse(), PillKind::Secondary)
+                            .height(36.0)
+                            .show(ui)
+                            .clicked()
+                        {
                             self.picker = Some(DirectoryPicker::new(&self.form.path));
                         }
                     });
                     ui.end_row();
+                    if self.form.error.as_deref() == Some(lang.error_no_path()) {
+                        ui.label("");
+                        ui.label(RichText::new(lang.error_no_path()).size(12.0).color(DANGER));
+                        ui.end_row();
+                    }
 
                     let label = form_label(ui, lang.name_label());
                     ui.add(
-                        egui::TextEdit::singleline(&mut self.form.name).desired_width(field_width),
+                        egui::TextEdit::singleline(&mut self.form.name)
+                            .margin(egui::Margin::symmetric(10, 8))
+                            .desired_width(field_width),
                     )
                     .labelled_by(label.id);
                     ui.end_row();
@@ -1299,6 +1821,7 @@ impl LocalWebApp {
                     let label = form_label(ui, lang.host_label());
                     ui.add(
                         egui::TextEdit::singleline(&mut self.form.hostname)
+                            .margin(egui::Margin::symmetric(10, 8))
                             .desired_width(field_width),
                     )
                     .labelled_by(label.id);
@@ -1307,6 +1830,7 @@ impl LocalWebApp {
                     let label = form_label(ui, Lang::docroot_label());
                     ui.add(
                         egui::TextEdit::singleline(&mut self.form.document_root)
+                            .margin(egui::Margin::symmetric(10, 8))
                             .desired_width(field_width),
                     )
                     .labelled_by(label.id);
@@ -1314,6 +1838,7 @@ impl LocalWebApp {
 
                     let label = form_label(ui, lang.profile_label());
                     egui::ComboBox::from_id_salt("profile")
+                        .width(field_width)
                         .selected_text(lang.profile_name(self.form.profile))
                         .show_ui(ui, |ui| {
                             for profile in [
@@ -1341,7 +1866,7 @@ impl LocalWebApp {
     fn project_services_form(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang;
         let card_width = (ui.available_width() - 40.0).max(300.0);
-        card().show(ui, |ui| {
+        card_frame().show(ui, |ui| {
             ui.set_min_width(card_width);
             let field_width = (ui.available_width() - 290.0).clamp(180.0, 380.0);
             section_heading(ui, lang.services_title(), lang.services_body());
@@ -1351,22 +1876,23 @@ impl LocalWebApp {
                 .spacing([22.0, 13.0])
                 .min_col_width(138.0)
                 .show(ui, |ui| {
-                    self.basic_service_fields(ui);
+                    self.basic_service_fields(ui, field_width);
                     self.supervisor_fields(ui, field_width);
                     self.cron_fields(ui, field_width);
 
                     let label = form_label(ui, lang.autostart_label());
-                    ui.checkbox(&mut self.form.autostart, lang.autostart_check())
+                    check_row(ui, &mut self.form.autostart, lang.autostart_check())
                         .labelled_by(label.id);
                     ui.end_row();
                 });
         });
     }
 
-    fn basic_service_fields(&mut self, ui: &mut egui::Ui) {
+    fn basic_service_fields(&mut self, ui: &mut egui::Ui, field_width: f32) {
         let lang = self.lang;
         let label = form_label(ui, lang.web_server_label());
         egui::ComboBox::from_id_salt("web_server")
+            .width(field_width)
             .selected_text(web_label(self.form.web_server))
             .show_ui(ui, |ui| {
                 ui.selectable_value(&mut self.form.web_server, WebServer::Nginx, "nginx");
@@ -1378,6 +1904,7 @@ impl LocalWebApp {
 
         let label = form_label(ui, "PHP");
         egui::ComboBox::from_id_salt("php_version")
+            .width(field_width)
             .selected_text(format!("PHP {}", self.form.php))
             .show_ui(ui, |ui| {
                 for version in localweb_core::PHP_VERSIONS {
@@ -1398,12 +1925,9 @@ impl LocalWebApp {
             .labelled_by(label.id);
         ui.end_row();
 
-        let _ = form_label(ui, lang.runtime_note_label());
-        ui.label(lang.php_versions_note());
-        ui.end_row();
-
         let label = form_label(ui, "Node.js");
         egui::ComboBox::from_id_salt("node_version")
+            .width(field_width)
             .selected_text(format!("Node.js {}", self.form.node))
             .show_ui(ui, |ui| {
                 ui.selectable_value(&mut self.form.node, "24".into(), "Node.js 24 LTS");
@@ -1414,12 +1938,9 @@ impl LocalWebApp {
             .labelled_by(label.id);
         ui.end_row();
 
-        let _ = form_label(ui, lang.runtime_note_label());
-        ui.label(lang.node_value());
-        ui.end_row();
-
         let label = form_label(ui, "Database");
         egui::ComboBox::from_id_salt("database")
+            .width(field_width)
             .selected_text(lang.database_name(self.form.database))
             .show_ui(ui, |ui| {
                 ui.selectable_value(&mut self.form.database, Database::None, lang.db_none());
@@ -1434,6 +1955,7 @@ impl LocalWebApp {
 
         let label = form_label(ui, "Cache");
         egui::ComboBox::from_id_salt("cache")
+            .width(field_width)
             .selected_text(lang.cache_name(self.form.cache))
             .show_ui(ui, |ui| {
                 ui.selectable_value(&mut self.form.cache, Cache::None, lang.cache_none());
@@ -1443,19 +1965,15 @@ impl LocalWebApp {
             .labelled_by(label.id);
         ui.end_row();
 
-        let _ = form_label(ui, "Composer");
-        ui.label(lang.composer_value());
-        ui.end_row();
-
         let _ = form_label(ui, lang.mail_title());
-        ui.checkbox(&mut self.form.mail, lang.mail_check());
+        let _ = check_row(ui, &mut self.form.mail, lang.mail_check());
         ui.end_row();
     }
 
     fn supervisor_fields(&mut self, ui: &mut egui::Ui, field_width: f32) {
         let lang = self.lang;
         let _ = form_label(ui, lang.supervisor_title());
-        ui.checkbox(&mut self.form.supervisor, lang.supervisor_check());
+        let _ = check_row(ui, &mut self.form.supervisor, lang.supervisor_check());
         ui.end_row();
         if !self.form.supervisor {
             return;
@@ -1464,15 +1982,21 @@ impl LocalWebApp {
         if self.form.has_worker_preset() {
             let _ = form_label(ui, lang.supervisor_preset_label());
             ui.vertical(|ui| {
-                soft_badge(
+                service_chip(
                     ui,
+                    lang.supervisor_title(),
                     if self.form.profile == Profile::Laravel {
                         "Laravel queue:work"
                     } else {
                         "Symfony messenger:consume async"
                     },
+                    ACCENT_TEXT,
                 );
-                ui.checkbox(&mut self.form.supervisor_custom, lang.supervisor_custom());
+                let _ = check_row(
+                    ui,
+                    &mut self.form.supervisor_custom,
+                    lang.supervisor_custom(),
+                );
             });
             ui.end_row();
         }
@@ -1480,22 +2004,31 @@ impl LocalWebApp {
         if !self.form.has_worker_preset() || self.form.supervisor_custom {
             self.custom_supervisor_fields(ui, field_width);
         }
-
-        let _ = form_label(ui, lang.supervisor_restart());
-        ui.label(lang.supervisor_restart_body());
-        ui.end_row();
     }
 
     fn custom_supervisor_fields(&mut self, ui: &mut egui::Ui, field_width: f32) {
         let lang = self.lang;
         let label = form_label(ui, lang.supervisor_executable());
-        ui.add(
-            egui::TextEdit::singleline(&mut self.form.supervisor_command)
-                .desired_width(field_width)
-                .hint_text(lang.supervisor_executable_hint()),
-        )
-        .labelled_by(label.id);
+        let response = ui
+            .add(
+                egui::TextEdit::singleline(&mut self.form.supervisor_command)
+                    .desired_width(field_width)
+                    .hint_text(lang.supervisor_executable_hint()),
+            )
+            .labelled_by(label.id);
+        if response.changed() {
+            self.form.error = None;
+        }
         ui.end_row();
+        if self.form.error.as_deref() == Some(lang.error_no_executable()) {
+            ui.label("");
+            ui.label(
+                RichText::new(lang.error_no_executable())
+                    .size(12.0)
+                    .color(DANGER),
+            );
+            ui.end_row();
+        }
 
         let label = form_label(ui, lang.supervisor_args());
         ui.vertical(|ui| {
@@ -1518,7 +2051,7 @@ impl LocalWebApp {
     fn cron_fields(&mut self, ui: &mut egui::Ui, field_width: f32) {
         let lang = self.lang;
         let _ = form_label(ui, lang.cron_title());
-        ui.checkbox(&mut self.form.cron, lang.cron_check());
+        let _ = check_row(ui, &mut self.form.cron, lang.cron_check());
         ui.end_row();
         if !self.form.cron {
             return;
@@ -1532,9 +2065,31 @@ impl LocalWebApp {
                     .hint_text("*/5 * * * * @php artisan schedule:run"),
             )
             .labelled_by(label.id);
-            ui.label(RichText::new(lang.cron_note()).size(11.0).color(INK_MUTED));
+            ui.add(
+                egui::Label::new(RichText::new(lang.cron_note()).size(11.0).color(INK_MUTED))
+                    .wrap(),
+            );
         });
         ui.end_row();
+    }
+
+    fn show_notice(&mut self, context: &egui::Context) {
+        let Some(notice) = self.notice.take() else {
+            return;
+        };
+        if !notice.error && notice.created.elapsed() > TOAST_LIFETIME {
+            return;
+        }
+        let mut dismissed = false;
+        egui::Area::new(egui::Id::new("notice_toast"))
+            .anchor(egui::Align2::RIGHT_TOP, Vec2::new(-18.0, 18.0))
+            .order(egui::Order::Foreground)
+            .show(context, |ui| {
+                dismissed = notice.toast(ui, self.lang);
+            });
+        if !dismissed {
+            self.notice = Some(notice);
+        }
     }
 
     fn remove_dialog(&mut self, context: &egui::Context) {
@@ -1543,17 +2098,25 @@ impl LocalWebApp {
             return;
         };
         let modal = egui::Modal::new(egui::Id::new("remove_project")).show(context, |ui| {
-            ui.heading(lang.remove_title());
-            ui.label(lang.remove_body(&name));
-            ui.add_space(12.0);
+            ui.label(strong(lang.remove_title()).size(18.0));
+            ui.add_space(4.0);
+            ui.label(RichText::new(lang.remove_body(&name)).color(INK_MUTED));
+            ui.add_space(14.0);
             ui.horizontal(|ui| {
-                if ui.button(lang.cancel()).clicked() {
+                if Pill::new(lang.cancel(), PillKind::Ghost)
+                    .height(36.0)
+                    .show(ui)
+                    .clicked()
+                {
                     self.remove_confirmation = None;
                 }
-                let remove =
-                    egui::Button::new(RichText::new(lang.remove_confirm()).color(Color32::WHITE))
-                        .fill(DANGER);
-                if ui.add_enabled(self.pending == 0, remove).clicked() {
+                if Pill::new(lang.remove_confirm(), PillKind::Danger)
+                    .icon(Icon::Trash)
+                    .height(36.0)
+                    .enabled(self.pending == 0)
+                    .show(ui)
+                    .clicked()
+                {
                     self.request(
                         Action::RemoveProject,
                         Request::ProjectRemove { name: name.clone() },
@@ -1566,6 +2129,42 @@ impl LocalWebApp {
         }
     }
 
+    fn stop_dialog(&mut self, context: &egui::Context) {
+        if !self.stop_confirmation {
+            return;
+        }
+        let lang = self.lang;
+        let modal = egui::Modal::new(egui::Id::new("stop_localweb")).show(context, |ui| {
+            ui.label(strong(lang.stop_localweb()).size(18.0));
+            ui.add_space(4.0);
+            ui.label(RichText::new(lang.stop_hint()).color(INK_MUTED));
+            ui.add_space(14.0);
+            ui.horizontal(|ui| {
+                if Pill::new(lang.cancel(), PillKind::Ghost)
+                    .height(36.0)
+                    .show(ui)
+                    .clicked()
+                {
+                    self.stop_confirmation = false;
+                }
+                if Pill::new(lang.stop_localweb(), PillKind::Danger)
+                    .icon(Icon::Stop)
+                    .height(36.0)
+                    .enabled(self.pending == 0)
+                    .show(ui)
+                    .clicked()
+                {
+                    self.stop_confirmation = false;
+                    self.daemon_transition = Some(DaemonTransition::Stopping);
+                    self.request(Action::Shutdown, Request::Shutdown);
+                }
+            });
+        });
+        if modal.should_close() && self.pending == 0 {
+            self.stop_confirmation = false;
+        }
+    }
+
     fn setup_complete(&self) -> bool {
         self.paths
             .as_ref()
@@ -1573,14 +2172,15 @@ impl LocalWebApp {
     }
 
     fn domain_suffix(&self) -> String {
+        self.global_config().general.domain_suffix
+    }
+
+    fn global_config(&self) -> GlobalConfig {
         self.paths
             .as_ref()
             .filter(|paths| paths.config.join("config.toml").is_file())
             .and_then(|paths| GlobalConfig::load_or_create(paths).ok())
-            .map_or_else(
-                || GlobalConfig::default().general.domain_suffix,
-                |config| config.general.domain_suffix,
-            )
+            .unwrap_or_default()
     }
 }
 
@@ -1590,7 +2190,7 @@ impl eframe::App for LocalWebApp {
         self.receive_events();
         if self.pending == 0
             && self.background_pending == 0
-            && self.last_refresh.elapsed() > Duration::from_secs(3)
+            && self.last_refresh.elapsed() > REFRESH_INTERVAL
         {
             if self.daemon_online {
                 self.request(Action::RefreshStatus, Request::Status);
@@ -1600,6 +2200,13 @@ impl eframe::App for LocalWebApp {
             }
             self.last_refresh = Instant::now();
         }
+        if self.last_view != self.view {
+            self.last_view = self.view;
+            self.view_changed_at = Some(Instant::now());
+        }
+        let fade = self.view_changed_at.map_or(1.0, |changed| {
+            (changed.elapsed().as_secs_f32() / VIEW_FADE_SECONDS).clamp(0.0, 1.0)
+        });
         self.sidebar(ui);
         egui::CentralPanel::default()
             .frame(
@@ -1611,18 +2218,19 @@ impl eframe::App for LocalWebApp {
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        if let Some(notice) = &self.notice {
-                            notice.show(ui, self.lang);
-                            ui.add_space(12.0);
-                        }
-                        match self.view {
-                            View::Dashboard => self.dashboard(ui),
-                            View::Projects => self.projects(ui),
-                            View::AddProject => self.add_project(ui),
-                        }
+                        ui.scope(|ui| {
+                            ui.multiply_opacity(fade);
+                            match self.view {
+                                View::Dashboard => self.dashboard(ui),
+                                View::Projects => self.projects(ui),
+                                View::AddProject => self.add_project(ui),
+                                View::Settings => self.settings(ui),
+                            }
+                        });
                         ui.add_space(24.0);
                     });
             });
+        self.show_notice(&context);
         let suffix = self.domain_suffix();
         if let Some(picker) = self.picker.as_mut() {
             if let Some(path) = picker.show(&context, self.lang) {
@@ -1633,11 +2241,16 @@ impl eframe::App for LocalWebApp {
             }
         }
         self.remove_dialog(&context);
-        context.request_repaint_after(Duration::from_millis(250));
+        self.stop_dialog(&context);
+        if fade < 1.0 {
+            context.request_repaint_after(FADE_REPAINT_INTERVAL);
+        } else {
+            context.request_repaint_after(IDLE_REPAINT_INTERVAL);
+        }
     }
 }
 
-#[allow(
+#[expect(
     clippy::struct_excessive_bools,
     reason = "form mirrors independent checkboxes"
 )]
@@ -1789,6 +2402,8 @@ impl AddProjectForm {
             cron: cron_entries,
             cron_preset: self.cron,
             mail: self.mail,
+            web_port: None,
+            database_port: None,
             autostart: self.autostart,
         };
         localweb_core::Project::from_new(request.clone(), &GlobalConfig::default())
@@ -1799,6 +2414,9 @@ impl AddProjectForm {
 
 struct DirectoryPicker {
     current: PathBuf,
+    history: Vec<PathBuf>,
+    history_position: usize,
+    selected: Option<PathBuf>,
     open: bool,
     error: Option<String>,
 }
@@ -1809,89 +2427,335 @@ impl DirectoryPicker {
         let home = std::env::var_os("HOME").map_or_else(|| PathBuf::from("/"), PathBuf::from);
         let current = if requested.is_dir() { requested } else { home };
         Self {
+            history: vec![current.clone()],
             current,
+            history_position: 0,
+            selected: None,
             open: true,
             error: None,
         }
+    }
+
+    fn navigate_to(&mut self, directory: PathBuf) {
+        if directory != self.current {
+            self.history.truncate(self.history_position + 1);
+            self.history.push(directory.clone());
+            self.history_position = self.history.len() - 1;
+            self.current = directory;
+        }
+        self.selected = None;
+        self.error = None;
+    }
+
+    fn go_back(&mut self) {
+        if self.history_position > 0 {
+            self.history_position -= 1;
+            self.restore_from_history();
+        }
+    }
+
+    fn go_forward(&mut self) {
+        if self.history_position + 1 < self.history.len() {
+            self.history_position += 1;
+            self.restore_from_history();
+        }
+    }
+
+    fn restore_from_history(&mut self) {
+        self.current = self.history[self.history_position].clone();
+        self.selected = None;
+        self.error = None;
     }
 
     fn show(&mut self, context: &egui::Context, lang: Lang) -> Option<PathBuf> {
         let mut selected = None;
         let mut navigate = None;
         let mut request_close = false;
+        let mut accept = false;
         let modal = egui::Modal::new(egui::Id::new("source_folder_picker")).show(context, |ui| {
-            ui.set_width(context.viewport_rect().width().min(660.0) - 40.0);
-            ui.heading(lang.picker_title());
-            ui.horizontal_wrapped(|ui| {
-                if ui.button(lang.picker_home()).clicked() {
-                    navigate = std::env::var_os("HOME").map(PathBuf::from);
+            ui.set_width(context.viewport_rect().width().min(760.0) - 40.0);
+            ui.label(strong(lang.picker_title()).size(18.0));
+            ui.add_space(10.0);
+            ui.horizontal_top(|ui| {
+                if let Some(path) = self.places_sidebar(ui, lang) {
+                    navigate = Some(path);
                 }
-                if ui.button(lang.picker_parent()).clicked()
-                    && let Some(parent) = self.current.parent()
-                {
-                    navigate = Some(parent.to_path_buf());
-                }
-                ui.label(RichText::new(self.current.display().to_string()).monospace());
-            });
-            ui.separator();
-            if let Some(error) = &self.error {
-                ui.colored_label(DANGER, error);
-            }
-            egui::ScrollArea::vertical()
-                .max_height(340.0)
-                .show(ui, |ui| match child_directories(&self.current) {
-                    Ok(directories) => {
-                        self.error = None;
-                        if directories.is_empty() {
-                            ui.label(lang.picker_empty());
+                ui.add_space(16.0);
+                ui.vertical(|ui| {
+                    ui.horizontal(|ui| {
+                        if icon_button(ui, Icon::ChevronLeft, 36.0)
+                            .on_hover_text(lang.picker_back())
+                            .clicked()
+                        {
+                            self.go_back();
                         }
-                        for directory in directories {
-                            let name = directory.file_name().map_or_else(
-                                || directory.display().to_string(),
-                                |name| name.to_string_lossy().into_owned(),
-                            );
-                            if ui
-                                .add_sized(
-                                    [ui.available_width(), 36.0],
-                                    egui::Button::new(lang.picker_open(&name))
-                                        .fill(SURFACE)
-                                        .stroke(Stroke::new(1.0, BORDER)),
-                                )
-                                .clicked()
-                            {
-                                navigate = Some(directory);
-                            }
+                        if icon_button(ui, Icon::ChevronRight, 36.0)
+                            .on_hover_text(lang.picker_forward())
+                            .clicked()
+                        {
+                            self.go_forward();
                         }
+                        if icon_button(ui, Icon::ChevronUp, 36.0)
+                            .on_hover_text(lang.picker_parent())
+                            .clicked()
+                        {
+                            navigate = self.current.parent().map(Path::to_path_buf);
+                        }
+                    });
+                    ui.add_space(6.0);
+                    if let Some(path) = self.breadcrumb(ui, lang) {
+                        navigate = Some(path);
                     }
-                    Err(error) => self.error = Some(error),
+                    ui.add_space(8.0);
+                    if let Some(error) = &self.error {
+                        ui.colored_label(DANGER, error);
+                        ui.add_space(4.0);
+                    }
+                    if let Some(path) = self.folder_list(ui, lang) {
+                        navigate = Some(path);
+                    }
                 });
-            ui.separator();
-            ui.horizontal(|ui| {
-                if ui.button(lang.cancel()).clicked() {
+            });
+            ui.add_space(10.0);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if Pill::new(lang.picker_use(), PillKind::Primary)
+                    .icon(Icon::Check)
+                    .height(36.0)
+                    .show(ui)
+                    .clicked()
+                {
+                    accept = true;
                     request_close = true;
                 }
-                let choose =
-                    egui::Button::new(RichText::new(lang.picker_use()).color(Color32::WHITE))
-                        .fill(ACCENT);
-                if ui.add(choose).clicked() {
-                    selected = Some(self.current.clone());
+                if Pill::new(lang.cancel(), PillKind::Ghost)
+                    .height(36.0)
+                    .show(ui)
+                    .clicked()
+                {
                     request_close = true;
                 }
             });
+            if ui.input(|input| input.key_pressed(egui::Key::Enter)) {
+                accept = true;
+                request_close = true;
+            }
         });
         if let Some(directory) = navigate {
-            self.current = directory;
+            self.navigate_to(directory);
+        }
+        if accept {
+            selected = Some(self.current.clone());
         }
         if request_close || modal.should_close() {
             self.open = false;
         }
         selected
     }
+
+    fn places_sidebar(&self, ui: &mut egui::Ui, lang: Lang) -> Option<PathBuf> {
+        let mut navigate = None;
+        egui::Frame::new()
+            .fill(SURFACE_MUTED)
+            .corner_radius(RADIUS_CONTROL)
+            .inner_margin(egui::Margin::same(8))
+            .show(ui, |ui| {
+                ui.set_width(156.0);
+                ui.set_min_height(392.0);
+                ui.vertical(|ui| {
+                    for (path, label) in picker_places(lang) {
+                        if picker_row(ui, &label, self.current == path, None).clicked() {
+                            navigate = Some(path);
+                        }
+                    }
+                });
+            });
+        navigate
+    }
+
+    fn breadcrumb(&self, ui: &mut egui::Ui, lang: Lang) -> Option<PathBuf> {
+        let mut navigate = None;
+        ui.horizontal_wrapped(|ui| {
+            let home = std::env::var_os("HOME").map(PathBuf::from);
+            let segments = picker_breadcrumb(&self.current, home.as_deref(), lang);
+            let count = segments.len();
+            for (index, (path, label)) in segments.into_iter().enumerate() {
+                if index > 0 {
+                    ui.label(RichText::new("/").size(13.0).color(BORDER));
+                }
+                if index + 1 == count {
+                    ui.label(
+                        RichText::new(label)
+                            .size(13.5)
+                            .color(INK)
+                            .family(strong_family()),
+                    );
+                } else if ui
+                    .add(
+                        egui::Label::new(RichText::new(label).size(13.5).color(INK_MUTED))
+                            .sense(egui::Sense::click()),
+                    )
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .on_hover_text(path.display().to_string())
+                    .clicked()
+                {
+                    navigate = Some(path);
+                }
+            }
+        });
+        navigate
+    }
+
+    fn folder_list(&mut self, ui: &mut egui::Ui, lang: Lang) -> Option<PathBuf> {
+        let mut navigate = None;
+        egui::ScrollArea::vertical()
+            .max_height(300.0)
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                match child_directories(&self.current) {
+                    Ok(directories) => {
+                        self.error = None;
+                        if directories.is_empty() {
+                            ui.label(RichText::new(lang.picker_empty()).color(INK_MUTED));
+                        }
+                        for directory in directories {
+                            let name = directory.file_name().map_or_else(
+                                || directory.display().to_string(),
+                                |name| name.to_string_lossy().into_owned(),
+                            );
+                            let chosen = self.selected.as_deref() == Some(directory.as_path());
+                            let response = picker_row(ui, &name, chosen, Some(Icon::Folder))
+                                .on_hover_text(lang.picker_open(&name));
+                            if response.double_clicked() {
+                                navigate = Some(directory);
+                            } else if response.clicked() {
+                                self.selected = Some(directory);
+                            }
+                        }
+                    }
+                    Err(error) => self.error = Some(error),
+                }
+            });
+        navigate
+    }
+}
+
+fn picker_places(lang: Lang) -> Vec<(PathBuf, String)> {
+    let mut places = Vec::new();
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        places.push((home.clone(), lang.picker_home().to_owned()));
+        for (name, label) in [
+            ("Desktop", lang.picker_desktop()),
+            ("Documents", lang.picker_documents()),
+            ("Downloads", lang.picker_downloads()),
+        ] {
+            let path = home.join(name);
+            if path.is_dir() {
+                places.push((path, label.to_owned()));
+            }
+        }
+    }
+    places.push((PathBuf::from("/"), "/".to_owned()));
+    places
+}
+
+fn picker_breadcrumb(current: &Path, home: Option<&Path>, lang: Lang) -> Vec<(PathBuf, String)> {
+    let mut ancestors = current.ancestors().collect::<Vec<_>>();
+    ancestors.reverse();
+    if let Some(index) =
+        home.and_then(|home| ancestors.iter().position(|ancestor| *ancestor == home))
+    {
+        ancestors.drain(..index);
+    }
+    ancestors
+        .into_iter()
+        .map(|ancestor| {
+            let label = if ancestor.parent().is_none() {
+                "/".to_owned()
+            } else if home == Some(ancestor) {
+                lang.picker_home().to_owned()
+            } else {
+                ancestor.file_name().map_or_else(
+                    || ancestor.display().to_string(),
+                    |name| name.to_string_lossy().into_owned(),
+                )
+            };
+            (ancestor.to_path_buf(), label)
+        })
+        .collect()
+}
+
+fn picker_row(
+    ui: &mut egui::Ui,
+    label: &str,
+    selected: bool,
+    icon: Option<Icon>,
+) -> egui::Response {
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), 32.0), egui::Sense::click());
+    let pressed = response.is_pointer_button_down_on();
+    let t = ui.ctx().animate_bool_with_time(
+        response.id.with("hover"),
+        response.hovered() && !selected,
+        0.12,
+    );
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        if selected {
+            painter.rect_filled(rect, RADIUS_CONTROL, ACCENT_SOFT);
+        } else if pressed {
+            painter.rect_filled(rect, RADIUS_CONTROL, theme::ACCENT_SOFT_PRESSED);
+        } else if t > 0.0 {
+            painter.rect_filled(
+                rect,
+                RADIUS_CONTROL,
+                SURFACE.lerp_to_gamma(SURFACE_HOVER, t),
+            );
+        }
+        let mut label_left = rect.left() + 10.0;
+        if let Some(icon) = icon {
+            crate::icons::paint(
+                painter,
+                egui::Rect::from_center_size(
+                    egui::pos2(rect.left() + 20.0, rect.center().y),
+                    Vec2::splat(15.0),
+                ),
+                icon,
+                if selected { ACCENT_TEXT } else { INK_MUTED },
+                1.5,
+            );
+            label_left = rect.left() + 38.0;
+        }
+        painter.text(
+            egui::pos2(label_left, rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            picker_ellipsize(label, 52),
+            egui::FontId::new(13.5, medium_family()),
+            if selected { ACCENT_TEXT } else { INK },
+        );
+        if response.has_focus() {
+            focus_ring(ui, rect, FOCUS);
+        }
+    }
+    response
+}
+
+fn picker_ellipsize(label: &str, max_chars: usize) -> String {
+    if label.chars().count() <= max_chars {
+        return label.to_owned();
+    }
+    let mut shortened = label
+        .chars()
+        .take(max_chars.saturating_sub(1))
+        .collect::<String>();
+    shortened.push('…');
+    shortened
 }
 
 struct Notice {
     text: String,
     error: bool,
+    created: Instant,
 }
 
 impl Notice {
@@ -1899,6 +2763,7 @@ impl Notice {
         Self {
             text: text.into(),
             error: false,
+            created: Instant::now(),
         }
     }
 
@@ -1906,233 +2771,77 @@ impl Notice {
         Self {
             text: text.into(),
             error: true,
+            created: Instant::now(),
         }
     }
 
-    fn show(&self, ui: &mut egui::Ui, lang: Lang) {
-        let color = if self.error { DANGER } else { SUCCESS };
-        egui::Frame::group(ui.style()).show(ui, |ui| {
-            if self.error {
-                ui.colored_label(color, lang.operation_failed());
-                ui.collapsing(lang.technical_details(), |ui| {
-                    ui.label(&self.text);
-                });
-            } else {
-                ui.colored_label(color, &self.text);
-            }
-        });
-    }
-}
-
-fn configure_style(context: &egui::Context) {
-    context.set_theme(egui::Theme::Light);
-    let mut visuals = egui::Visuals::light();
-    visuals.panel_fill = CANVAS;
-    visuals.window_fill = SURFACE;
-    visuals.extreme_bg_color = SURFACE;
-    visuals.faint_bg_color = SURFACE_MUTED;
-    visuals.selection.bg_fill = ACCENT_SOFT;
-    visuals.selection.stroke = Stroke::new(1.0, ACCENT);
-    visuals.hyperlink_color = ACCENT;
-    visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, INK);
-    visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, INK);
-    visuals.widgets.hovered.bg_fill = ACCENT_SOFT;
-    visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, INK);
-    visuals.widgets.active.bg_fill = ACCENT_SOFT;
-    visuals.widgets.active.fg_stroke = Stroke::new(1.0, INK);
-    visuals.widgets.active.bg_stroke = Stroke::new(2.0, Color32::from_rgb(16, 28, 22));
-    visuals.window_corner_radius = 12.0.into();
-    context.set_visuals(visuals);
-    context.style_mut_of(egui::Theme::Light, |style| {
-        style.spacing.item_spacing = egui::vec2(10.0, 8.0);
-        style.spacing.button_padding = egui::vec2(14.0, 8.0);
-        style.spacing.interact_size.y = 36.0;
-        style.visuals.override_text_color = Some(INK);
-        style
-            .text_styles
-            .insert(egui::TextStyle::Heading, egui::FontId::proportional(25.0));
-    });
-}
-
-fn nav_button(ui: &mut egui::Ui, current: &mut View, target: View, label: &str) {
-    let selected = *current == target;
-    if ui
-        .add_sized(
-            [ui.available_width(), 42.0],
-            egui::Button::new(RichText::new(label).size(15.0).color(if selected {
-                Color32::WHITE
-            } else {
-                NAV_MUTED
-            }))
-            .selected(selected)
-            .fill(if selected {
-                ACCENT
-            } else {
-                Color32::TRANSPARENT
-            })
-            .corner_radius(8.0),
-        )
-        .clicked()
-    {
-        *current = target;
-    }
-}
-
-fn page_header(ui: &mut egui::Ui, title: &str, description: &str) {
-    ui.vertical(|ui| {
-        ui.heading(RichText::new(title).size(32.0).strong().color(INK));
-        ui.label(RichText::new(description).size(15.0).color(INK_MUTED));
-    });
-}
-
-fn card() -> egui::Frame {
-    egui::Frame::NONE
-        .fill(SURFACE)
-        .stroke(Stroke::new(1.0, BORDER))
-        .corner_radius(10.0)
-        .inner_margin(egui::Margin::same(18))
-}
-
-fn primary_button(label: &str) -> egui::Button<'_> {
-    egui::Button::new(RichText::new(label).strong().color(Color32::WHITE))
-        .fill(ACCENT)
-        .corner_radius(8.0)
-        .min_size(Vec2::new(132.0, 40.0))
-}
-
-fn compact_primary_button(label: &str) -> egui::Button<'_> {
-    egui::Button::new(RichText::new(label).strong().color(Color32::WHITE))
-        .fill(ACCENT)
-        .corner_radius(7.0)
-}
-
-fn secondary_button(label: &str) -> egui::Button<'_> {
-    egui::Button::new(RichText::new(label).color(INK))
-        .fill(SURFACE)
-        .stroke(Stroke::new(1.0, BORDER))
-        .corner_radius(8.0)
-        .min_size(Vec2::new(104.0, 36.0))
-}
-
-fn compact_button(label: &str) -> egui::Button<'_> {
-    egui::Button::new(RichText::new(label).color(INK))
-        .fill(SURFACE)
-        .stroke(Stroke::new(1.0, BORDER))
-        .corner_radius(7.0)
-}
-
-fn environment_banner(
-    ui: &mut egui::Ui,
-    lang: Lang,
-    state: EnvironmentState,
-    active_projects: usize,
-    services: impl FnOnce(&mut egui::Ui),
-) {
-    let ready = state == EnvironmentState::Ready;
-    let tint = if ready { ACCENT_SOFT } else { SURFACE_MUTED };
-    egui::Frame::NONE
-        .fill(tint)
-        .stroke(Stroke::new(
-            1.0,
-            if ready {
-                Color32::from_rgb(181, 220, 199)
-            } else {
-                BORDER
-            },
-        ))
-        .corner_radius(11.0)
-        .inner_margin(egui::Margin::symmetric(22, 18))
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                status_mark(ui, ready);
-                ui.add_space(8.0);
-                ui.vertical(|ui| {
-                    ui.label(
-                        RichText::new(match state {
-                            EnvironmentState::Checking => lang.checking_status(),
-                            EnvironmentState::Ready => lang.env_on(),
-                            EnvironmentState::GatewayStopped => lang.gateway_stopped(),
-                            EnvironmentState::Stopped => lang.env_off(),
-                            EnvironmentState::Unavailable => lang.daemon_unavailable(),
-                        })
-                        .size(22.0)
-                        .strong()
-                        .color(INK),
-                    );
-                    ui.label(
-                        RichText::new(if state == EnvironmentState::Checking {
-                            lang.loading_projects()
-                        } else if ready {
-                            lang.env_on_body()
-                        } else if state == EnvironmentState::GatewayStopped {
-                            lang.gateway_stopped_body()
-                        } else {
-                            lang.env_off_body()
-                        })
-                        .color(INK_MUTED),
-                    );
-                });
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+    fn toast(&self, ui: &mut egui::Ui, lang: Lang) -> bool {
+        let (fill, color, icon) = if self.error {
+            (DANGER_SOFT, DANGER, Icon::Warning)
+        } else {
+            (SUCCESS_SOFT, SUCCESS, Icon::Check)
+        };
+        let mut dismissed = false;
+        egui::Frame::NONE
+            .fill(SURFACE)
+            .stroke(Stroke::new(1.0, BORDER_STRONG))
+            .corner_radius(RADIUS_CARD)
+            .inner_margin(egui::Margin::symmetric(14, 12))
+            .show(ui, |ui| {
+                ui.set_max_width(380.0);
+                ui.horizontal_top(|ui| {
+                    icon_tile(ui, icon, fill, color, 26.0);
+                    ui.add_space(2.0);
                     ui.vertical(|ui| {
-                        ui.label(
-                            RichText::new(lang.active_projects())
-                                .size(12.0)
-                                .color(INK_MUTED),
-                        );
-                        ui.label(
-                            RichText::new(active_projects.to_string())
-                                .size(24.0)
-                                .strong()
-                                .color(INK),
-                        );
+                        ui.set_max_width(280.0);
+                        if self.error {
+                            ui.label(strong(lang.operation_failed()).size(13.5).color(INK));
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(&self.text).size(12.5).color(INK_MUTED),
+                                )
+                                .wrap(),
+                            );
+                        } else {
+                            ui.add(
+                                egui::Label::new(RichText::new(&self.text).size(13.0).color(INK))
+                                    .wrap(),
+                            );
+                        }
                     });
+                    ui.add_space(4.0);
+                    if icon_button(ui, Icon::Close, 36.0).clicked() {
+                        dismissed = true;
+                    }
                 });
             });
-            ui.add_space(12.0);
-            ui.separator();
-            ui.add_space(6.0);
-            services(ui);
-        });
+        dismissed
+    }
 }
 
-fn service_card(ui: &mut egui::Ui, title: &str, value: &str, active: bool) {
-    egui::Frame::NONE
-        .inner_margin(egui::Margin::symmetric(10, 7))
-        .show(ui, |ui| {
-            ui.set_min_size(Vec2::new(118.0, 48.0));
-            ui.horizontal(|ui| {
-                status_dot(ui, active);
-                ui.vertical(|ui| {
-                    ui.label(RichText::new(title).strong().color(INK));
-                    ui.label(RichText::new(value).size(12.0).color(INK_MUTED));
-                });
-            });
-        });
+fn settings_label(ui: &mut egui::Ui, label: &str) {
+    ui.allocate_ui(Vec2::new(170.0, 20.0), |ui| {
+        ui.label(RichText::new(label).size(12.5).color(INK_MUTED));
+    });
 }
 
-fn project_ledger_header(ui: &mut egui::Ui, lang: Lang) {
+fn ledger_header(ui: &mut egui::Ui, lang: Lang) {
     egui::Frame::NONE
         .fill(SURFACE_MUTED)
-        .stroke(Stroke::new(1.0, BORDER))
-        .corner_radius(egui::CornerRadius {
-            nw: 9,
-            ne: 9,
-            sw: 0,
-            se: 0,
-        })
-        .inner_margin(egui::Margin::symmetric(14, 9))
+        .corner_radius(RADIUS_CARD)
+        .inner_margin(egui::Margin::symmetric(16, 9))
         .show(ui, |ui| {
-            ui.set_min_width(730.0);
+            ui.set_min_width(840.0);
             ui.horizontal(|ui| {
-                header_cell(ui, lang.col_project(), 150.0);
-                header_cell(ui, lang.col_domain(), 184.0);
-                header_cell(ui, lang.col_services(), 132.0);
-                header_cell(ui, lang.col_state(), 92.0);
+                header_cell(ui, lang.col_project(), 140.0);
+                header_cell(ui, lang.col_domain(), 150.0);
+                header_cell(ui, lang.col_services(), 108.0);
+                header_cell(ui, lang.col_state(), 88.0);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(
                         RichText::new(lang.col_actions())
                             .size(12.0)
-                            .strong()
+                            .family(strong_family())
                             .color(INK_MUTED),
                     );
                 });
@@ -2142,148 +2851,15 @@ fn project_ledger_header(ui: &mut egui::Ui, lang: Lang) {
 
 fn header_cell(ui: &mut egui::Ui, label: &str, width: f32) {
     ui.allocate_ui(Vec2::new(width, 18.0), |ui| {
-        ui.label(RichText::new(label).size(12.0).strong().color(INK_MUTED));
-    });
-}
-
-fn empty_projects(ui: &mut egui::Ui, lang: Lang, daemon_online: bool) {
-    let content_width = (ui.available_width() - 40.0).max(240.0);
-    card().show(ui, |ui| {
-        ui.set_min_size(Vec2::new(content_width, 110.0));
-        ui.vertical_centered(|ui| {
-            ui.add_space(13.0);
-            ui.label(RichText::new(lang.empty_title()).size(18.0).strong());
-            ui.label(
-                RichText::new(if daemon_online {
-                    lang.empty_online()
-                } else {
-                    lang.empty_offline()
-                })
-                .color(INK_MUTED),
-            );
-        });
-    });
-}
-
-fn callout(ui: &mut egui::Ui, color: Color32, content: impl FnOnce(&mut egui::Ui)) {
-    egui::Frame::NONE
-        .fill(SURFACE)
-        .stroke(Stroke::new(1.0, color))
-        .corner_radius(9.0)
-        .inner_margin(egui::Margin::symmetric(16, 12))
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                let (rect, _) = ui.allocate_exact_size(Vec2::new(4.0, 34.0), egui::Sense::hover());
-                ui.painter().rect_filled(rect, 2.0, color);
-                ui.add_space(6.0);
-                content(ui);
-            });
-        });
-}
-
-fn section_heading(ui: &mut egui::Ui, title: &str, description: &str) {
-    ui.label(RichText::new(title).size(19.0).strong().color(INK));
-    ui.label(RichText::new(description).size(13.0).color(INK_MUTED));
-}
-
-fn form_label(ui: &mut egui::Ui, label: &str) -> egui::Response {
-    ui.label(RichText::new(label).strong().color(INK))
-}
-
-fn soft_badge(ui: &mut egui::Ui, label: &str) {
-    egui::Frame::NONE
-        .fill(ACCENT_SOFT)
-        .corner_radius(12.0)
-        .inner_margin(egui::Margin::symmetric(10, 4))
-        .show(ui, |ui| {
-            ui.label(RichText::new(label).size(12.0).strong().color(ACCENT));
-        });
-}
-
-fn status_dot(ui: &mut egui::Ui, active: bool) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::splat(12.0), egui::Sense::hover());
-    ui.painter().circle_filled(
-        rect.center(),
-        5.0,
-        if active {
-            SUCCESS
-        } else {
-            Color32::from_rgb(154, 162, 163)
-        },
-    );
-}
-
-fn status_mark(ui: &mut egui::Ui, active: bool) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::splat(52.0), egui::Sense::hover());
-    let color = if active {
-        SUCCESS
-    } else {
-        Color32::from_rgb(154, 162, 163)
-    };
-    ui.painter().circle_filled(rect.center(), 24.0, color);
-    if active {
-        ui.painter().line_segment(
-            [
-                rect.center() + egui::vec2(-10.0, 0.0),
-                rect.center() + egui::vec2(-3.0, 8.0),
-            ],
-            Stroke::new(4.0, Color32::WHITE),
-        );
-        ui.painter().line_segment(
-            [
-                rect.center() + egui::vec2(-3.0, 8.0),
-                rect.center() + egui::vec2(12.0, -9.0),
-            ],
-            Stroke::new(4.0, Color32::WHITE),
-        );
-    } else {
-        ui.painter().line_segment(
-            [
-                rect.center() + egui::vec2(-10.0, 0.0),
-                rect.center() + egui::vec2(10.0, 0.0),
-            ],
-            Stroke::new(4.0, Color32::WHITE),
-        );
-    }
-}
-
-fn brand_mark(ui: &mut egui::Ui, size: f32) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), egui::Sense::hover());
-    ui.painter()
-        .circle_stroke(rect.center(), size * 0.42, Stroke::new(3.0, Color32::WHITE));
-    ui.painter().circle_stroke(
-        rect.center(),
-        size * 0.32,
-        Stroke::new(3.0, Color32::from_rgb(62, 222, 156)),
-    );
-}
-
-fn search_mark(ui: &mut egui::Ui) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::splat(20.0), egui::Sense::hover());
-    let center = rect.center() + egui::vec2(-2.0, -2.0);
-    ui.painter()
-        .circle_stroke(center, 5.5, Stroke::new(1.6, INK_MUTED));
-    ui.painter().line_segment(
-        [center + egui::vec2(4.0, 4.0), center + egui::vec2(9.0, 9.0)],
-        Stroke::new(1.6, INK_MUTED),
-    );
-}
-
-fn state_badge(ui: &mut egui::Ui, running: bool, lang: Lang) {
-    ui.horizontal(|ui| {
-        status_dot(ui, running);
+        ui.set_min_width(width);
         ui.label(
-            RichText::new(if running {
-                lang.badge_active()
-            } else {
-                lang.badge_stopped()
-            })
-            .size(12.0)
-            .color(if running { SUCCESS } else { INK_MUTED }),
+            RichText::new(label)
+                .size(12.0)
+                .family(strong_family())
+                .color(INK_MUTED),
         );
     });
 }
-
 fn child_directories(path: &Path) -> Result<Vec<PathBuf>, String> {
     let mut directories = fs::read_dir(path)
         .map_err(|error| error.to_string())?
@@ -2300,12 +2876,30 @@ fn child_directories(path: &Path) -> Result<Vec<PathBuf>, String> {
     Ok(directories)
 }
 
-fn open_browser(hostname: &str, lang: Lang, notice: &mut Option<Notice>) {
-    open_url(&format!("https://{hostname}"), lang, notice);
+fn open_browser(
+    hostname: &str,
+    web_port: Option<u16>,
+    gateway_running: bool,
+    lang: Lang,
+    notice: &mut Option<Notice>,
+) {
+    let url = if gateway_running {
+        format!("https://{hostname}")
+    } else {
+        web_port.map_or_else(
+            || format!("https://{hostname}"),
+            |port| format!("http://127.0.0.1:{port}"),
+        )
+    };
+    open_url(&url, lang, notice);
 }
 
 fn open_url(url: &str, lang: Lang, notice: &mut Option<Notice>) {
-    if let Err(error) = Command::new("xdg-open").arg(url).spawn() {
+    #[cfg(target_os = "macos")]
+    let program = "open";
+    #[cfg(not(target_os = "macos"))]
+    let program = "xdg-open";
+    if let Err(error) = Command::new(program).arg(url).spawn() {
         *notice = Some(Notice::error(lang.notice_browser(&error.to_string())));
     }
 }
@@ -2319,6 +2913,24 @@ fn localweb_cli_path() -> Result<PathBuf, String> {
     } else {
         Ok(PathBuf::from("localweb"))
     }
+}
+
+fn find_program(name: &str) -> Option<PathBuf> {
+    if let Ok(executable) = std::env::current_exe() {
+        let sibling = executable.with_file_name(name);
+        if sibling.is_file() {
+            return Some(sibling);
+        }
+    }
+    std::env::var_os("PATH").and_then(|paths| {
+        std::env::split_paths(&paths)
+            .map(|directory| directory.join(name))
+            .find(|candidate| candidate.is_file())
+    })
+}
+
+fn mcp_configuration() -> &'static str {
+    "{\n  \"mcpServers\": {\n    \"localweb\": {\n      \"command\": \"localweb-mcp\"\n    }\n  }\n}"
 }
 
 fn nonempty(value: &str) -> Option<String> {
@@ -2464,7 +3076,7 @@ mod tests {
             &GlobalConfig::default(),
         )
         .unwrap();
-        for lang in [Lang::English, Lang::Italiano, Lang::Shqip] {
+        for lang in Lang::ALL {
             let ctx = egui::Context::default();
             configure_style(&ctx);
             let mut app = LocalWebApp::state(None, lang, None);
@@ -2506,5 +3118,45 @@ mod tests {
             );
         }
         fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn picker_history_walks_back_and_forward() {
+        let mut picker = DirectoryPicker {
+            current: PathBuf::from("/a"),
+            history: vec![PathBuf::from("/a")],
+            history_position: 0,
+            selected: None,
+            open: true,
+            error: None,
+        };
+        picker.navigate_to(PathBuf::from("/a/b"));
+        picker.navigate_to(PathBuf::from("/a/b/c"));
+        picker.go_back();
+        assert_eq!(picker.current, Path::new("/a/b"));
+        picker.go_forward();
+        assert_eq!(picker.current, Path::new("/a/b/c"));
+        picker.go_back();
+        picker.navigate_to(PathBuf::from("/a/x"));
+        picker.go_forward();
+        assert_eq!(picker.current, Path::new("/a/x"));
+        picker.go_back();
+        picker.go_back();
+        picker.go_back();
+        assert_eq!(picker.current, Path::new("/a"));
+    }
+
+    #[test]
+    fn picker_breadcrumb_collapses_to_home() {
+        let home = Path::new("/home/dev");
+        let labels = picker_breadcrumb(Path::new("/home/dev/sites/app"), Some(home), Lang::English)
+            .into_iter()
+            .map(|(_, label)| label)
+            .collect::<Vec<_>>();
+        assert_eq!(labels, ["Home", "sites", "app"]);
+        let outside = picker_breadcrumb(Path::new("/srv/www"), Some(home), Lang::English);
+        assert_eq!(outside.len(), 3);
+        let at_home = picker_breadcrumb(Path::new("/home/dev"), Some(home), Lang::English);
+        assert_eq!(at_home.len(), 1);
     }
 }

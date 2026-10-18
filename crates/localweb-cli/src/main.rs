@@ -4,7 +4,7 @@ use localweb_core::{
     Cache, Database, ExecutionSpec, NewProject, Paths, Request, Response, SupervisorConfig,
     WebServer, certificate::CaPaths, send_request,
 };
-use std::{ffi::OsString, io::Write, path::PathBuf, process::Command};
+use std::{ffi::OsString, path::PathBuf, process::Command};
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -20,6 +20,10 @@ struct Cli {
     command: CommandKind,
 }
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "clap subcommands carry every project option in one place"
+)]
 #[derive(Subcommand)]
 enum CommandKind {
     Setup,
@@ -113,7 +117,7 @@ enum RuntimeCommand {
 }
 
 #[derive(Subcommand)]
-#[allow(
+#[expect(
     clippy::large_enum_variant,
     reason = "project creation carries every option by design"
 )]
@@ -168,6 +172,12 @@ enum ProjectCommand {
         /// Run a private Mailpit instance for this project (dev email).
         #[arg(long)]
         mail: bool,
+        /// Fixed loopback web port; a free port is assigned when omitted.
+        #[arg(long = "web-port", value_parser = clap::value_parser!(u16).range(1024..))]
+        web_port: Option<u16>,
+        /// Fixed loopback database port; a free port is assigned when omitted.
+        #[arg(long = "db-port", value_parser = clap::value_parser!(u16).range(1024..))]
+        database_port: Option<u16>,
         #[arg(long)]
         autostart: bool,
     },
@@ -317,16 +327,11 @@ async fn main() -> Result<()> {
             return Ok(());
         }
         CommandKind::Autostart { command } => {
-            let action = match command {
-                Toggle::Enable => "enable",
-                Toggle::Disable => "disable",
+            let (enable, action) = match command {
+                Toggle::Enable => (true, "enable"),
+                Toggle::Disable => (false, "disable"),
             };
-            let status = Command::new("systemctl")
-                .args(["--user", action, "localwebd.service"])
-                .status()?;
-            if !status.success() {
-                bail!("systemctl --user {action} localwebd.service failed");
-            }
+            localweb_core::service::set_autostart(enable)?;
             println!("LocalWeb login autostart {action}d");
             return Ok(());
         }
@@ -364,6 +369,8 @@ async fn main() -> Result<()> {
                 cron,
                 cron_preset,
                 mail,
+                web_port,
+                database_port,
                 autostart,
             } => {
                 sync_after = true;
@@ -393,6 +400,8 @@ async fn main() -> Result<()> {
                     cron: cron_entries,
                     cron_preset,
                     mail,
+                    web_port,
+                    database_port,
                     autostart,
                 })
             }
@@ -445,14 +454,20 @@ async fn main() -> Result<()> {
             }
         }
         Response::Project(item) => println!(
-            "{} ({})\nPath: {}\nDocument root: {}\nPHP: {}\nWeb: {:?}\nDatabase: {:?}\nCache: {:?}\nSupervisor: {}\nState: {}",
+            "{} ({})\nPath: {}\nDocument root: {}\nPHP: {}\nWeb: {:?}\nWeb URL: {}\nDatabase: {:?}\nDatabase URL: {}\nCache: {:?}\nSupervisor: {}\nState: {}",
             item.project.name,
             item.project.hostname,
             item.project.path.display(),
             item.project.document_root.display(),
             item.project.php,
             item.project.web_server,
+            item.project
+                .web_port
+                .map_or_else(|| "-".to_owned(), |port| format!("http://127.0.0.1:{port}")),
             item.project.database,
+            item.project
+                .database_port
+                .map_or_else(|| "-".to_owned(), |port| format!("127.0.0.1:{port}")),
             item.project.cache,
             if item.project.supervisor.enabled {
                 "enabled"
@@ -496,14 +511,7 @@ async fn main() -> Result<()> {
 
 fn start_daemon() -> Result<()> {
     // Restart so a stale daemon left behind by a package upgrade is replaced.
-    let status = Command::new("systemctl")
-        .args(["--user", "restart", "localwebd.service"])
-        .status()?;
-    if !status.success() {
-        bail!(
-            "systemctl could not start localwebd.service; run `systemctl --user status localwebd.service`"
-        );
-    }
+    localweb_core::service::restart_daemon()?;
     println!("LocalWeb daemon started");
     Ok(())
 }
@@ -513,34 +521,16 @@ fn setup(paths: &Paths) -> Result<()> {
     let _ = localweb_core::GlobalConfig::load_or_create(paths)?;
     CaPaths::new(paths).ensure_ca()?;
     register_paths(paths)?;
-    if !std::path::Path::new("/usr/lib/systemd/user/localwebd.service").is_file() {
-        let unit_dir = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .context("HOME is unset")?
-            .join(".config/systemd/user");
-        std::fs::create_dir_all(&unit_dir)?;
-        let daemon = std::env::current_exe()?.with_file_name("localwebd");
-        if !daemon.exists() {
-            bail!(
-                "localwebd is missing next to the CLI at {}",
-                daemon.display()
-            );
-        }
-        let unit = format!(
-            "[Unit]\nDescription=LocalWeb user daemon\nAfter=default.target\n\n[Service]\nType=simple\nExecStart={}\nRestart=on-failure\nNoNewPrivileges=yes\nPrivateTmp=yes\n\n[Install]\nWantedBy=default.target\n",
-            daemon.display()
+    localweb_core::service::write_user_units(paths)?;
+    if cfg!(target_os = "macos") {
+        println!(
+            "LocalWeb directories, CA, and launch agents installed. Run `localweb ca install`, then `localweb start`. Login autostart is enabled; disable it with `localweb autostart disable`."
         );
-        localweb_core::atomic_write(&unit_dir.join("localwebd.service"), unit.as_bytes(), 0o600)?;
+    } else {
+        println!(
+            "LocalWeb directories, CA, and user service installed. Run `localweb ca install`, then `localweb start`. Login autostart remains disabled."
+        );
     }
-    let status = Command::new("systemctl")
-        .args(["--user", "daemon-reload"])
-        .status()?;
-    if !status.success() {
-        bail!("systemctl --user daemon-reload failed");
-    }
-    println!(
-        "LocalWeb directories, CA, and user service installed. Run `localweb ca install`, then `localweb start`. Login autostart remains disabled."
-    );
     Ok(())
 }
 
@@ -681,22 +671,9 @@ fn helper_path() -> Result<PathBuf> {
 
 fn run_helper(operation: &str, input: &[u8]) -> Result<()> {
     let helper = helper_path()?;
-    let mut child = Command::new("pkexec")
-        .arg(helper)
-        .arg(operation)
-        .stdin(std::process::Stdio::piped())
-        .spawn()
-        .context("cannot launch pkexec")?;
-    child
-        .stdin
-        .take()
-        .context("helper stdin unavailable")?
-        .write_all(input)?;
-    let status = child.wait()?;
-    if !status.success() {
-        bail!("privileged helper {operation} failed; check polkit authorization and system logs");
-    }
-    Ok(())
+    Ok(localweb_core::privilege::run_helper(
+        &helper, operation, input,
+    )?)
 }
 
 fn install_ca(paths: &Paths) -> Result<()> {

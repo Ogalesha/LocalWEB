@@ -88,6 +88,8 @@ impl RuntimeLayout {
         let os = match crate::platform::TrustStore::detect()? {
             crate::platform::TrustStore::Ubuntu => "ubuntu",
             crate::platform::TrustStore::Arch => "arch",
+            #[cfg(target_os = "macos")]
+            crate::platform::TrustStore::Macos => "macos",
         };
         if manifest.schema_version != 1
             || !manifest.target.starts_with(&format!("{os}-"))
@@ -108,6 +110,23 @@ impl RuntimeLayout {
     /// Returns an error for unsupported versions or an incomplete runtime payload.
     pub fn php(&self, version: &str) -> Result<(PathBuf, PathBuf)> {
         validate_php_version(version)?;
+        #[cfg(target_os = "macos")]
+        {
+            for formula in [format!("php@{version}"), "php".to_owned()] {
+                if let Some(directory) = macos_opt_dir(&formula) {
+                    let php = directory.join("bin/php");
+                    let fpm = directory.join("sbin/php-fpm");
+                    if php.is_file() && fpm.is_file() {
+                        return Ok((php, fpm));
+                    }
+                }
+            }
+            let php = PathBuf::from("/usr/bin/php");
+            let fpm = PathBuf::from("/usr/sbin/php-fpm");
+            if php.is_file() && fpm.is_file() {
+                return Ok((php, fpm));
+            }
+        }
         let base = self.root.join("php").join(version);
         let php = base.join("bin/php");
         let fpm = base.join("sbin/php-fpm");
@@ -126,6 +145,10 @@ impl RuntimeLayout {
                 "unsupported Composer version: {major}"
             )));
         }
+        #[cfg(target_os = "macos")]
+        if let Some(phar) = macos_composer_phar() {
+            return Ok(phar);
+        }
         require_file(
             self.root.join("composer/2/composer.phar"),
             "bundled Composer 2",
@@ -138,7 +161,46 @@ impl RuntimeLayout {
     ///
     /// Returns an error when the executable is missing.
     pub fn nginx(&self) -> Result<PathBuf> {
+        #[cfg(target_os = "macos")]
+        if let Some(path) = macos_opt_file("nginx", "bin/nginx") {
+            return Ok(path);
+        }
         require_file(self.root.join("nginx/sbin/nginx"), "bundled nginx")
+    }
+
+    /// Returns the nginx configuration prefix passed as `-p`.
+    #[must_use]
+    pub fn nginx_prefix(&self) -> PathBuf {
+        #[cfg(target_os = "macos")]
+        {
+            macos_prefix_file("etc/nginx/mime.types")
+                .and_then(|path| path.parent().map(Path::to_path_buf))
+                .unwrap_or_else(|| PathBuf::from("/opt/homebrew/etc/nginx"))
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            self.root.join("nginx")
+        }
+    }
+
+    /// Returns the nginx MIME type database installed by the host.
+    #[must_use]
+    pub fn nginx_mime_types(&self) -> PathBuf {
+        #[cfg(target_os = "macos")]
+        {
+            for root in homebrew_roots() {
+                for candidate in [
+                    root.join("etc/nginx/mime.types"),
+                    root.join("opt/nginx/conf/mime.types"),
+                    root.join("share/nginx/mime.types"),
+                ] {
+                    if candidate.is_file() {
+                        return candidate;
+                    }
+                }
+            }
+        }
+        self.root.join("nginx/conf/mime.types")
     }
 
     /// Resolves the bundled Apache executable.
@@ -147,7 +209,66 @@ impl RuntimeLayout {
     ///
     /// Returns an error when the executable is missing.
     pub fn apache(&self) -> Result<PathBuf> {
+        #[cfg(target_os = "macos")]
+        {
+            if let Some(path) = macos_opt_file("httpd", "bin/httpd") {
+                return Ok(path);
+            }
+            if let Some(path) = macos_prefix_file("bin/httpd") {
+                return Ok(path);
+            }
+        }
         require_file(self.root.join("apache/bin/apache2"), "bundled Apache")
+    }
+
+    /// Returns the Apache `ServerRoot` directory.
+    #[must_use]
+    pub fn apache_server_root(&self) -> PathBuf {
+        #[cfg(target_os = "macos")]
+        {
+            macos_prefix_file("etc/httpd/mime.types")
+                .and_then(|path| path.parent().map(Path::to_path_buf))
+                .unwrap_or_else(|| PathBuf::from("/opt/homebrew/etc/httpd"))
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            self.root.join("apache")
+        }
+    }
+
+    /// Returns the Apache module directory.
+    #[must_use]
+    pub fn apache_modules_dir(&self) -> PathBuf {
+        #[cfg(target_os = "macos")]
+        {
+            for root in homebrew_roots() {
+                for candidate in [
+                    root.join("opt/httpd/lib/httpd/modules"),
+                    root.join("lib/httpd/modules"),
+                    root.join("libexec/apache2"),
+                ] {
+                    if candidate.is_dir() {
+                        return candidate;
+                    }
+                }
+            }
+        }
+        self.apache_server_root().join("modules")
+    }
+
+    /// Returns the Apache MIME type database installed by the host.
+    #[must_use]
+    pub fn apache_mime_types(&self) -> PathBuf {
+        #[cfg(target_os = "macos")]
+        {
+            for root in homebrew_roots() {
+                let candidate = root.join("etc/httpd/mime.types");
+                if candidate.is_file() {
+                    return candidate;
+                }
+            }
+        }
+        self.apache_server_root().join("conf/mime.types")
     }
 
     /// Resolves the bundled Node.js executable.
@@ -156,6 +277,15 @@ impl RuntimeLayout {
     ///
     /// Returns an error when the executable is missing.
     pub fn node(&self) -> Result<PathBuf> {
+        #[cfg(target_os = "macos")]
+        {
+            if let Some(path) = macos_opt_file("node", "bin/node") {
+                return Ok(path);
+            }
+            if let Some(path) = macos_prefix_file("bin/node") {
+                return Ok(path);
+            }
+        }
         require_file(self.root.join("node/bin/node"), "bundled Node.js")
     }
 
@@ -165,6 +295,15 @@ impl RuntimeLayout {
     ///
     /// Returns an error when the npm payload is missing.
     pub fn npm_cli(&self) -> Result<PathBuf> {
+        #[cfg(target_os = "macos")]
+        {
+            if let Some(path) = macos_prefix_file("lib/node_modules/npm/bin/npm-cli.js") {
+                return Ok(path);
+            }
+            if let Some(path) = macos_opt_file("node", "lib/node_modules/npm/bin/npm-cli.js") {
+                return Ok(path);
+            }
+        }
         require_file(self.root.join("node/npm/bin/npm-cli.js"), "bundled npm")
     }
 
@@ -174,6 +313,10 @@ impl RuntimeLayout {
     ///
     /// Returns an error when the executable is missing.
     pub fn mailpit(&self) -> Result<PathBuf> {
+        #[cfg(target_os = "macos")]
+        if let Some(path) = macos_opt_file("mailpit", "bin/mailpit") {
+            return Ok(path);
+        }
         require_file(self.root.join("mailpit/bin/mailpit"), "bundled Mailpit")
     }
 
@@ -183,6 +326,17 @@ impl RuntimeLayout {
     ///
     /// Returns an error when any required executable is missing.
     pub fn mariadb(&self) -> Result<(PathBuf, PathBuf, PathBuf)> {
+        #[cfg(target_os = "macos")]
+        {
+            if let Some(directory) = macos_opt_dir("mariadb") {
+                let server = directory.join("bin/mariadbd");
+                let install = directory.join("bin/mariadb-install-db");
+                let client = directory.join("bin/mariadb");
+                if server.is_file() && install.is_file() && client.is_file() {
+                    return Ok((server, install, client));
+                }
+            }
+        }
         let base = self.root.join("mariadb");
         let server = require_file(base.join("bin/mariadbd"), "bundled MariaDB server")?;
         let install = require_file(
@@ -199,6 +353,16 @@ impl RuntimeLayout {
     ///
     /// Returns an error when any required executable is missing.
     pub fn mysql(&self) -> Result<(PathBuf, PathBuf)> {
+        #[cfg(target_os = "macos")]
+        {
+            if let Some(directory) = macos_opt_dir("mysql") {
+                let server = directory.join("bin/mysqld");
+                let client = directory.join("bin/mysql");
+                if server.is_file() && client.is_file() {
+                    return Ok((server, client));
+                }
+            }
+        }
         let base = self.root.join("mysql");
         let server = require_file(base.join("bin/mysqld"), "bundled MySQL server")?;
         let client = require_file(base.join("bin/mysql"), "bundled MySQL client")?;
@@ -210,6 +374,17 @@ impl RuntimeLayout {
     /// # Errors
     /// Returns an error when the PostgreSQL payload is incomplete.
     pub fn postgres(&self) -> Result<(PathBuf, PathBuf, PathBuf)> {
+        #[cfg(target_os = "macos")]
+        {
+            if let Some(directory) = macos_postgres_dir() {
+                let bin = directory.join("bin");
+                return Ok((
+                    require_file(bin.join("postgres"), "PostgreSQL server")?,
+                    require_file(bin.join("initdb"), "PostgreSQL initializer")?,
+                    require_file(bin.join("psql"), "PostgreSQL client")?,
+                ));
+            }
+        }
         let bin = self.root.join("postgres/bin");
         Ok((
             require_file(bin.join("postgres"), "bundled PostgreSQL server")?,
@@ -231,6 +406,66 @@ impl RuntimeLayout {
         ))
     }
 
+    /// Returns the MariaDB installation base directory.
+    #[must_use]
+    pub fn mariadb_basedir(&self) -> PathBuf {
+        #[cfg(target_os = "macos")]
+        if let Some(directory) = macos_opt_dir("mariadb") {
+            return directory;
+        }
+        self.root.join("mariadb")
+    }
+
+    /// Returns the MariaDB plugin directory.
+    #[must_use]
+    pub fn mariadb_plugin_dir(&self) -> PathBuf {
+        #[cfg(target_os = "macos")]
+        if let Some(directory) = macos_opt_dir("mariadb") {
+            return directory.join("lib/plugin");
+        }
+        self.root.join("mariadb/lib/plugin")
+    }
+
+    /// Returns the MariaDB localization directory.
+    #[must_use]
+    pub fn mariadb_messages_dir(&self) -> PathBuf {
+        #[cfg(target_os = "macos")]
+        if let Some(directory) = macos_opt_dir("mariadb") {
+            return directory.join("share/mariadb");
+        }
+        self.root.join("mariadb/share/mariadb")
+    }
+
+    /// Returns the MySQL localization directory.
+    #[must_use]
+    pub fn mysql_messages_dir(&self) -> PathBuf {
+        #[cfg(target_os = "macos")]
+        if let Some(directory) = macos_opt_dir("mysql") {
+            return directory.join("share/mysql");
+        }
+        self.root.join("mysql/share/mysql")
+    }
+
+    /// Returns the PostgreSQL data directory templates (`initdb -L`).
+    #[must_use]
+    pub fn postgres_share(&self) -> PathBuf {
+        #[cfg(target_os = "macos")]
+        if let Some(directory) = macos_postgres_dir() {
+            return macos_postgres_share(&directory);
+        }
+        self.root.join("postgres/share")
+    }
+
+    /// Returns the PostgreSQL extension library directory.
+    #[must_use]
+    pub fn postgres_lib(&self) -> PathBuf {
+        #[cfg(target_os = "macos")]
+        if let Some(directory) = macos_postgres_dir() {
+            return directory.join("lib/postgresql");
+        }
+        self.root.join("postgres/lib")
+    }
+
     /// Builds the private native-library search path for managed processes.
     #[must_use]
     pub fn library_path(&self) -> String {
@@ -248,6 +483,100 @@ impl RuntimeLayout {
         .collect::<Vec<_>>()
         .join(":")
     }
+}
+
+#[cfg(target_os = "macos")]
+fn homebrew_roots() -> [PathBuf; 2] {
+    [PathBuf::from("/opt/homebrew"), PathBuf::from("/usr/local")]
+}
+
+#[cfg(target_os = "macos")]
+fn macos_opt_dir(formula: &str) -> Option<PathBuf> {
+    homebrew_roots()
+        .into_iter()
+        .map(|root| root.join("opt").join(formula))
+        .find(|path| path.is_dir())
+}
+
+#[cfg(target_os = "macos")]
+fn macos_opt_file(formula: &str, relative: &str) -> Option<PathBuf> {
+    macos_opt_dir(formula)
+        .map(|directory| directory.join(relative))
+        .filter(|path| path.is_file())
+}
+
+#[cfg(target_os = "macos")]
+fn macos_prefix_file(relative: &str) -> Option<PathBuf> {
+    homebrew_roots()
+        .into_iter()
+        .map(|root| root.join(relative))
+        .find(|path| path.is_file())
+}
+
+#[cfg(target_os = "macos")]
+fn macos_composer_phar() -> Option<PathBuf> {
+    for root in homebrew_roots() {
+        for candidate in [
+            root.join("opt/composer/libexec/composer.phar"),
+            root.join("share/composer/composer.phar"),
+            root.join("libexec/composer.phar"),
+        ] {
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+        let cellar = root.join("Cellar/composer");
+        let Ok(entries) = fs::read_dir(cellar) else {
+            continue;
+        };
+        let mut versions: Vec<_> = entries.flatten().map(|entry| entry.path()).collect();
+        versions.sort();
+        for version in versions {
+            for candidate in [
+                version.join("libexec/composer.phar"),
+                version.join("composer.phar"),
+            ] {
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn macos_postgres_dir() -> Option<PathBuf> {
+    [
+        "postgresql@17",
+        "postgresql@16",
+        "postgresql@15",
+        "postgresql@14",
+        "postgresql",
+    ]
+    .into_iter()
+    .find_map(macos_opt_dir)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_postgres_share(directory: &Path) -> PathBuf {
+    let share = directory.join("share");
+    let mut candidates = vec![share.join("postgresql")];
+    if let Ok(entries) = fs::read_dir(&share) {
+        for entry in entries.flatten() {
+            if entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("postgresql")
+            {
+                candidates.push(entry.path());
+            }
+        }
+    }
+    candidates
+        .into_iter()
+        .find(|path| path.is_dir())
+        .unwrap_or(share)
 }
 
 fn require_file(path: PathBuf, label: &str) -> Result<PathBuf> {

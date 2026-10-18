@@ -31,8 +31,8 @@ localweb start
 ```
 
 Setup creates private configuration and data directories, a development
-CA and background-service integration. CA installation trusts local HTTPS.
-Setup, CA installation and domain changes use system authorization.
+CA and background-service integration. CA installation trusts local HTTPS
+domains. Setup, CA installation and domain changes use system authorization.
 Closing the window or terminal keeps projects running.
 
 ## Add an application
@@ -49,8 +49,11 @@ localweb project add ~/Code/acme --php 8.5 --web nginx \
 localweb project start acme
 ```
 
-That folder becomes `https://acme.dev`. All project domains use HTTPS;
-`--domain acme.test` avoids browsers' built-in HSTS policy for `.dev`.
+That folder answers on its fixed direct HTTP port (`localweb project info`
+prints it) and, when the gateway can bind port 443, on `https://acme.dev`.
+Pin the ports with `--web-port` and `--db-port` when another local stack
+needs a different assignment. `--domain acme.test` avoids browsers'
+built-in HSTS policy for `.dev`.
 
 The project **Details** panel shows configuration and optional connection
 settings. Use those values in your app; LocalWeb does not modify `.env`.

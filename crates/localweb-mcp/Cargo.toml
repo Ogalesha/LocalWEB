@@ -1,0 +1,25 @@
+[package]
+name = "localweb-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "Model Context Protocol server exposing LocalWeb to AI assistants"
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "localweb-mcp"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+localweb-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true

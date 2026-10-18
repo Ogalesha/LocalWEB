@@ -11,7 +11,7 @@ trap 'rm -rf "$stage"' EXIT
 mkdir -p "$stage/usr/bin" "$stage/usr/lib/localweb" "$stage/usr/lib/systemd/user" \
     "$stage/usr/share/applications" "$stage/usr/share/icons/hicolor/scalable/apps" \
     "$stage/usr/share/polkit-1/actions" "$stage/usr/share/doc/localweb" dist
-for binary in localweb localwebd localweb-gateway localweb-helper localweb-gui; do
+for binary in localweb localwebd localweb-gateway localweb-helper localweb-gui localweb-mcp; do
     install -m 0755 "target/release/$binary" "$stage/usr/lib/localweb/$binary"
     ln -s "../lib/localweb/$binary" "$stage/usr/bin/$binary"
 done

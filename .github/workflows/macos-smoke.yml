@@ -1,0 +1,32 @@
+name: macOS smoke
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/macos-smoke.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: macos-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: cargo check and portable tests
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Workspace compiles on Darwin
+        run: cargo check --workspace --all-targets
+      - name: Platform-independent tests
+        run: cargo test -p localweb-core -p localweb-gui

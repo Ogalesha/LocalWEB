@@ -19,14 +19,25 @@ use uuid::Uuid;
 pub mod certificate;
 pub mod hosts;
 pub mod platform;
+pub mod privilege;
 pub mod runtime;
+pub mod service;
 
+/// Version of the daemon wire protocol; peers must match exactly.
 pub const PROTOCOL_VERSION: u32 = 1;
+/// Supported configuration schema; files with other versions are rejected.
 pub const CONFIG_SCHEMA: u32 = 1;
+/// PHP releases the project form offers, oldest first.
 pub const PHP_VERSIONS: [&str; 6] = ["8.0", "8.1", "8.2", "8.3", "8.4", "8.5"];
+/// Largest accepted protocol frame; longer requests are rejected unread.
 pub const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 
+/// Every failure the shared library can report.
+///
+/// The enum is non-exhaustive; use [`LocalWebError::code`] for the stable
+/// protocol code instead of matching on variants.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum LocalWebError {
     #[error("I/O error: {0}")]
     Io(#[from] io::Error),
@@ -44,13 +55,35 @@ pub enum LocalWebError {
     Protocol(String),
 }
 
+impl LocalWebError {
+    /// Returns the stable protocol code for this error.
+    #[must_use]
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Io(_) => "IoError",
+            Self::Config(_) => "InvalidConfiguration",
+            Self::ProjectNotFound(_) => "ProjectNotFound",
+            Self::DomainConflict(_) => "DomainConflict",
+            Self::RuntimeNotInstalled(_) => "RuntimeNotInstalled",
+            Self::Service(_) => "ServiceStartFailed",
+            Self::Protocol(_) => "ProtocolError",
+        }
+    }
+}
+
+/// Result type for `LocalWeb` operations.
 pub type Result<T> = std::result::Result<T, LocalWebError>;
 
+/// Per-user directories `LocalWeb` reads and writes.
 #[derive(Debug, Clone)]
 pub struct Paths {
+    /// Project definitions and rendered configuration.
     pub config: PathBuf,
+    /// Managed runtimes, certificates, and database clusters.
     pub data: PathBuf,
+    /// Logs and state owned by the daemon.
     pub state: PathBuf,
+    /// User-scoped socket and generated service files.
     pub runtime: PathBuf,
 }
 
@@ -69,20 +102,47 @@ impl Paths {
                 .map_or_else(|| home.join(fallback), PathBuf::from)
                 .join("localweb")
         };
-        let runtime = std::env::var_os("XDG_RUNTIME_DIR")
-            .map(PathBuf::from)
-            .ok_or_else(|| {
-                LocalWebError::Config(
-                    "XDG_RUNTIME_DIR is unset; a user systemd session is required".into(),
-                )
-            })?
-            .join("localweb");
+        let runtime = Self::runtime_root()?.join("localweb");
         Ok(Self {
             config: xdg("XDG_CONFIG_HOME", ".config"),
             data: xdg("XDG_DATA_HOME", ".local/share"),
             state: xdg("XDG_STATE_HOME", ".local/state"),
             runtime,
         })
+    }
+
+    /// Resolves the per-user runtime directory that hosts sockets and service files.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when no per-user runtime location is available.
+    #[cfg(not(target_os = "macos"))]
+    fn runtime_root() -> Result<PathBuf> {
+        std::env::var_os("XDG_RUNTIME_DIR")
+            .map(PathBuf::from)
+            .ok_or_else(|| {
+                LocalWebError::Config(
+                    "XDG_RUNTIME_DIR is unset; a user systemd session is required".into(),
+                )
+            })
+    }
+
+    /// macOS has no `XDG_RUNTIME_DIR`; `$TMPDIR` is per-user with private permissions.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when neither environment variable is available.
+    #[cfg(target_os = "macos")]
+    fn runtime_root() -> Result<PathBuf> {
+        std::env::var_os("XDG_RUNTIME_DIR")
+            .or_else(|| std::env::var_os("TMPDIR"))
+            .map(PathBuf::from)
+            .ok_or_else(|| {
+                LocalWebError::Config(
+                    "neither XDG_RUNTIME_DIR nor TMPDIR is set; cannot place the runtime socket"
+                        .into(),
+                )
+            })
     }
 
     /// Creates private application directories with user-only permissions.
@@ -124,27 +184,42 @@ impl Paths {
     }
 }
 
+/// Global defaults and user-level behaviour for every project.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GlobalConfig {
+    /// Schema version of this file.
     pub schema_version: u32,
+    /// User-level behaviour switches.
     pub general: GeneralConfig,
+    /// Defaults copied into new projects.
     pub defaults: Defaults,
 }
 
+/// User-level behaviour shared by every project.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GeneralConfig {
+    /// Domain suffix appended to generated hostnames.
     pub domain_suffix: String,
+    /// Whether new projects are served over HTTPS.
     pub https: bool,
+    /// Whether the daemon starts auto-start projects on login.
     pub autostart: bool,
 }
 
+/// Default service selection for new projects.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Defaults {
+    /// Web server used unless overridden.
     pub web_server: WebServer,
+    /// PHP version used unless overridden.
     pub php: String,
+    /// Database engine used unless overridden.
     pub database: Database,
+    /// Cache engine used unless overridden.
     pub cache: Cache,
+    /// Composer version used unless overridden; only `2` is supported.
     pub composer: String,
+    /// Node.js major version used unless overridden.
     #[serde(default = "default_node_version")]
     pub node: String,
 }
@@ -206,39 +281,59 @@ impl GlobalConfig {
     }
 }
 
+/// Web server used to serve a project.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum WebServer {
+    /// Nginx with PHP-FPM.
     Nginx,
+    /// Apache with PHP-FPM.
     Apache,
 }
 
+/// Database engine provisioned for a project.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Database {
+    /// No database is provisioned.
     None,
+    /// MariaDB server shared by all projects.
     Mariadb,
+    /// MySQL server shared by all projects.
     Mysql,
+    /// PostgreSQL server shared by all projects.
     Postgres,
+    /// SQLite file inside the project.
     Sqlite,
 }
 
+/// In-memory cache provisioned for a project.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Cache {
+    /// No cache is provisioned.
     None,
+    /// Redis instance scoped to the project.
     Redis,
+    /// Reserved; not provisioned in this release.
     Memcached,
 }
 
+/// Detected or selected PHP application profile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Profile {
+    /// Plain PHP site.
     GenericPhp,
+    /// Laravel application.
     Laravel,
+    /// Symfony application.
     Symfony,
+    /// Drupal site.
     Drupal,
+    /// `WordPress` site.
     Wordpress,
+    /// `ProcessWire` site.
     ProcessWire,
 }
 
@@ -249,7 +344,9 @@ pub enum Profile {
 /// literal argument; no shell parses this value.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SupervisorConfig {
+    /// Whether the worker starts and stops with the project.
     pub enabled: bool,
+    /// Executable followed by literal arguments; `@php` uses the project CLI.
     pub command: Vec<String>,
 }
 
@@ -263,45 +360,81 @@ pub struct SupervisorConfig {
 /// arguments, never parsed through a shell.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CronEntry {
+    /// Whether the daemon runs this entry.
     pub enabled: bool,
+    /// Five-field schedule described on the type.
     pub schedule: String,
+    /// Executable followed by literal arguments; `@php` uses the project CLI.
     pub command: Vec<String>,
 }
 
+/// Complete persisted configuration of one project.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Project {
+    /// Schema version of this file.
     pub schema_version: u32,
+    /// Stable identifier used for generated files.
     pub id: Uuid,
+    /// URL-safe project name.
     pub name: String,
+    /// Absolute project root adopted by the user.
     pub path: PathBuf,
+    /// Hostname served by the HTTPS gateway when it can bind port 443.
     pub hostname: String,
+    /// Fixed loopback port serving this project over HTTP.
+    #[serde(default)]
+    pub web_port: Option<u16>,
+    /// Fixed loopback port exposing this project's database through a proxy.
+    #[serde(default)]
+    pub database_port: Option<u16>,
+    /// Document root relative to the project.
     pub document_root: PathBuf,
+    /// Application profile.
     pub profile: Profile,
+    /// Selected web server.
     pub web_server: WebServer,
+    /// PHP version serving the project.
     pub php: String,
+    /// Composer version; only `2` is supported.
     pub composer: String,
+    /// Node.js major version for project commands.
     #[serde(default = "default_node_version")]
     pub node: String,
+    /// Database engine.
     pub database: Database,
+    /// Cache engine.
     pub cache: Cache,
+    /// Worker process configuration.
     #[serde(default)]
     pub supervisor: SupervisorConfig,
+    /// Scheduled tasks run while the project is active.
     #[serde(default)]
     pub cron: Vec<CronEntry>,
+    /// Whether Mailpit captures the project email.
     #[serde(default)]
     pub mail: bool,
+    /// Whether the daemon starts the project on login.
     pub autostart: bool,
+    /// Whether operations may touch the project.
     pub enabled: bool,
+    /// Extra environment variables exported to project commands.
     pub environment: BTreeMap<String, String>,
+    /// Resource limits applied to generated service configuration.
     pub resources: ResourceSettings,
+    /// Creation timestamp in UTC.
     pub created_at: DateTime<Utc>,
 }
 
+/// Resource limits applied to generated service configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResourceSettings {
+    /// Maximum concurrent PHP-FPM workers.
     pub fpm_max_children: u16,
+    /// Seconds an idle PHP-FPM worker stays alive.
     pub fpm_idle_timeout_seconds: u16,
+    /// Requests handled before a PHP-FPM worker recycles.
     pub fpm_max_requests: u32,
+    /// Cache memory budget in MiB.
     pub cache_memory_mb: u32,
 }
 
@@ -316,27 +449,50 @@ impl Default for ResourceSettings {
     }
 }
 
+/// Describes a project to create; unset fields use global defaults.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewProject {
+    /// Project root to adopt.
     pub path: PathBuf,
+    /// Overrides the name derived from the folder.
     pub name: Option<String>,
+    /// Overrides the generated hostname.
     pub hostname: Option<String>,
+    /// Overrides the daemon-allocated direct web port.
+    #[serde(default)]
+    pub web_port: Option<u16>,
+    /// Overrides the daemon-allocated database proxy port.
+    #[serde(default)]
+    pub database_port: Option<u16>,
+    /// Overrides the detected document root.
     pub document_root: Option<PathBuf>,
+    /// Overrides the detected application profile.
     pub profile: Option<Profile>,
+    /// Overrides the default web server.
     pub web_server: Option<WebServer>,
+    /// Overrides the default PHP version.
     pub php: Option<String>,
+    /// Overrides the default Composer version.
     pub composer: Option<String>,
+    /// Overrides the default Node.js major version.
     pub node: Option<String>,
+    /// Overrides the default database engine.
     pub database: Option<Database>,
+    /// Overrides the default cache engine.
     pub cache: Option<Cache>,
+    /// Worker configuration; an enabled empty command uses the profile preset.
     #[serde(default)]
     pub supervisor: SupervisorConfig,
+    /// Explicit scheduled tasks.
     #[serde(default)]
     pub cron: Vec<CronEntry>,
+    /// Whether framework cron presets are added alongside explicit entries.
     #[serde(default)]
     pub cron_preset: bool,
+    /// Whether Mailpit captures the project email.
     #[serde(default)]
     pub mail: bool,
+    /// Whether the daemon starts the project on login.
     pub autostart: bool,
 }
 
@@ -363,6 +519,23 @@ impl Project {
             .hostname
             .unwrap_or_else(|| format!("{}.{}", name, global.general.domain_suffix));
         validate_domain(&hostname)?;
+        if let Some(port) = input.web_port {
+            validate_port(port)?;
+        }
+        if let Some(port) = input.database_port {
+            validate_port(port)?;
+        }
+        let database = input.database.unwrap_or(global.defaults.database);
+        if input.database_port.is_some()
+            && !matches!(
+                database,
+                Database::Mariadb | Database::Mysql | Database::Postgres
+            )
+        {
+            return Err(LocalWebError::Config(
+                "a database port requires MariaDB, MySQL, or PostgreSQL".into(),
+            ));
+        }
         let profile = input.profile.unwrap_or_else(|| detect_profile(&path));
         let document_root = input.document_root.unwrap_or_else(|| match profile {
             Profile::Laravel | Profile::Symfony => PathBuf::from("public"),
@@ -407,13 +580,15 @@ impl Project {
             name,
             path,
             hostname,
+            web_port: input.web_port,
+            database_port: input.database_port,
             document_root,
             profile,
             web_server: input.web_server.unwrap_or(global.defaults.web_server),
             php,
             node,
             composer,
-            database: input.database.unwrap_or(global.defaults.database),
+            database,
             cache: input.cache.unwrap_or(global.defaults.cache),
             supervisor,
             cron,
@@ -527,9 +702,9 @@ pub fn validate_cron_schedule(schedule: &str) -> Result<()> {
 fn validate_cron_field(field: &str, lo: u32, hi: u32) -> Result<()> {
     let (base, step) = match field.split_once('/') {
         Some((base, step)) => {
-            let amount: u32 = step
-                .parse()
-                .map_err(|_| LocalWebError::Config(format!("invalid cron step: {field}")))?;
+            let amount: u32 = step.parse().map_err(|error| {
+                LocalWebError::Config(format!("invalid cron step in {field}: {error}"))
+            })?;
             if amount == 0 || amount > hi {
                 return Err(LocalWebError::Config(format!("invalid cron step: {field}")));
             }
@@ -568,9 +743,9 @@ fn parse_cron_number(text: &str, lo: u32, hi: u32, field: &str) -> Result<u32> {
     if text.is_empty() {
         return Err(LocalWebError::Config(format!("empty cron value: {field}")));
     }
-    let value: u32 = text
-        .parse()
-        .map_err(|_| LocalWebError::Config(format!("invalid cron value `{text}` in: {field}")))?;
+    let value: u32 = text.parse().map_err(|error| {
+        LocalWebError::Config(format!("invalid cron value `{text}` in {field}: {error}"))
+    })?;
     if value < lo || value > hi {
         return Err(LocalWebError::Config(format!(
             "cron value {value} out of range {lo}-{hi}: {field}"
@@ -700,6 +875,23 @@ pub fn validate_name(name: &str) -> Result<()> {
     {
         return Err(LocalWebError::Config(format!(
             "invalid project name: {name}"
+        )));
+    }
+    Ok(())
+}
+
+/// Validates a fixed project port.
+///
+/// Ports below 1024 require elevated privileges, so `LocalWeb` only accepts
+/// unprivileged loopback ports.
+///
+/// # Errors
+///
+/// Returns an error for privileged port numbers.
+pub fn validate_port(port: u16) -> Result<()> {
+    if port < 1024 {
+        return Err(LocalWebError::Config(format!(
+            "port {port} is privileged; use a port between 1024 and 65535"
         )));
     }
     Ok(())
@@ -896,97 +1088,181 @@ pub fn atomic_write(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
     result
 }
 
+/// One versioned request sent to the daemon.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
-#[allow(
+#[expect(
     clippy::large_enum_variant,
     reason = "creation carries the full project configuration by design"
 )]
 pub enum Request {
+    /// Reports daemon and environment status.
     Status,
+    /// Stops the daemon and every service it manages.
     Shutdown,
+    /// Lists every configured project with live state.
     ProjectList,
-    ProjectGet { name: String },
+    /// Returns one project; `name` selects it.
+    ProjectGet {
+        /// Project name.
+        name: String,
+    },
+    /// Validates and persists a new project.
     ProjectAdd(NewProject),
-    ProjectRemove { name: String },
-    ProjectStart { name: String },
-    ProjectStop { name: String },
-    ProjectRestart { name: String },
-    ProjectEnvironment { name: String },
+    /// Deletes a project and its managed services.
+    ProjectRemove {
+        /// Project name.
+        name: String,
+    },
+    /// Starts the project services.
+    ProjectStart {
+        /// Project name.
+        name: String,
+    },
+    /// Stops the project services.
+    ProjectStop {
+        /// Project name.
+        name: String,
+    },
+    /// Restarts the project services.
+    ProjectRestart {
+        /// Project name.
+        name: String,
+    },
+    /// Returns the project's exported environment.
+    ProjectEnvironment {
+        /// Project name.
+        name: String,
+    },
+    /// Lists the bundled runtime components.
     RuntimeList,
-    ResolveExecution { name: String },
+    /// Returns the command execution specification for a project.
+    ResolveExecution {
+        /// Project name.
+        name: String,
+    },
+    /// Reports local certificate authority presence and trust.
     CaStatus,
+    /// Runs environment diagnostics.
     Doctor,
 }
 
+/// Versioned protocol frame wrapping a request or response.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Envelope<T> {
+    /// Protocol version of the payload.
     pub version: u32,
+    /// The carried message.
     pub payload: T,
 }
 
+/// One response returned by the daemon.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum Response {
+    /// Environment status.
     Status(Status),
+    /// Projects with live runtime state.
     Projects(Vec<ProjectStatus>),
+    /// One project with live runtime state.
     Project(ProjectStatus),
+    /// Human-readable result of an operation.
     Message(String),
+    /// Doctor findings.
     Diagnostics(Vec<Diagnostic>),
+    /// Command execution specification.
     Execution(ExecutionSpec),
+    /// Project environment variables.
     Environment(BTreeMap<String, String>),
+    /// Certificate authority state.
     Ca(CaStatus),
-    Error { code: String, message: String },
+    /// Failure with a stable code and a human-readable message.
+    Error {
+        /// Stable error code, see [`LocalWebError::code`].
+        code: String,
+        /// Human-readable cause.
+        message: String,
+    },
 }
 
+/// Everything a shell needs to run commands inside a project.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionSpec {
+    /// Absolute project root.
     pub project_path: PathBuf,
+    /// PHP CLI binary to use.
     pub php: PathBuf,
+    /// Composer phar when Composer is available.
     pub composer_phar: Option<PathBuf>,
+    /// Node.js binary when a managed runtime is available.
     #[serde(default)]
     pub node: Option<PathBuf>,
+    /// npm CLI entry point when a managed runtime is available.
     #[serde(default)]
     pub npm_cli: Option<PathBuf>,
+    /// Directory holding command shims prepended to `PATH`.
     pub shim_dir: PathBuf,
+    /// Bundled library search path, when the runtime needs one.
     pub library_path: Option<String>,
+    /// Private php.ini generated for the project.
     pub php_ini: Option<PathBuf>,
 }
 
+/// State of the local development certificate authority.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CaStatus {
+    /// Whether the CA certificate exists.
     pub exists: bool,
+    /// Whether the CA is present in the system trust store.
     pub trusted: bool,
+    /// Path of the CA certificate.
     pub certificate: PathBuf,
 }
 
+/// Daemon and gateway health counters.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Status {
+    /// Whether the daemon answered this request.
     pub daemon_running: bool,
+    /// Whether the HTTPS gateway unit is active.
     pub gateway_running: bool,
+    /// Number of configured projects.
     pub project_count: usize,
+    /// Number of projects currently running.
     pub active_projects: usize,
 }
 
+/// One project together with its observed runtime state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectStatus {
+    /// Persisted project configuration.
     pub project: Project,
+    /// Whether the project services are active.
     pub running: bool,
+    /// Mailpit web UI URL when the project has mail enabled.
     #[serde(default)]
     pub mail_web_url: Option<String>,
 }
 
+/// Hostname-to-upstream mapping served by the gateway.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GatewayRoute {
+    /// Hostname routed to the project.
     pub hostname: String,
+    /// Loopback port of the upstream server, absent while stopped.
     pub upstream_port: Option<u16>,
 }
 
+/// One doctor finding with an optional suggested fix.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Diagnostic {
+    /// Severity level such as `ok`, `warn`, or `fail`.
     pub level: String,
+    /// Short check name.
     pub check: String,
+    /// Observed detail for the check.
     pub detail: String,
+    /// Suggested remediation when the check failed.
     pub fix: Option<String>,
 }
 
@@ -1026,9 +1302,17 @@ mod tests {
     #[test]
     fn names_and_domains() {
         assert_eq!(sanitize_name("My Cool_Project!"), "my-cool-project");
-        assert!(validate_domain("acme.dev").is_ok());
-        assert!(validate_domain("bad..dev").is_err());
-        assert!(validate_domain("x.dev\n127.0.0.1 evil.dev").is_err());
+        validate_domain("acme.dev").unwrap();
+        validate_domain("bad..dev").unwrap_err();
+        validate_domain("x.dev\n127.0.0.1 evil.dev").unwrap_err();
+    }
+
+    #[test]
+    fn fixed_ports_must_be_unprivileged() {
+        validate_port(1024).unwrap();
+        validate_port(65_535).unwrap();
+        validate_port(1023).unwrap_err();
+        validate_port(0).unwrap_err();
     }
 
     #[test]
@@ -1045,7 +1329,7 @@ mod tests {
             .filter_map(|line| line.split_whitespace().next())
             .collect::<Vec<_>>();
         assert_eq!(versions, PHP_VERSIONS);
-        assert!(validate_php_version("8.6").is_err());
+        validate_php_version("8.6").unwrap_err();
     }
     #[test]
     fn protocol_roundtrip() {
@@ -1065,7 +1349,7 @@ mod tests {
             enabled: true,
             command: vec!["@php".into(), "artisan\nqueue:work".into()],
         };
-        assert!(validate_supervisor(&supervisor).is_err());
+        validate_supervisor(&supervisor).unwrap_err();
     }
 
     #[test]
@@ -1081,6 +1365,8 @@ mod tests {
                 path: path.clone(),
                 name: Some("worker-test".into()),
                 hostname: Some("worker-test.dev".into()),
+                web_port: None,
+                database_port: None,
                 document_root: Some(PathBuf::from("public")),
                 profile: Some(Profile::Laravel),
                 web_server: None,
@@ -1117,17 +1403,17 @@ mod tests {
 
     #[test]
     fn cron_schedules_validate_and_match() {
-        assert!(validate_cron_schedule("* * * * *").is_ok());
-        assert!(validate_cron_schedule("*/5 * * * *").is_ok());
-        assert!(validate_cron_schedule("0 3 * * 0").is_ok());
-        assert!(validate_cron_schedule("1-30/2 9-17 1,15 1-12 1-5").is_ok());
-        assert!(validate_cron_schedule("* * * *").is_err());
-        assert!(validate_cron_schedule("60 * * * *").is_err());
-        assert!(validate_cron_schedule("*/0 * * * *").is_err());
-        assert!(validate_cron_schedule("5/10 * * * *").is_err());
-        assert!(validate_cron_schedule("mon * * * *").is_err());
-        assert!(parse_cron_line("*/5 * * * * @php artisan schedule:run").is_ok());
-        assert!(parse_cron_line("* * * * *").is_err());
+        validate_cron_schedule("* * * * *").unwrap();
+        validate_cron_schedule("*/5 * * * *").unwrap();
+        validate_cron_schedule("0 3 * * 0").unwrap();
+        validate_cron_schedule("1-30/2 9-17 1,15 1-12 1-5").unwrap();
+        validate_cron_schedule("* * * *").unwrap_err();
+        validate_cron_schedule("60 * * * *").unwrap_err();
+        validate_cron_schedule("*/0 * * * *").unwrap_err();
+        validate_cron_schedule("5/10 * * * *").unwrap_err();
+        validate_cron_schedule("mon * * * *").unwrap_err();
+        parse_cron_line("*/5 * * * * @php artisan schedule:run").unwrap();
+        parse_cron_line("* * * * *").unwrap_err();
         // 2026-10-11 is a Sunday.
         let sunday = chrono::NaiveDate::from_ymd_opt(2026, 10, 11)
             .and_then(|date| date.and_hms_opt(15, 30, 0))
@@ -1161,6 +1447,8 @@ mod tests {
                 path: path.clone(),
                 name: Some("mail-test".into()),
                 hostname: Some("mail-test.dev".into()),
+                web_port: None,
+                database_port: None,
                 document_root: Some(PathBuf::from("public")),
                 profile: None,
                 web_server: None,

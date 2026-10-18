@@ -6,12 +6,16 @@ license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 description = "LocalWeb HTTPS-only loopback reverse proxy"
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [lints]
 workspace = true
 
 [dependencies]
 anyhow.workspace = true
+libc.workspace = true
 localweb-core.workspace = true
 mimalloc.workspace = true
 tokio.workspace = true

@@ -2050,6 +2050,7 @@ name = "localweb-core"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "libc",
  "rcgen",
  "serde",
  "serde_json",
@@ -2066,6 +2067,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "libc",
  "localweb-core",
  "mimalloc",
  "serde",
@@ -2087,6 +2089,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "libc",
  "localweb-core",
  "mimalloc",
  "rustls",
@@ -2118,6 +2121,17 @@ dependencies = [
  "serde",
  "serde_json",
  "x509-parser",
+]
+
+[[package]]
+name = "localweb-mcp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "localweb-core",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

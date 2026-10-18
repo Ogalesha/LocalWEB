@@ -6,6 +6,9 @@ license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 description = "Shared models, protocol, paths, and security primitives for LocalWeb"
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [lints]
 workspace = true
@@ -18,5 +21,6 @@ thiserror.workspace = true
 tokio.workspace = true
 toml.workspace = true
 uuid.workspace = true
+libc.workspace = true
 rcgen.workspace = true
 x509-parser.workspace = true

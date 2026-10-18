@@ -35,7 +35,7 @@ package() {
     "$pkgdir/usr/lib/systemd/user" "$pkgdir/usr/share/applications" \
     "$pkgdir/usr/share/icons/hicolor/scalable/apps" \
     "$pkgdir/usr/share/polkit-1/actions" "$pkgdir/usr/share/doc/localweb"
-  for binary in localweb localwebd localweb-gateway localweb-helper localweb-gui; do
+  for binary in localweb localwebd localweb-gateway localweb-helper localweb-gui localweb-mcp; do
     install -m 0755 "target/release/$binary" "$pkgdir/usr/lib/localweb/$binary"
     ln -s "../lib/localweb/$binary" "$pkgdir/usr/bin/$binary"
   done

@@ -2,8 +2,8 @@
 
 A native local development environment for web developers. Choose a source
 folder, a PHP version, a web server and the services your app needs. Run
-projects side by side on local domains over HTTPS, without Docker
-or virtual machines.
+projects side by side on fixed local HTTP ports, with optional HTTPS
+domains, without Docker or virtual machines.
 
 Use WordPress, Laravel, Symfony, Drupal, another PHP framework or CMS, or
 your own application. Presets are shortcuts, not a list of supported apps.
@@ -29,9 +29,10 @@ requirements still determine which PHP and database versions it can use.
 | **Background workers** | Supervisor-style process management using the native service manager; Laravel queue and Symfony Messenger presets, or a custom executable and arguments. |
 | **Scheduled tasks** | Five-field cron schedules, framework presets, logs and overlap protection while the project is active. |
 | **Local domains** | Exact project entries in `/etc/hosts`, with `.dev` as the default suffix. |
-| **HTTPS-only domains** | A local TLS gateway and development certificate authority. Install the CA once to trust local HTTPS; no plain-HTTP project listener is exposed. |
+| **Direct ports and HTTPS domains** | Every project gets a fixed loopback HTTP port (18000–18999) and, for network databases, a fixed loopback database port (19000–19999) forwarded to the shared engine. A local TLS gateway and certificate authority add `https://<project>.dev` when port 443 is free, so LocalWeb coexists with other local stacks. |
 | **Desktop app** | Project search, runtime/service selection, start/stop/restart, browser and Mailpit opening, details and connection settings. |
 | **CLI** | Project management, PHP/Composer/Node commands, shell access, environment values and diagnostics. |
+| **AI assistants (MCP)** | A Model Context Protocol server (`localweb-mcp`) that lets AI assistants create, start, inspect and test projects through the same daemon as the desktop app. |
 | **Autostart** | Optional login startup and per-project startup preferences. |
 
 The native build pipeline assembles all six PHP CLI/FPM pairs from the
@@ -71,7 +72,7 @@ passed. Arch CI covers the base used by Omarchy; an Omarchy desktop session
 still needs its own final acceptance check.
 
 Each job builds and installs the package, tests PHP 8.0–8.5 with both web
-servers and all four database choices over HTTPS, checks Redis,
+servers and all four database choices, checks Redis,
 Mailpit and the PHP CLI, then exercises stop, removal and source-folder
 preservation. Packages are uploaded as workflow artifacts only after the
 job passes. They can then be attached to a GitHub Release.
@@ -133,9 +134,16 @@ your app's configuration file. From the CLI:
 localweb env acme --format dotenv
 ```
 
-All LocalWeb project domains are HTTPS-only. `.dev` domains additionally
-use browsers' built-in HSTS policy; `.test` is available when that policy
-would interfere with a development workflow.
+Start prints the direct URL (`http://127.0.0.1:<web port>`); pin the ports
+with `--web-port` and `--db-port`, or let LocalWeb allocate them from the
+fixed ranges above. `localweb project info <name>` shows both endpoints, and
+the environment values expose the database proxy port as `DB_PORT`.
+
+When the HTTPS gateway can bind `127.0.0.1:443`, project domains also work
+as `https://<name>.dev`. If another stack already holds port 443, LocalWeb
+keeps running on its direct ports and skips the gateway. `.dev` domains use
+browsers' built-in HSTS policy; `.test` is available when that policy would
+interfere with a development workflow.
 
 ## Background work
 
@@ -176,6 +184,35 @@ the managed environment; **Stop** on a project affects that project.
 The displayed project state is the daemon's active-project state, not a
 continuous health check of every service. Gateway state is checked through
 the native service manager. Worker counts describe configured workers.
+
+## AI assistants (MCP)
+
+The package installs `localweb-mcp`, a Model Context Protocol server that
+exposes the LocalWeb daemon over stdio. Point any MCP-capable client at the
+binary to let an assistant create a project, start it, run `composer`,
+framework commands or tests inside the project runtime, read logs and open
+the environment values. The tool set covers status and diagnostics, daemon
+start/stop, project add/remove/start/stop/restart, `@php`/`@composer`/`@node`/
+`@npm`/`@npx` command execution, environment, runtime list, certificate
+status/installation, hosts synchronization and login autostart.
+
+The desktop **Settings** view shows the resolved `localweb-mcp` path, copies
+the configuration below, and lists the active environment values.
+
+```json
+{
+  "mcpServers": {
+    "localweb": {
+      "command": "localweb-mcp"
+    }
+  }
+}
+```
+
+The assistant connects to the same user daemon as the desktop app; start
+LocalWeb once (`localweb start`) or use the `localweb_daemon_start` tool.
+Privileged steps (CA installation, `/etc/hosts` changes) still require the
+normal polkit authentication.
 
 ## Remove LocalWeb
 

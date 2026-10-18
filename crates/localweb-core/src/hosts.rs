@@ -97,9 +97,9 @@ mod tests {
     }
     #[test]
     fn rejects_injection_and_malformed_blocks() {
-        assert!(transform_hosts("", &["a.dev\n0.0.0.0 evil.dev".into()]).is_err());
-        assert!(transform_hosts(BEGIN, &[]).is_err());
-        assert!(transform_hosts(END, &[]).is_err());
+        transform_hosts("", &["a.dev\n0.0.0.0 evil.dev".into()]).unwrap_err();
+        transform_hosts(BEGIN, &[]).unwrap_err();
+        transform_hosts(END, &[]).unwrap_err();
     }
 
     #[test]

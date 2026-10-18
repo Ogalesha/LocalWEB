@@ -6,6 +6,13 @@ license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 description = "Native desktop client for LocalWeb"
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[features]
+# Opens the window, saves one frame to $EFRAME_SCREENSHOT_TO and exits.
+screenshot = ["eframe/__screenshot"]
 
 [lints]
 workspace = true

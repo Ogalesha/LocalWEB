@@ -55,7 +55,7 @@ install -d \
     "$stage/usr/share/polkit-1/actions" \
     "$stage/usr/share/doc/localweb"
 
-for binary in localweb localwebd localweb-gateway localweb-helper localweb-gui; do
+for binary in localweb localwebd localweb-gateway localweb-helper localweb-gui localweb-mcp; do
     install -m 0755 "$workspace/target/release/$binary" "$stage/usr/lib/localweb/$binary"
     ln -s "../lib/localweb/$binary" "$stage/usr/bin/$binary"
 done

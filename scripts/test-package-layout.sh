@@ -43,6 +43,7 @@ dpkg-deb --info "$package" >/dev/null
 for installed in \
     ./usr/lib/localweb/localwebd \
     ./usr/lib/localweb/localweb-gui \
+    ./usr/lib/localweb/localweb-mcp \
     ./usr/lib/localweb/runtime/php/8.5/bin/php \
     ./usr/lib/systemd/user/localwebd.service \
     ./usr/share/applications/io.localweb.LocalWeb.desktop \

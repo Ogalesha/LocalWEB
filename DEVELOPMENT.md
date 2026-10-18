@@ -10,7 +10,7 @@ cargo build --workspace --release --locked
 ```
 
 The desktop is native egui/eframe. Tests cover form opt-outs, detection,
-worker presets, connection failure and minimum-window actions in three
+worker presets, connection failure and minimum-window actions in all 14
 languages. Visual and keyboard review complements automated tests.
 
 ## Native build pipeline

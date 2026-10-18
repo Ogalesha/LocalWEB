@@ -38,9 +38,9 @@ case "${1:-}" in
             rm -rf -- \
                 "$home/.config/localweb" \
                 "$home/.local/share/localweb" \
-                "$home/.local/state/localweb" \
-                "$home/.config/systemd/user/localwebd.service" \
-                "$home/.config/systemd/user/default.target.wants/localwebd.service"
+                "$home/.local/state/localweb"
+            rm -f -- "$home/.config/systemd/user/"localweb*.service
+            rm -f -- "$home/.config/systemd/user/default.target.wants/"localweb*.service
             rm -rf -- "/run/user/$uid/localweb"
         done
 

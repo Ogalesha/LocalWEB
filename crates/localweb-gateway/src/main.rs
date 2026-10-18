@@ -27,6 +27,11 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 type GatewayBody = BoxBody<Bytes, Box<dyn std::error::Error + Send + Sync>>;
 type HttpClient = Client<HttpConnector, Incoming>;
 
+/// How long a client may take to complete the TLS handshake before being dropped.
+const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long an upstream project server may take to answer a proxied request.
+const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(30);
+
 #[derive(Parser)]
 struct Args {
     #[arg(long, default_value_t = 443)]
@@ -50,16 +55,14 @@ async fn main() -> Result<()> {
         routes: Arc::new(routes),
         client: Client::builder(TokioExecutor::new()).build_http(),
     };
-    let https = TcpListener::bind(("127.0.0.1", args.https_port))
-        .await
-        .context("bind HTTPS loopback port")?;
+    let https = https_listener(args.https_port).await?;
     let tls = TlsAcceptor::from(Arc::new(config));
     loop {
         let (stream, peer) = https.accept().await?;
         let app = app.clone();
         let tls = tls.clone();
         tokio::spawn(async move {
-            if let Ok(Ok(stream)) = timeout(Duration::from_secs(10), tls.accept(stream)).await {
+            if let Ok(Ok(stream)) = timeout(TLS_HANDSHAKE_TIMEOUT, tls.accept(stream)).await {
                 let service = service_fn(move |request| handle(request, app.clone(), peer));
                 let _ = http1::Builder::new()
                     .serve_connection(TokioIo::new(stream), service)
@@ -68,6 +71,61 @@ async fn main() -> Result<()> {
             }
         });
     }
+}
+
+async fn https_listener(port: u16) -> Result<TcpListener> {
+    #[cfg(target_os = "macos")]
+    if let Some(listener) = launchd_listener()? {
+        return Ok(listener);
+    }
+    TcpListener::bind(("127.0.0.1", port))
+        .await
+        .context("bind HTTPS loopback port")
+}
+
+/// Takes the launchd-owned socket when the gateway runs as a LaunchAgent.
+///
+/// Binding port 443 as an unprivileged user is only possible through launchd
+/// socket activation; when the process was started manually this returns
+/// `None` so a plain bind can be attempted instead.
+#[cfg(target_os = "macos")]
+fn launchd_listener() -> Result<Option<TcpListener>> {
+    use std::{ffi::CStr, os::fd::FromRawFd, ptr};
+
+    unsafe extern "C" {
+        fn launch_activate_socket(
+            name: *const std::ffi::c_char,
+            descriptors: *mut *mut libc::c_int,
+            count: *mut libc::size_t,
+        ) -> libc::c_int;
+    }
+
+    let name = CStr::from_bytes_with_nul(b"LocalWebHTTPS\0").expect("static socket name");
+    let mut descriptors = ptr::null_mut();
+    let mut count: libc::size_t = 0;
+    // SAFETY: both out-pointers are valid for the duration of the call; launchd
+    // allocates the descriptor array and reports its length.
+    let result =
+        unsafe { launch_activate_socket(name.as_ptr(), &raw mut descriptors, &raw mut count) };
+    if result != 0 || count == 0 || descriptors.is_null() {
+        return Ok(None);
+    }
+    // SAFETY: launchd returned an array of `count` descriptors.
+    let descriptor = unsafe { *descriptors };
+    for index in 1..count {
+        // SAFETY: `index` is within the array launchd allocated.
+        unsafe {
+            libc::close(*descriptors.add(index));
+        }
+    }
+    // SAFETY: launchd allocated the array with malloc and passes ownership.
+    unsafe {
+        libc::free(descriptors.cast());
+    }
+    // SAFETY: the activated descriptor is now owned by this process.
+    let listener = unsafe { std::net::TcpListener::from_raw_fd(descriptor) };
+    listener.set_nonblocking(true)?;
+    Ok(Some(TcpListener::from_std(listener)?))
 }
 
 fn load_routes(paths: &Paths) -> Result<HashMap<String, GatewayRoute>> {
@@ -178,7 +236,7 @@ async fn route_request(
     if let Ok(value) = peer.ip().to_string().parse() {
         request.headers_mut().insert("x-forwarded-for", value);
     }
-    match timeout(Duration::from_secs(30), app.client.request(request)).await {
+    match timeout(UPSTREAM_TIMEOUT, app.client.request(request)).await {
         Ok(Ok(response)) => response.map(|body| {
             body.map_err(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>)
                 .boxed()

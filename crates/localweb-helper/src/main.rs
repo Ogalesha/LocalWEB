@@ -17,7 +17,11 @@ use std::{
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 const MAX_INPUT: u64 = 64 * 1024;
+#[cfg(not(target_os = "macos"))]
 const GATEWAY: &str = "/usr/lib/localweb/localweb-gateway";
+#[cfg(target_os = "macos")]
+const USER_REGISTRY: &str = "/usr/local/var/lib/localweb/users";
+#[cfg(not(target_os = "macos"))]
 const USER_REGISTRY: &str = "/var/lib/localweb/users";
 
 #[derive(Debug, Deserialize)]
@@ -41,8 +45,8 @@ fn main() -> Result<()> {
     let package_removal = operation == "package-remove"
         && std::env::var("DPKG_MAINTSCRIPT_PACKAGE").as_deref() == Ok("localweb")
         && std::env::var("DPKG_MAINTSCRIPT_NAME").as_deref() == Ok("prerm");
-    if !package_removal && std::env::var("PKEXEC_UID").is_err() {
-        bail!("localweb-helper requires a polkit authorization");
+    if !package_removal {
+        invoking_uid().context("localweb-helper requires administrator authorization")?;
     }
     match operation.as_str() {
         "sync-hosts" => sync_hosts(),
@@ -55,16 +59,28 @@ fn main() -> Result<()> {
     }
 }
 
+fn invoking_uid() -> Result<u32> {
+    let key = if cfg!(target_os = "macos") {
+        "LOCALWEB_INVOKING_UID"
+    } else {
+        "PKEXEC_UID"
+    };
+    let raw = std::env::var(key).with_context(|| format!("{key} is required"))?;
+    raw.parse::<u32>().context("invalid invoking user id")
+}
+
 fn register_paths() -> Result<()> {
-    let uid_text = std::env::var("PKEXEC_UID").context("PKEXEC_UID is required")?;
-    let uid = uid_text.parse::<u32>().context("invalid PKEXEC_UID")?;
+    let uid = invoking_uid()?;
     if uid == 0 {
         bail!("LocalWeb cannot register root as an application user");
     }
     let paths: UserPaths =
         serde_json::from_slice(&read_input()?).context("invalid path registration")?;
     let home = home_for_uid(uid)?;
-    let runtime_parent = PathBuf::from(format!("/run/user/{uid}"));
+    #[cfg(target_os = "macos")]
+    let runtime_parent = runtime_parent(uid, &paths.runtime)?;
+    #[cfg(not(target_os = "macos"))]
+    let runtime_parent = runtime_parent(uid, &paths.runtime);
     let registered = [
         validate_user_directory(&paths.config, &home, uid)?,
         validate_user_directory(&paths.data, &home, uid)?,
@@ -116,6 +132,29 @@ fn validate_user_directory(path: &Path, parent: &Path, uid: u32) -> Result<PathB
     Ok(canonical)
 }
 
+#[cfg(not(target_os = "macos"))]
+fn runtime_parent(uid: u32, _runtime: &Path) -> PathBuf {
+    PathBuf::from(format!("/run/user/{uid}"))
+}
+
+#[cfg(target_os = "macos")]
+fn runtime_parent(uid: u32, runtime: &Path) -> Result<PathBuf> {
+    let reported =
+        std::env::var_os("LOCALWEB_RUNTIME_DIR").context("LOCALWEB_RUNTIME_DIR is required")?;
+    if PathBuf::from(reported) != runtime {
+        bail!("runtime directory does not match the registration request");
+    }
+    let parent = runtime
+        .parent()
+        .context("runtime directory has no parent")?;
+    let metadata = fs::symlink_metadata(parent)?;
+    if metadata.uid() != uid {
+        bail!("runtime directory is not owned by the invoking user");
+    }
+    Ok(parent.to_path_buf())
+}
+
+#[cfg(not(target_os = "macos"))]
 fn home_for_uid(uid: u32) -> Result<PathBuf> {
     let passwd = fs::read_to_string("/etc/passwd")?;
     passwd
@@ -130,7 +169,35 @@ fn home_for_uid(uid: u32) -> Result<PathBuf> {
             let home = fields.next()?;
             (parsed_uid == uid).then(|| PathBuf::from(home))
         })
-        .context("PKEXEC_UID is absent from /etc/passwd")
+        .context("the invoking user is absent from /etc/passwd")
+}
+
+#[cfg(target_os = "macos")]
+fn home_for_uid(uid: u32) -> Result<PathBuf> {
+    let user = Command::new("/usr/bin/id")
+        .arg("-un")
+        .arg(uid.to_string())
+        .output()?;
+    if !user.status.success() {
+        bail!("cannot resolve the invoking user name");
+    }
+    let name = String::from_utf8_lossy(&user.stdout).trim().to_owned();
+    if name.is_empty() {
+        bail!("cannot resolve the invoking user name");
+    }
+    let record = Command::new("/usr/bin/dscl")
+        .args([".", "-read"])
+        .arg(format!("/Users/{name}"))
+        .arg("NFSHomeDirectory")
+        .output()?;
+    if !record.status.success() {
+        bail!("cannot resolve the invoking user home directory");
+    }
+    String::from_utf8_lossy(&record.stdout)
+        .lines()
+        .find_map(|line| line.split_once(": "))
+        .map(|(_, home)| PathBuf::from(home.trim()))
+        .context("invoking user record has no home directory")
 }
 
 fn remove_system_integration() -> Result<()> {
@@ -144,7 +211,7 @@ fn remove_system_integration() -> Result<()> {
     if trust.exists() {
         ensure_regular_root_owned(trust)?;
         fs::remove_file(trust)?;
-        store.refresh()?;
+        store.untrust_certificate()?;
     }
     Ok(())
 }
@@ -183,7 +250,7 @@ fn install_ca() -> Result<()> {
         bail!("not a certificate");
     }
     let (_, cert) = x509_parser::parse_x509_certificate(parsed.contents())
-        .map_err(|_| anyhow::anyhow!("invalid X.509 certificate"))?;
+        .map_err(|error| anyhow::anyhow!("invalid X.509 certificate: {error}"))?;
     let constraints = cert
         .basic_constraints()
         .context("invalid CA basic constraints")?;
@@ -203,10 +270,16 @@ fn install_ca() -> Result<()> {
         ensure_regular_root_owned(store.certificate_path())?;
     }
     atomic_write(store.certificate_path(), &pem_bytes, 0o644)?;
-    store.refresh()?;
+    store.trust_certificate()?;
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+fn set_gateway_cap() -> Result<()> {
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
 fn set_gateway_cap() -> Result<()> {
     ensure_regular_root_owned(Path::new(GATEWAY))?;
     let tool = if Path::new("/usr/sbin/setcap").is_file() {
