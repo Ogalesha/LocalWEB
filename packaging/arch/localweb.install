@@ -1,8 +1,9 @@
-# Arch install/remove hooks for LocalWeb. Removal mirrors the Debian
-# maintainer scripts: stop everything LocalWeb owns, drop its system
-# integration, and wipe its data. Project source directories are never
-# touched. Validated on Arch Linux x86_64 with package install,
-# 48-combination HTTPS acceptance, removal and system-state cleanup.
+# Arch install/remove hooks for LocalWeb. Removal stops everything LocalWeb
+# owns and drops its system integration. Per-user data (projects, databases,
+# configurations and private CA keys) is never deleted automatically: package
+# removal is not consent to destroy it. Use `localweb data purge` instead.
+# Validated on Arch Linux x86_64 with package install, 48-combination HTTPS
+# acceptance, removal and system-state cleanup.
 
 post_install() {
     if command -v setcap >/dev/null 2>&1; then
@@ -46,6 +47,16 @@ pre_remove() {
         executable=$(readlink "$process/exe" 2>/dev/null || true)
         case "$executable" in
             /usr/lib/localweb/*)
+                kill -TERM "${process##*/}" 2>/dev/null || true
+                ;;
+        esac
+    done
+    sleep 1
+    for process in /proc/[0-9]*; do
+        [ -e "$process/exe" ] || continue
+        executable=$(readlink "$process/exe" 2>/dev/null || true)
+        case "$executable" in
+            /usr/lib/localweb/*)
                 kill -KILL "${process##*/}" 2>/dev/null || true
                 ;;
         esac
@@ -70,38 +81,8 @@ pre_remove() {
 }
 
 post_remove() {
-    if [ -d /var/lib/localweb/users ]; then
-        for registry in /var/lib/localweb/users/*.paths; do
-            [ -f "$registry" ] || continue
-            uid=${registry##*/}
-            uid=${uid%.paths}
-            home=$(getent passwd "$uid" | cut -d: -f6)
-            [ -n "$home" ] || continue
-            while IFS= read -r path; do
-                case "$path" in
-                    "$home"/*|/run/user/"$uid"/localweb)
-                        rm -rf -- "$path"
-                        ;;
-                esac
-            done < "$registry"
-        done
-    fi
-
-    uid_min=$(awk '$1 == "UID_MIN" { print $2; exit }' /etc/login.defs)
-    uid_min=${uid_min:-1000}
-    getent passwd | while IFS=: read -r user _ uid _ _ home _; do
-        [ "$uid" -ge "$uid_min" ] 2>/dev/null || continue
-        [ "$uid" -lt 65534 ] || continue
-        [ -n "$home" ] && [ "$home" != / ] || continue
-        rm -rf -- \
-            "$home/.config/localweb" \
-            "$home/.local/share/localweb" \
-            "$home/.local/state/localweb"
-        rm -f -- "$home/.config/systemd/user/"localweb*.service
-        rm -f -- "$home/.config/systemd/user/default.target.wants/"localweb*.service
-        rm -rf -- "/run/user/$uid/localweb"
-    done
-
+    # Only system-owned state is removed. Per-user data is preserved so that
+    # reinstalling or downgrading never destroys projects or databases.
     rm -rf -- /var/lib/localweb /var/log/localweb
 
     for runtime_dir in /run/user/[0-9]*; do

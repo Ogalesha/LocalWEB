@@ -5,8 +5,9 @@ use std::path::Path;
 
 /// Runs `helper operation` with administrator rights, feeding `input` on stdin.
 ///
-/// Uses `pkexec` on Linux and `osascript` on macOS. The caller must have
-/// validated that `input` is safe to hand to a root process.
+/// Uses `pkexec` on Linux, `osascript` on macOS and the UAC `runas` verb on
+/// Windows. The caller must have validated that `input` is safe to hand to a
+/// root process.
 ///
 /// # Errors
 ///
@@ -24,13 +25,17 @@ pub fn run_helper(helper: &Path, operation: &str, input: &[u8]) -> Result<()> {
     {
         macos::run(helper, operation, input)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        windows::run(helper, operation, input)
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
     {
         linux::run(helper, operation, input)
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 mod linux {
     use super::{LocalWebError, Result};
     use std::{
@@ -115,6 +120,69 @@ mod macos {
             )));
         }
         Ok(())
+    }
+
+    fn payload_path() -> Result<PathBuf> {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| LocalWebError::Service(error.to_string()))?
+            .as_nanos();
+        Ok(std::env::temp_dir().join(format!(
+            "localweb-helper-{}-{nanos}.json",
+            std::process::id()
+        )))
+    }
+}
+
+#[cfg(windows)]
+mod windows {
+    use super::{LocalWebError, Result};
+    use std::{
+        fs,
+        io::Write as _,
+        path::{Path, PathBuf},
+        process::Command,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    pub(super) fn run(helper: &Path, operation: &str, input: &[u8]) -> Result<()> {
+        let payload = payload_path()?;
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&payload)?;
+        file.write_all(input)?;
+        drop(file);
+
+        // A payload file is used instead of stdin because the UAC `runas`
+        // verb launches the helper through ShellExecute and cannot redirect
+        // the standard input handle.
+        let arguments = format!(
+            "{operation} --input \"{}\"",
+            payload.display().to_string().replace('"', "\"\"")
+        );
+        let script = format!(
+            "$ErrorActionPreference='Stop'; $p = Start-Process -FilePath '{}' -ArgumentList '{}' -Verb RunAs -Wait -PassThru; exit $p.ExitCode",
+            ps_escape(&helper.display().to_string()),
+            ps_escape(&arguments)
+        );
+        let status = Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .status();
+        let _ = fs::remove_file(&payload);
+        match status {
+            Ok(status) if status.success() => Ok(()),
+            Ok(_) => Err(LocalWebError::Service(format!(
+                "privileged helper `{operation}` failed; the administrator prompt may have been cancelled"
+            ))),
+            Err(error) => Err(LocalWebError::Service(format!(
+                "cannot launch powershell.exe: {error}"
+            ))),
+        }
+    }
+
+    fn ps_escape(value: &str) -> String {
+        value.replace('\'', "''")
     }
 
     fn payload_path() -> Result<PathBuf> {

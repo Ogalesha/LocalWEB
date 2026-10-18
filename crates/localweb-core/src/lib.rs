@@ -2,18 +2,16 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::{
     collections::BTreeMap,
     fs,
     io::{self, Write},
-    os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
 };
 use thiserror::Error;
-use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    net::UnixStream,
-};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use uuid::Uuid;
 
 pub mod certificate;
@@ -22,6 +20,7 @@ pub mod platform;
 pub mod privilege;
 pub mod runtime;
 pub mod service;
+pub mod transport;
 
 /// Version of the daemon wire protocol; peers must match exactly.
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -93,6 +92,7 @@ impl Paths {
     /// # Errors
     ///
     /// Returns an error when `HOME` or `XDG_RUNTIME_DIR` is unavailable.
+    #[cfg(unix)]
     pub fn discover() -> Result<Self> {
         let home = std::env::var_os("HOME")
             .map(PathBuf::from)
@@ -111,12 +111,33 @@ impl Paths {
         })
     }
 
+    /// Resolves the per-user directories under `%LOCALAPPDATA%`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `LOCALAPPDATA` is unavailable.
+    #[cfg(windows)]
+    pub fn discover() -> Result<Self> {
+        let base = std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .ok_or_else(|| LocalWebError::Config("LOCALAPPDATA is unset".into()))?;
+        let root = base.join("LocalWeb");
+        let runtime = std::env::var_os("LOCALWEB_RUNTIME_DIR")
+            .map_or_else(|| std::env::temp_dir().join("localweb"), PathBuf::from);
+        Ok(Self {
+            config: root.join("config"),
+            data: root.join("data"),
+            state: root.join("state"),
+            runtime,
+        })
+    }
+
     /// Resolves the per-user runtime directory that hosts sockets and service files.
     ///
     /// # Errors
     ///
     /// Returns an error when no per-user runtime location is available.
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(all(unix, not(target_os = "macos")))]
     fn runtime_root() -> Result<PathBuf> {
         std::env::var_os("XDG_RUNTIME_DIR")
             .map(PathBuf::from)
@@ -166,15 +187,29 @@ impl Paths {
             &self.runtime.join("services"),
         ] {
             fs::create_dir_all(path)?;
+            #[cfg(unix)]
             fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
         }
         Ok(())
     }
 
-    /// Returns the daemon socket path.
+    /// Returns the daemon endpoint path; a socket file on Unix and a named
+    /// pipe on Windows.
     #[must_use]
     pub fn socket(&self) -> PathBuf {
-        self.runtime.join("localweb.sock")
+        #[cfg(unix)]
+        {
+            self.runtime.join("localweb.sock")
+        }
+        #[cfg(windows)]
+        {
+            let user = std::env::var("USERNAME").unwrap_or_else(|_| "user".into());
+            let user = user
+                .chars()
+                .filter(char::is_ascii_alphanumeric)
+                .collect::<String>();
+            PathBuf::from(format!(r"\\.\pipe\localweb-{user}"))
+        }
     }
 
     /// Returns the configuration file path for `id`.
@@ -1072,11 +1107,13 @@ pub fn atomic_write(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
     fs::create_dir_all(parent)?;
     let temp = parent.join(format!(".localweb-{}.tmp", Uuid::new_v4()));
     let result = (|| -> Result<()> {
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(mode)
-            .open(&temp)?;
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(mode);
+        #[cfg(windows)]
+        let _ = mode;
+        let mut file = options.open(&temp)?;
         file.write_all(bytes)?;
         file.sync_all()?;
         fs::rename(&temp, path)?;
@@ -1272,7 +1309,7 @@ pub struct Diagnostic {
 ///
 /// Returns an error for socket failures, oversized messages, malformed JSON, or version mismatch.
 pub async fn send_request(paths: &Paths, request: Request) -> Result<Response> {
-    let mut socket = UnixStream::connect(paths.socket()).await?;
+    let mut socket = transport::connect(paths).await?;
     let mut data = serde_json::to_vec(&Envelope {
         version: PROTOCOL_VERSION,
         payload: request,

@@ -1,10 +1,15 @@
-//! Per-user service lifecycle for systemd (Linux) and launchd (macOS).
+//! Per-user service lifecycle for systemd (Linux), launchd (macOS) and Task
+//! Scheduler (Windows).
 
-use crate::{LocalWebError, Paths, Result, atomic_write};
-use std::{fs, path::PathBuf, process::Command};
+#[cfg(not(windows))]
+use crate::atomic_write;
+use crate::{LocalWebError, Paths, Result};
+#[cfg(not(windows))]
+use std::fs;
+use std::{path::PathBuf, process::Command};
 
 /// systemd unit that runs the daemon on Linux.
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 pub const DAEMON_UNIT: &str = "localwebd.service";
 /// launchd label that runs the daemon on macOS.
 #[cfg(target_os = "macos")]
@@ -12,6 +17,9 @@ pub const DAEMON_LABEL: &str = "dev.localweb.daemon";
 /// launchd label that owns the HTTPS loopback socket on macOS.
 #[cfg(target_os = "macos")]
 pub const GATEWAY_LABEL: &str = "dev.localweb.gateway";
+/// Scheduled task that runs the daemon on Windows.
+#[cfg(windows)]
+pub const DAEMON_TASK: &str = "LocalWeb Daemon";
 
 /// Resolves the installed daemon executable.
 ///
@@ -26,7 +34,8 @@ pub fn daemon_binary() -> Result<PathBuf> {
             return Ok(installed);
         }
     }
-    let candidate = std::env::current_exe()?.with_file_name("localwebd");
+    let candidate = std::env::current_exe()?
+        .with_file_name(format!("localwebd{}", std::env::consts::EXE_SUFFIX));
     if !candidate.is_file() {
         return Err(LocalWebError::Service(format!(
             "the LocalWeb daemon is missing at {}",
@@ -46,7 +55,11 @@ pub fn restart_daemon() -> Result<()> {
     {
         macos::restart_daemon()
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        windows::restart_daemon()
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
     {
         linux::run(
             "systemctl",
@@ -66,7 +79,11 @@ pub fn set_autostart(enable: bool) -> Result<()> {
     {
         macos::set_autostart(enable)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        windows::set_autostart(enable)
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
     {
         let action = if enable { "enable" } else { "disable" };
         linux::run(
@@ -77,7 +94,8 @@ pub fn set_autostart(enable: bool) -> Result<()> {
     }
 }
 
-/// Installs the native per-user service definition (systemd unit or `LaunchAgents`).
+/// Installs the native per-user service definition (systemd unit, `LaunchAgents`
+/// or a Task Scheduler entry).
 ///
 /// # Errors
 ///
@@ -87,14 +105,18 @@ pub fn write_user_units(paths: &Paths) -> Result<()> {
     {
         macos::write_user_units(paths)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        windows::write_user_units(paths)
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
     {
         let _ = paths;
         linux::write_user_units()
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 mod linux {
     use super::{
         Command, DAEMON_UNIT, LocalWebError, PathBuf, Result, atomic_write, daemon_binary, fs,
@@ -130,6 +152,94 @@ mod linux {
             &["--user", "daemon-reload"],
             "systemctl --user daemon-reload failed",
         )
+    }
+}
+
+#[cfg(windows)]
+mod windows {
+    use super::{Command, DAEMON_TASK, LocalWebError, Paths, Result, daemon_binary};
+    use std::process::Stdio;
+
+    pub(super) fn restart_daemon() -> Result<()> {
+        ensure_task()?;
+        let _ = Command::new("taskkill.exe")
+            .args(["/IM", "localwebd.exe", "/F"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        run(
+            &["/Run", "/TN", DAEMON_TASK],
+            "schtasks could not run the LocalWeb daemon task",
+        )
+    }
+
+    pub(super) fn set_autostart(enable: bool) -> Result<()> {
+        ensure_task()?;
+        let flag = if enable { "/ENABLE" } else { "/DISABLE" };
+        run(
+            &["/Change", "/TN", DAEMON_TASK, flag],
+            "schtasks could not change the LocalWeb daemon task",
+        )
+    }
+
+    pub(super) fn write_user_units(_paths: &Paths) -> Result<()> {
+        ensure_task()?;
+        // Match the Linux default: installed, but login autostart stays off
+        // until `localweb autostart enable` is requested.
+        run(
+            &["/Change", "/TN", DAEMON_TASK, "/DISABLE"],
+            "schtasks could not disable the LocalWeb daemon task",
+        )
+    }
+
+    fn ensure_task() -> Result<()> {
+        if task_exists() { Ok(()) } else { create_task() }
+    }
+
+    fn task_exists() -> bool {
+        Command::new("schtasks.exe")
+            .args(["/Query", "/TN", DAEMON_TASK])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
+    fn create_task() -> Result<()> {
+        let daemon = daemon_binary()?;
+        // Launch through hidden PowerShell so the console daemon does not
+        // flash a terminal window at logon.
+        let script = format!(
+            "Start-Process -FilePath '{}' -WindowStyle Hidden",
+            daemon.display().to_string().replace('\'', "''")
+        );
+        let launch = format!("powershell.exe -NoProfile -WindowStyle Hidden -Command \"{script}\"");
+        run(
+            &[
+                "/Create",
+                "/F",
+                "/TN",
+                DAEMON_TASK,
+                "/SC",
+                "ONLOGON",
+                "/RL",
+                "LIMITED",
+                "/TR",
+                &launch,
+            ],
+            "schtasks could not install the LocalWeb daemon task",
+        )
+    }
+
+    fn run(args: &[&str], message: &str) -> Result<()> {
+        let output = Command::new("schtasks.exe").args(args).output()?;
+        if !output.status.success() {
+            return Err(LocalWebError::Service(format!(
+                "{message}: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        Ok(())
     }
 }
 

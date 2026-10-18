@@ -8,13 +8,11 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
     fs,
     net::{Ipv4Addr, TcpListener},
-    os::unix::fs::PermissionsExt,
     sync::Arc,
     time::Duration,
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
-    net::{UnixListener, UnixStream},
     sync::{Mutex, Notify},
 };
 use tracing::{error, info, warn};
@@ -35,6 +33,7 @@ struct State {
     paths: Paths,
     config: GlobalConfig,
     running: Mutex<BTreeSet<String>>,
+    operations: Mutex<()>,
     db_proxies: Mutex<BTreeMap<String, DbProxy>>,
     cron_busy: Mutex<HashSet<(String, usize)>>,
     cron_last_minute: Mutex<BTreeMap<(String, usize), i64>>,
@@ -44,22 +43,19 @@ struct State {
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter("localweb_daemon=info")
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("localwebd=info")),
+        )
         .init();
     let paths = Paths::discover()?;
     paths.create()?;
     let config = GlobalConfig::load_or_create(&paths)?;
     CaPaths::new(&paths).ensure_ca()?;
     ensure_project_ports(&paths)?;
-    let socket = paths.socket();
-    if socket.exists() {
-        match UnixStream::connect(&socket).await {
-            Ok(_) => anyhow::bail!("localwebd is already running at {}", socket.display()),
-            Err(_) => fs::remove_file(&socket)?,
-        }
-    }
-    let listener = UnixListener::bind(&socket).context("bind daemon socket")?;
-    fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))?;
+    let mut listener = localweb_core::transport::DaemonListener::bind(&paths)
+        .await
+        .context("bind daemon endpoint")?;
     let mut restore = load_desired_running(&paths)?;
     restore.extend(
         load_projects(&paths)?
@@ -71,6 +67,7 @@ async fn main() -> Result<()> {
         paths,
         config,
         running: Mutex::new(BTreeSet::new()),
+        operations: Mutex::new(()),
         db_proxies: Mutex::new(BTreeMap::new()),
         cron_busy: Mutex::new(HashSet::new()),
         cron_last_minute: Mutex::new(BTreeMap::new()),
@@ -82,32 +79,45 @@ async fn main() -> Result<()> {
         }
     }
     tokio::spawn(cron_loop(Arc::clone(&state)));
-    info!(socket = %socket.display(), "daemon listening");
+    info!(endpoint = %listener.path().display(), "daemon listening");
     loop {
         tokio::select! {
             incoming = listener.accept() => {
-                let (stream, _) = incoming?;
-                let state = Arc::clone(&state);
-                tokio::spawn(async move {
-                    if let Err(err) = serve(stream, state).await { error!(%err, "client request failed"); }
-                });
+                match incoming {
+                    Ok(stream) => {
+                        let state = Arc::clone(&state);
+                        tokio::spawn(async move {
+                            if let Err(err) = serve(stream, state).await {
+                                error!(%err, "client request failed");
+                            }
+                        });
+                    }
+                    Err(error) => {
+                        error!(%error, "daemon endpoint accept failed; retrying");
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                }
             }
             () = state.shutdown.notified() => break,
         }
     }
-    fs::remove_file(&socket)?;
+    listener.cleanup()?;
     info!("daemon stopped");
     Ok(())
 }
 
-async fn serve(stream: UnixStream, state: Arc<State>) -> Result<()> {
-    let (read, mut write) = stream.into_split();
-    let reader = BufReader::new(read);
+async fn serve<S>(mut stream: S, state: Arc<State>) -> Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     let mut bytes = Vec::new();
-    reader
-        .take((MAX_MESSAGE_BYTES + 1) as u64)
-        .read_until(b'\n', &mut bytes)
-        .await?;
+    {
+        let reader = BufReader::new(&mut stream);
+        reader
+            .take((MAX_MESSAGE_BYTES + 1) as u64)
+            .read_until(b'\n', &mut bytes)
+            .await?
+    };
     let mut shutdown = false;
     let response = if bytes.len() > MAX_MESSAGE_BYTES {
         Response::Error {
@@ -135,7 +145,7 @@ async fn serve(stream: UnixStream, state: Arc<State>) -> Result<()> {
         payload: response,
     })?;
     data.push(b'\n');
-    write.write_all(&data).await?;
+    stream.write_all(&data).await?;
     if shutdown {
         state.shutdown.notify_waiters();
     }
@@ -168,17 +178,24 @@ async fn execute(request: Request, state: &Arc<State>) -> localweb_core::Result<
             }))
         }
         Request::Shutdown => {
+            let _operations = state.operations.lock().await;
             let result = {
                 let state = Arc::clone(state);
                 tokio::task::spawn_blocking(move || shutdown_services(&state))
                     .await
                     .map_err(|error| join_failed(&error))?
             };
-            let persist_result = persist_running(&state.paths, &BTreeSet::new());
-            state.running.lock().await.clear();
-            result?;
-            persist_result?;
-            Ok(Response::Message("LocalWeb daemon stopped".into()))
+            match result {
+                Ok(()) => {
+                    persist_running(&state.paths, &BTreeSet::new())?;
+                    state.running.lock().await.clear();
+                    Ok(Response::Message("LocalWeb daemon stopped".into()))
+                }
+                Err(error) => {
+                    error!(%error, "shutdown left services running; desired state was preserved");
+                    Err(error)
+                }
+            }
         }
         Request::ProjectList => {
             let running = state.running.lock().await;
@@ -208,6 +225,7 @@ async fn execute(request: Request, state: &Arc<State>) -> localweb_core::Result<
             }))
         }
         Request::ProjectAdd(input) => {
+            let _operations = state.operations.lock().await;
             let mut project = Project::from_new(input, &state.config)?;
             for owned in [
                 &state.paths.config,
@@ -240,6 +258,7 @@ async fn execute(request: Request, state: &Arc<State>) -> localweb_core::Result<
             }))
         }
         Request::ProjectRemove { name } => {
+            let _operations = state.operations.lock().await;
             let project = find_project(&state.paths, &name)?;
             if state.running.lock().await.contains(&name) {
                 return Err(LocalWebError::Service(
@@ -251,21 +270,13 @@ async fn execute(request: Request, state: &Arc<State>) -> localweb_core::Result<
                 "Removed LocalWeb configuration for {name}; source files were retained"
             )))
         }
-        Request::ProjectStart { name } | Request::ProjectRestart { name } => {
+        Request::ProjectStart { name } => {
             start_project(state, &name).await?;
-            let project = find_project(&state.paths, &name)?;
-            let direct = project.web_port.map_or_else(
-                || "an unknown direct port".to_owned(),
-                |port| format!("http://127.0.0.1:{port}"),
-            );
-            Ok(Response::Message(if is_active("localweb-gateway") {
-                format!(
-                    "{name} is running at {direct} and https://{}",
-                    project.hostname
-                )
-            } else {
-                format!("{name} is running at {direct}")
-            }))
+            running_message(state, &name)
+        }
+        Request::ProjectRestart { name } => {
+            restart_project(state, &name).await?;
+            running_message(state, &name)
         }
         Request::ProjectStop { name } => {
             let _ = find_project(&state.paths, &name)?;
@@ -295,7 +306,8 @@ async fn execute(request: Request, state: &Arc<State>) -> localweb_core::Result<
                 .join(&project.name);
             fs::create_dir_all(&shim_dir)?;
             install_shim(&shim_dir.join("php"), &php)?;
-            let localweb = std::env::current_exe()?.with_file_name("localweb");
+            let localweb = std::env::current_exe()?
+                .with_file_name(format!("localweb{}", std::env::consts::EXE_SUFFIX));
             if localweb.is_file() {
                 install_shim(&shim_dir.join("composer"), &localweb)?;
                 install_shim(&shim_dir.join("node"), &localweb)?;
@@ -332,6 +344,23 @@ async fn execute(request: Request, state: &Arc<State>) -> localweb_core::Result<
     }
 }
 
+fn running_message(state: &State, name: &str) -> localweb_core::Result<Response> {
+    let project = find_project(&state.paths, name)?;
+    let direct = project.web_port.map_or_else(
+        || "an unknown direct port".to_owned(),
+        |port| format!("http://127.0.0.1:{port}"),
+    );
+    Ok(Response::Message(if is_active("localweb-gateway") {
+        format!(
+            "{name} is running at {direct} and https://{}",
+            project.hostname
+        )
+    } else {
+        format!("{name} is running at {direct}")
+    }))
+}
+
+#[cfg(unix)]
 fn install_shim(link: &std::path::Path, target: &std::path::Path) -> localweb_core::Result<()> {
     use std::os::unix::fs::symlink;
     let temp = link.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
@@ -343,35 +372,92 @@ fn install_shim(link: &std::path::Path, target: &std::path::Path) -> localweb_co
     Ok(())
 }
 
+#[cfg(windows)]
+fn install_shim(link: &std::path::Path, target: &std::path::Path) -> localweb_core::Result<()> {
+    let script = format!("@echo off\r\n\"{}\" %*\r\n", target.display());
+    atomic_write(&link.with_extension("cmd"), script.as_bytes(), 0)
+}
+
 async fn start_project(state: &Arc<State>, name: &str) -> localweb_core::Result<()> {
+    let _operations = state.operations.lock().await;
+    start_project_locked(state, name, false).await
+}
+
+async fn restart_project(state: &Arc<State>, name: &str) -> localweb_core::Result<()> {
+    let _operations = state.operations.lock().await;
+    let running = state.running.lock().await.contains(name);
+    start_project_locked(state, name, running).await
+}
+
+async fn start_project_locked(
+    state: &Arc<State>,
+    name: &str,
+    restart: bool,
+) -> localweb_core::Result<()> {
     let project = find_project(&state.paths, name)?;
     if !project.enabled {
         return Err(LocalWebError::Config("project is disabled".into()));
     }
-    stop_db_proxy(state, name).await;
-    start_db_proxy(state, &project).await?;
     let old = state.running.lock().await.clone();
+    if old.contains(name) && !restart {
+        return Ok(());
+    }
     let mut next = old.clone();
     next.insert(name.to_owned());
+    let fresh = !old.contains(name);
+    if fresh
+        && let Some(port) = project.web_port
+        && !port_available(port)
+    {
+        return Err(LocalWebError::Config(format!(
+            "web port {port} for {name} is already in use"
+        )));
+    }
+    let needs_proxy = !state.db_proxies.lock().await.contains_key(name);
+    if needs_proxy {
+        stop_db_proxy(state, name).await;
+        if let Err(error) = start_db_proxy(state, &project).await {
+            return Err(combine_rollback(
+                error,
+                rollback_start(state, &project, name, &old, fresh).await,
+            ));
+        }
+    }
     let setup = {
         let state = Arc::clone(state);
         let project = project.clone();
         let next = next.clone();
         tokio::task::spawn_blocking(move || setup_project_services(&state, &project, &next))
             .await
-            .map_err(|error| join_failed(&error))?
+            .map_err(|error| join_failed(&error))
+    };
+    let setup = match setup {
+        Ok(result) => result,
+        Err(error) => {
+            return Err(combine_rollback(
+                error,
+                rollback_start(state, &project, name, &old, fresh).await,
+            ));
+        }
     };
     if let Err(error) = setup {
-        stop_db_proxy(state, name).await;
-        rollback_start(state, &project, name, &old).await;
-        return Err(error);
+        return Err(combine_rollback(
+            error,
+            rollback_start(state, &project, name, &old, fresh).await,
+        ));
     }
     if let Err(error) = health_check(&project).await {
-        stop_db_proxy(state, name).await;
-        rollback_start(state, &project, name, &old).await;
-        return Err(error);
+        return Err(combine_rollback(
+            error,
+            rollback_start(state, &project, name, &old, fresh).await,
+        ));
     }
-    persist_running(&state.paths, &next)?;
+    if let Err(error) = persist_running(&state.paths, &next) {
+        return Err(combine_rollback(
+            error,
+            rollback_start(state, &project, name, &old, fresh).await,
+        ));
+    }
     *state.running.lock().await = next;
     Ok(())
 }
@@ -418,35 +504,97 @@ fn setup_project_services(
     Ok(())
 }
 
-async fn rollback_start(state: &Arc<State>, project: &Project, name: &str, old: &BTreeSet<String>) {
+async fn rollback_start(
+    state: &Arc<State>,
+    project: &Project,
+    name: &str,
+    old: &BTreeSet<String>,
+    fresh: bool,
+) -> localweb_core::Result<()> {
+    if fresh {
+        stop_db_proxy(state, name).await;
+    }
     let state = Arc::clone(state);
     let project = project.clone();
     let name = name.to_owned();
     let old = old.clone();
-    let _ =
-        tokio::task::spawn_blocking(move || rollback_start_services(&state, &project, &name, &old))
-            .await;
+    tokio::task::spawn_blocking(move || {
+        rollback_start_services(&state, &project, &name, &old, fresh)
+    })
+    .await
+    .map_err(|error| join_failed(&error))?
 }
 
-fn rollback_start_services(state: &State, project: &Project, name: &str, old: &BTreeSet<String>) {
-    let _ = apply_services(state, old);
-    if !old.contains(name) && project.cache == localweb_core::Cache::Redis {
-        let _ = Services::stop_redis(project);
-    }
-    if !old.contains(name) && project.mail {
-        let _ = Services::stop_mailpit(project);
-    }
-    if !old.contains(name) {
-        let _ = Services::stop_supervisor(project);
+fn rollback_start_services(
+    state: &State,
+    project: &Project,
+    _name: &str,
+    old: &BTreeSet<String>,
+    fresh: bool,
+) -> localweb_core::Result<()> {
+    let mut failures = Vec::new();
+    record(
+        &mut failures,
+        "restore previous web configuration",
+        apply_services(state, old),
+    );
+    if fresh {
+        if project.cache == localweb_core::Cache::Redis {
+            record(&mut failures, "stop Redis", Services::stop_redis(project));
+        }
+        if project.mail {
+            record(
+                &mut failures,
+                "stop Mailpit",
+                Services::stop_mailpit(project),
+            );
+        }
+        record(
+            &mut failures,
+            "stop supervisor",
+            Services::stop_supervisor(project),
+        );
     }
     if !active_uses_database(&state.paths, old, localweb_core::Database::Mariadb) {
-        let _ = Services::stop("localweb-db-mariadb");
+        record(
+            &mut failures,
+            "stop MariaDB",
+            Services::stop("localweb-db-mariadb"),
+        );
     }
     if !active_uses_database(&state.paths, old, localweb_core::Database::Mysql) {
-        let _ = Services::stop("localweb-db-mysql");
+        record(
+            &mut failures,
+            "stop MySQL",
+            Services::stop("localweb-db-mysql"),
+        );
     }
     if !active_uses_database(&state.paths, old, localweb_core::Database::Postgres) {
-        let _ = Services::stop("localweb-db-postgres");
+        record(
+            &mut failures,
+            "stop PostgreSQL",
+            Services::stop("localweb-db-postgres"),
+        );
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(LocalWebError::Service(failures.join("; ")))
+    }
+}
+
+fn combine_rollback(primary: LocalWebError, rollback: localweb_core::Result<()>) -> LocalWebError {
+    match rollback {
+        Ok(()) => primary,
+        Err(rollback) => {
+            LocalWebError::Service(format!("{primary}; rollback also failed: {rollback}"))
+        }
+    }
+}
+
+fn record(failures: &mut Vec<String>, label: &str, result: localweb_core::Result<()>) {
+    if let Err(error) = result {
+        failures.push(format!("{label}: {error}"));
     }
 }
 
@@ -455,6 +603,11 @@ fn join_failed(error: &tokio::task::JoinError) -> LocalWebError {
 }
 
 async fn stop_project(state: &Arc<State>, name: &str) -> localweb_core::Result<()> {
+    let _operations = state.operations.lock().await;
+    stop_project_locked(state, name).await
+}
+
+async fn stop_project_locked(state: &Arc<State>, name: &str) -> localweb_core::Result<()> {
     let project = find_project(&state.paths, name)?;
     let mut active = state.running.lock().await.clone();
     if !active.remove(name) {
@@ -463,11 +616,15 @@ async fn stop_project(state: &Arc<State>, name: &str) -> localweb_core::Result<(
     let state_owned = Arc::clone(state);
     let project_owned = project.clone();
     let active_owned = active.clone();
-    tokio::task::spawn_blocking(move || {
+    let stopped = tokio::task::spawn_blocking(move || {
         stop_project_services(&state_owned, &project_owned, &active_owned)
     })
     .await
-    .map_err(|error| join_failed(&error))??;
+    .map_err(|error| join_failed(&error))?;
+    if let Err(error) = stopped {
+        error!(project = %name, %error, "project stop failed; committed state was preserved");
+        return Err(error);
+    }
     stop_db_proxy(state, name).await;
     *state.running.lock().await = active;
     Ok(())
@@ -506,23 +663,48 @@ fn stop_project_services(
     project: &Project,
     active: &BTreeSet<String>,
 ) -> localweb_core::Result<()> {
-    apply_services(state, active)?;
-    persist_running(&state.paths, active)?;
-    Services::stop_supervisor(project)?;
+    let mut failures = Vec::new();
+    record(
+        &mut failures,
+        "stop supervisor",
+        Services::stop_supervisor(project),
+    );
     if project.cache == localweb_core::Cache::Redis {
-        Services::stop_redis(project)?;
+        record(&mut failures, "stop Redis", Services::stop_redis(project));
     }
     if project.mail {
-        Services::stop_mailpit(project)?;
+        record(
+            &mut failures,
+            "stop Mailpit",
+            Services::stop_mailpit(project),
+        );
     }
-    if !active_uses_database(&state.paths, active, localweb_core::Database::Mariadb) {
-        Services::stop("localweb-db-mariadb")?;
+    record(
+        &mut failures,
+        "rewrite web configuration",
+        apply_services(state, active),
+    );
+    if !failures.is_empty() {
+        return Err(LocalWebError::Service(format!(
+            "project stop completed with errors: {}",
+            failures.join("; ")
+        )));
     }
-    if !active_uses_database(&state.paths, active, localweb_core::Database::Mysql) {
-        Services::stop("localweb-db-mysql")?;
+    persist_running(&state.paths, active)?;
+    if !active_uses_database(&state.paths, active, localweb_core::Database::Mariadb)
+        && let Err(error) = Services::stop("localweb-db-mariadb")
+    {
+        warn!(%error, "could not stop the shared MariaDB service");
     }
-    if !active_uses_database(&state.paths, active, localweb_core::Database::Postgres) {
-        Services::stop("localweb-db-postgres")?;
+    if !active_uses_database(&state.paths, active, localweb_core::Database::Mysql)
+        && let Err(error) = Services::stop("localweb-db-mysql")
+    {
+        warn!(%error, "could not stop the shared MySQL service");
+    }
+    if !active_uses_database(&state.paths, active, localweb_core::Database::Postgres)
+        && let Err(error) = Services::stop("localweb-db-postgres")
+    {
+        warn!(%error, "could not stop the shared PostgreSQL service");
     }
     Ok(())
 }
@@ -753,23 +935,7 @@ fn apply_services(state: &State, active: &BTreeSet<String>) -> localweb_core::Re
         .collect();
     let versions: BTreeSet<_> = projects.iter().map(|p| p.php.clone()).collect();
     for version in &versions {
-        let (_, fpm) = services.php_binaries(version)?;
-        let config = services.render_php(version, &projects)?;
-        let config_str = config
-            .to_str()
-            .ok_or_else(|| LocalWebError::Config("non-UTF-8 FPM config path".into()))?;
-        if let Some(ini_path) = services.php_ini(version) {
-            let ini = ini_path
-                .to_str()
-                .ok_or_else(|| LocalWebError::Config("non-UTF-8 PHP configuration path".into()))?;
-            Services::start_or_restart(
-                &php_unit(version),
-                &fpm,
-                &["-n", "-c", ini, "-F", "-y", config_str],
-            )?;
-        } else {
-            Services::start_or_restart(&php_unit(version), &fpm, &["-F", "-y", config_str])?;
-        }
+        services.start_php(version, &projects)?;
     }
     for version in localweb_core::PHP_VERSIONS {
         if !versions.contains(version) {
@@ -813,7 +979,8 @@ fn apply_services(state: &State, active: &BTreeSet<String>) -> localweb_core::Re
         Services::stop("localweb-apache")?;
     }
     write_routes(state, active)?;
-    let gateway = std::env::current_exe()?.with_file_name("localweb-gateway");
+    let gateway = std::env::current_exe()?
+        .with_file_name(format!("localweb-gateway{}", std::env::consts::EXE_SUFFIX));
     if !is_active("localweb-gateway")
         && std::net::TcpStream::connect_timeout(
             &std::net::SocketAddr::from(([127, 0, 0, 1], 443)),
@@ -884,24 +1051,15 @@ async fn health_check(project: &Project) -> localweb_core::Result<()> {
         .web_port
         .ok_or_else(|| LocalWebError::Config(format!("{} has no direct web port", project.name)))?;
     for _ in 0..20 {
-        if let Ok(Ok(mut stream)) = timeout(
+        if let Ok(Ok(stream)) = timeout(
             Duration::from_secs(1),
             TcpStream::connect(("127.0.0.1", port)),
         )
         .await
+            && let Ok(Some(status)) = probe_http_status(stream, &project.hostname).await
+            && healthy_status(status)
         {
-            let request = format!(
-                "GET / HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
-                project.hostname
-            );
-            stream.write_all(request.as_bytes()).await?;
-            let mut response = [0u8; 128];
-            if let Ok(Ok(n)) = timeout(Duration::from_secs(2), stream.read(&mut response)).await
-                && n > 0
-                && response.starts_with(b"HTTP/")
-            {
-                return Ok(());
-            }
+            return Ok(());
         }
         sleep(Duration::from_millis(150)).await;
     }
@@ -909,6 +1067,57 @@ async fn health_check(project: &Project) -> localweb_core::Result<()> {
         "{} did not pass the HTTP health check; inspect the selected web server and PHP-FPM logs",
         project.name
     )))
+}
+
+/// Sends a minimal HTTP/1.1 request and returns the status code from a
+/// bounded, CRLF-terminated status line. Responses that do not start with a
+/// supported HTTP version or exceed 512 bytes without a line ending are
+/// rejected instead of being treated as healthy.
+async fn probe_http_status(
+    mut stream: tokio::net::TcpStream,
+    hostname: &str,
+) -> localweb_core::Result<Option<u16>> {
+    use tokio::{io::AsyncBufReadExt as _, io::AsyncWriteExt as _, time::timeout};
+    let request = format!("GET / HTTP/1.1\r\nHost: {hostname}\r\nConnection: close\r\n\r\n");
+    stream.write_all(request.as_bytes()).await?;
+    let mut reader = tokio::io::BufReader::new(stream.take(512));
+    let mut line = String::new();
+    let read = timeout(Duration::from_secs(2), reader.read_line(&mut line)).await;
+    let Ok(Ok(read)) = read else {
+        return Ok(None);
+    };
+    if read == 0 || !line.ends_with("\r\n") {
+        return Ok(None);
+    }
+    Ok(status_code(line.as_bytes()))
+}
+
+fn status_code(line: &[u8]) -> Option<u16> {
+    if line.len() > 512 {
+        return None;
+    }
+    let line = std::str::from_utf8(line).ok()?.trim_end_matches("\r\n");
+    let mut fields = line.split_ascii_whitespace();
+    let version = fields.next()?;
+    if version != "HTTP/1.0" && version != "HTTP/1.1" {
+        return None;
+    }
+    fields.next()?.parse::<u16>().ok()
+}
+
+/// 2xx/3xx and authentication challenges (401/403) mean the web server is
+/// reachable and the application answered; 404/5xx, malformed responses and
+/// timeouts are not usable for a freshly started project.
+fn healthy_status(status: u16) -> bool {
+    matches!(status, 200..=399 | 401 | 403)
+}
+
+#[cfg(test)]
+fn healthy_response(response: &[u8]) -> bool {
+    let Some(end) = response.windows(2).position(|window| window == b"\r\n") else {
+        return false;
+    };
+    status_code(&response[..=end + 1]).is_some_and(healthy_status)
 }
 
 async fn cron_loop(state: Arc<State>) {
@@ -1194,15 +1403,139 @@ mod tests {
         let expected = BTreeSet::from(["first".to_owned(), "second".to_owned()]);
         persist_running(&paths, &expected).unwrap();
         assert_eq!(load_desired_running(&paths).unwrap(), expected);
-        assert_eq!(
-            fs::metadata(paths.state.join("active-projects.json"))
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777,
-            0o600
-        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                fs::metadata(paths.state.join("active-projects.json"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        };
         fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn health_check_rejects_server_errors() {
+        assert!(healthy_response(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
+        ));
+        assert!(healthy_response(b"HTTP/1.0 204 No Content\r\n"));
+        assert!(healthy_response(b"HTTP/1.1 302 Found\r\n"));
+        assert!(healthy_response(b"HTTP/1.1 401 Unauthorized\r\n"));
+        assert!(healthy_response(b"HTTP/1.1 403 Forbidden\r\n"));
+        assert!(!healthy_response(b"HTTP/1.1 404 Not Found\r\n"));
+        assert!(!healthy_response(b"HTTP/1.1 500 Internal Server Error\r\n"));
+        assert!(!healthy_response(b"HTTP/1.1 502 Bad Gateway\r\n"));
+        assert!(!healthy_response(b"HTTP/1.1 503 Service Unavailable\r\n"));
+        assert!(!healthy_response(b"garbage"));
+        assert!(!healthy_response(b""));
+        assert!(!healthy_response(b"HTTP/2 200 OK\r\n"));
+        assert!(!healthy_response(b"HTTP/1.1 nope Bad\r\n"));
+        assert!(!healthy_response(b"HTTP/1.1 200 OK"));
+        assert!(!healthy_response(
+            format!("HTTP/1.1 200 {}\r\n", "a".repeat(600)).as_bytes()
+        ));
+    }
+
+    #[tokio::test]
+    async fn probe_reads_a_fragmented_status_line() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 512];
+            assert!(socket.read(&mut request).await.unwrap() > 0);
+            socket.write_all(b"HTTP/1.1 20").await.unwrap();
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            socket
+                .write_all(b"0 OK\r\nContent-Length: 0\r\n\r\n")
+                .await
+                .unwrap();
+        });
+        let stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        assert_eq!(
+            probe_http_status(stream, "example.test").await.unwrap(),
+            Some(200)
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn probe_returns_the_failure_status() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 512];
+            assert!(socket.read(&mut request).await.unwrap() > 0);
+            socket
+                .write_all(b"HTTP/1.1 500 Internal Server Error\r\n\r\n")
+                .await
+                .unwrap();
+        });
+        let stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        let status = probe_http_status(stream, "example.test").await.unwrap();
+        assert_eq!(status, Some(500));
+        assert!(!healthy_status(status.unwrap()));
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn allocate_port_skips_busy_and_reserved_ports() {
+        let busy = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let busy_port = busy.local_addr().unwrap().port();
+        let reserved = if busy_port == WEB_PORT_START {
+            WEB_PORT_START + 1
+        } else {
+            WEB_PORT_START
+        };
+        let used = BTreeSet::from([reserved]);
+        let chosen = allocate_port(WEB_PORT_START, WEB_PORT_END, &used).unwrap();
+        assert_ne!(chosen, busy_port);
+        assert!(!used.contains(&chosen));
+    }
+
+    #[test]
+    fn persist_failure_is_reported_instead_of_silently_ignored() {
+        let base = std::env::temp_dir().join(format!("localweb-persist-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(base.join("config")).unwrap();
+        fs::create_dir_all(base.join("data")).unwrap();
+        fs::create_dir_all(base.join("runtime")).unwrap();
+        fs::write(base.join("state"), b"not a directory").unwrap();
+        let paths = Paths {
+            config: base.join("config"),
+            data: base.join("data"),
+            state: base.join("state"),
+            runtime: base.join("runtime"),
+        };
+        assert!(persist_running(&paths, &BTreeSet::from(["demo".to_owned()])).is_err());
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn rollback_errors_are_combined_with_the_primary_error() {
+        let primary = LocalWebError::Config("primary".into());
+        let combined = combine_rollback(
+            primary,
+            Err(LocalWebError::Service("compensation failed".into())),
+        );
+        let message = combined.to_string();
+        assert!(message.contains("primary"));
+        assert!(message.contains("compensation failed"));
     }
 
     #[test]

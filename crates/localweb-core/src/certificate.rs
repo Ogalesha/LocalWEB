@@ -136,6 +136,18 @@ mod tests {
         paths.create().unwrap();
         let ca = CaPaths::new(&paths);
         ca.ensure_ca().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                fs::metadata(&ca.key).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            assert_eq!(
+                fs::metadata(&ca.cert).unwrap().permissions().mode() & 0o777,
+                0o644
+            );
+        };
         let original = fs::read(&ca.cert).unwrap();
         ca.ensure_ca().unwrap();
         assert_eq!(original, fs::read(&ca.cert).unwrap());
@@ -152,7 +164,15 @@ mod tests {
                 .unwrap()
                 .contains("BEGIN CERTIFICATE")
         );
-        assert!(fs::read_to_string(key).unwrap().contains("PRIVATE KEY"));
+        assert!(fs::read_to_string(&key).unwrap().contains("PRIVATE KEY"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                fs::metadata(&key).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        };
         fs::remove_dir_all(base).unwrap();
     }
 }

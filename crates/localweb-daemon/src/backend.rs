@@ -22,7 +22,11 @@ pub fn start_or_restart(unit: &str, executable: &Path, args: &[&str]) -> Result<
     {
         macos::start_or_restart(unit, executable, args)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        windows::start_or_restart(unit, executable, args)
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
     {
         linux::start_or_restart(unit, executable, args)
     }
@@ -51,7 +55,18 @@ pub fn start_supervised(
         let _ = (description, library_path);
         macos::start_supervised(unit, working_directory, executable, worker_args)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        let _ = description;
+        windows::start_supervised(
+            unit,
+            working_directory,
+            executable,
+            worker_args,
+            library_path,
+        )
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
     {
         linux::start_supervised(
             unit,
@@ -74,7 +89,11 @@ pub fn stop(unit: &str) -> Result<()> {
     {
         macos::stop(unit)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        windows::stop(unit)
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
     {
         linux::stop(unit)
     }
@@ -87,7 +106,11 @@ pub fn is_active(unit: &str) -> bool {
     {
         macos::is_active(unit)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        windows::is_active(unit)
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
     {
         linux::is_active(unit)
     }
@@ -103,13 +126,17 @@ pub fn wait_active(unit: &str, service: &str) -> Result<()> {
     {
         macos::wait_active(unit, service)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        windows::wait_active(unit, service)
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
     {
         linux::wait_active(unit, service)
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 mod linux {
     use super::{LocalWebError, Path, Result, RuntimeLayout};
     use std::{
@@ -296,6 +323,204 @@ mod linux {
                     .iter()
                     .any(|argument| argument == "--working-directory=/tmp/demo project")
             );
+        }
+    }
+}
+
+#[cfg(windows)]
+mod windows {
+    use super::{LocalWebError, Path, Result, RuntimeLayout};
+    use localweb_core::Paths;
+    use std::{
+        collections::BTreeMap,
+        ffi::OsString,
+        fs,
+        os::windows::process::CommandExt as _,
+        path::PathBuf,
+        process::{Command, Stdio},
+        sync::{
+            Arc, Mutex, OnceLock,
+            atomic::{AtomicBool, Ordering},
+        },
+        thread,
+        time::Duration,
+    };
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    fn supervisors() -> &'static Mutex<BTreeMap<String, Arc<AtomicBool>>> {
+        static SUPERVISORS: OnceLock<Mutex<BTreeMap<String, Arc<AtomicBool>>>> = OnceLock::new();
+        SUPERVISORS.get_or_init(|| Mutex::new(BTreeMap::new()))
+    }
+
+    fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+        mutex
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    pub(super) fn start_or_restart(unit: &str, executable: &Path, args: &[&str]) -> Result<()> {
+        stop(unit)?;
+        let arguments: Vec<OsString> = args.iter().map(OsString::from).collect();
+        let log = log_path(unit)?;
+        let mut child = spawn_child(executable, &arguments, None, &log)?;
+        write_pid(unit, child.id())?;
+        thread::spawn(move || {
+            let _ = child.wait();
+        });
+        Ok(())
+    }
+
+    pub(super) fn start_supervised(
+        unit: &str,
+        working_directory: &Path,
+        executable: &Path,
+        worker_args: &[String],
+        _library_path: &str,
+    ) -> Result<()> {
+        stop(unit)?;
+        let executable = executable.to_path_buf();
+        let arguments: Vec<OsString> = worker_args.iter().map(OsString::from).collect();
+        let working = working_directory.to_path_buf();
+        let cancel = Arc::new(AtomicBool::new(false));
+        lock(supervisors()).insert(unit.to_owned(), Arc::clone(&cancel));
+        let unit_owned = unit.to_owned();
+        let log = log_path(unit)?;
+        thread::spawn(move || {
+            while !cancel.load(Ordering::SeqCst) {
+                if let Ok(mut child) = spawn_child(&executable, &arguments, Some(&working), &log) {
+                    let _ = write_pid(&unit_owned, child.id());
+                    let _ = child.wait();
+                }
+                if cancel.load(Ordering::SeqCst) {
+                    break;
+                }
+                thread::sleep(Duration::from_secs(2));
+            }
+        });
+        wait_active(unit, "project supervisor")
+    }
+
+    pub(super) fn stop(unit: &str) -> Result<()> {
+        if let Some(cancel) = lock(supervisors()).remove(unit) {
+            cancel.store(true, Ordering::SeqCst);
+        }
+        let path = pid_path(unit)?;
+        let Ok(contents) = fs::read_to_string(&path) else {
+            return Ok(());
+        };
+        let Ok(pid) = contents.trim().parse::<u32>() else {
+            let _ = fs::remove_file(&path);
+            return Ok(());
+        };
+        let _ = Command::new("taskkill.exe")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        let _ = fs::remove_file(&path);
+        Ok(())
+    }
+
+    pub(super) fn is_active(unit: &str) -> bool {
+        let Ok(path) = pid_path(unit) else {
+            return false;
+        };
+        fs::read_to_string(path)
+            .ok()
+            .and_then(|contents| contents.trim().parse::<u32>().ok())
+            .is_some_and(alive)
+    }
+
+    pub(super) fn wait_active(unit: &str, service: &str) -> Result<()> {
+        for _ in 0..20 {
+            if is_active(unit) {
+                thread::sleep(Duration::from_millis(200));
+                if is_active(unit) {
+                    return Ok(());
+                }
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        let logs = Paths::discover()
+            .map(|paths| paths.state.join("logs").display().to_string())
+            .unwrap_or_else(|_| "the LocalWeb log directory".into());
+        Err(LocalWebError::Service(format!(
+            "{service} did not remain active in {unit}; inspect {logs}"
+        )))
+    }
+
+    fn spawn_child(
+        executable: &Path,
+        args: &[OsString],
+        working_directory: Option<&Path>,
+        log_path: &Path,
+    ) -> Result<std::process::Child> {
+        let log = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log_path)?;
+        let error_log = log.try_clone()?;
+        let mut command = Command::new(executable);
+        command
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(log))
+            .stderr(Stdio::from(error_log))
+            .env("PATH", windows_path())
+            .creation_flags(CREATE_NO_WINDOW);
+        if let Some(working_directory) = working_directory {
+            command.current_dir(working_directory);
+        }
+        if let Some(value) = std::env::var_os("LOCALWEB_RUNTIME_ROOT") {
+            command.env("LOCALWEB_RUNTIME_ROOT", value);
+        }
+        command.spawn().map_err(|error| {
+            LocalWebError::Service(format!("cannot start {}: {error}", executable.display()))
+        })
+    }
+
+    fn write_pid(unit: &str, pid: u32) -> Result<()> {
+        let path = pid_path(unit)?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(path, pid.to_string())?;
+        Ok(())
+    }
+
+    fn pid_path(unit: &str) -> Result<PathBuf> {
+        Ok(Paths::discover()?
+            .runtime
+            .join("services")
+            .join(format!("{unit}.pid")))
+    }
+
+    fn log_path(unit: &str) -> Result<PathBuf> {
+        let logs = Paths::discover()?.state.join("logs");
+        fs::create_dir_all(&logs)?;
+        Ok(logs.join(format!("{unit}.log")))
+    }
+
+    fn alive(pid: u32) -> bool {
+        Command::new("tasklist.exe")
+            .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
+            .output()
+            .is_ok_and(|output| {
+                String::from_utf8_lossy(&output.stdout)
+                    .split(',')
+                    .nth(1)
+                    .is_some_and(|field| field.trim_matches('"').trim() == pid.to_string())
+            })
+    }
+
+    fn windows_path() -> String {
+        let inherited = std::env::var("PATH").unwrap_or_default();
+        let libraries = RuntimeLayout::discover().library_path();
+        if libraries.is_empty() {
+            inherited
+        } else {
+            format!("{libraries};{inherited}")
         }
     }
 }

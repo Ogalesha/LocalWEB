@@ -47,6 +47,15 @@ def helper(operation, data):
     subprocess.run(["sudo", "env", f"PKEXEC_UID={uid}", str(binary_dir / "localweb-helper"), operation], input=data, check=True)
 
 
+def mcp_call(process, payload):
+    process.stdin.write(json.dumps(payload) + "\n")
+    process.stdin.flush()
+    line = process.stdout.readline()
+    assert line, "MCP server closed stdout without a reply"
+    return json.loads(line)
+
+
+mcp = None
 daemon = subprocess.Popen([str(binary_dir / "localwebd")], env=env)
 try:
     for _ in range(120):
@@ -54,10 +63,36 @@ try:
             break
         assert daemon.poll() is None, "Daemon did not start"
         time.sleep(0.25)
+    mcp = subprocess.Popen(
+        [str(binary_dir / "localweb-mcp")],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+        env=env,
+    )
+    initialized = mcp_call(mcp, {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "acceptance", "version": "1"}}})
+    assert initialized["result"]["serverInfo"]["name"] == "localweb"
+    status = mcp_call(mcp, {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "localweb_status", "arguments": {}}})
+    assert not status["result"]["isError"], status
+    mcp.terminate()
+    mcp.wait(timeout=10)
+    mcp = None
     domains = [f"php8-{minor}-{web}-{db}.test" for minor in range(6) for web in ("nginx", "apache") for db in ("mariadb", "mysql", "postgres", "sqlite")]
     helper("sync-hosts", json.dumps(domains).encode())
     ca = request("ca_status")
-    helper("install-ca", Path(ca["certificate"]).read_bytes())
+    certificate = Path(ca["certificate"]).read_bytes()
+    try:
+        helper("install-ca", certificate)
+    except subprocess.CalledProcessError:
+        trusted = [
+            Path("/usr/local/share/ca-certificates/localweb-development-ca.crt"),
+            Path("/etc/ca-certificates/trust-source/anchors/localweb-development-ca.crt"),
+            Path("/etc/pki/ca-trust/source/anchors/localweb-development-ca.crt"),
+        ]
+        previous = next((path for path in trusted if path.is_file()), None)
+        assert previous is not None, "install-ca refused and no trusted LocalWeb CA was found"
+        helper("remove-ca", previous.read_bytes())
+        helper("install-ca", certificate)
     registration = {name: str(base / name / "localweb") for name in ("config", "data", "state")}
     registration["runtime"] = str(runtime_parent / "localweb")
     helper("register-paths", json.dumps(registration).encode())
@@ -107,6 +142,9 @@ try:
     assert daemon.returncode == 0
     print("Acceptance passed: 48 native PHP/web/database combinations")
 finally:
+    if mcp is not None and mcp.poll() is None:
+        mcp.terminate()
+        mcp.wait(timeout=10)
     if daemon.poll() is None:
         try:
             request("shutdown")

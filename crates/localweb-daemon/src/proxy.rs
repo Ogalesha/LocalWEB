@@ -73,6 +73,14 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[tokio::test]
+    async fn rejects_a_listen_port_already_in_use() {
+        let occupied = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let port = occupied.local_addr().unwrap().port();
+        let error = DbProxy::start(port, 9).await.err().unwrap();
+        assert_eq!(error.kind(), std::io::ErrorKind::AddrInUse);
+    }
+
+    #[tokio::test]
     async fn forwards_bytes_between_client_and_upstream() {
         let upstream = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
         let target_port = upstream.local_addr().unwrap().port();

@@ -4,7 +4,12 @@ use localweb_core::{
     Cache, Database, ExecutionSpec, NewProject, Paths, Request, Response, SupervisorConfig,
     WebServer, certificate::CaPaths, send_request,
 };
-use std::{ffi::OsString, path::PathBuf, process::Command};
+use std::{
+    ffi::OsString,
+    io::{BufRead, IsTerminal, Write},
+    path::PathBuf,
+    process::Command,
+};
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -92,6 +97,21 @@ enum CommandKind {
         #[command(subcommand)]
         command: RuntimeCommand,
     },
+    Data {
+        #[command(subcommand)]
+        command: DataCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum DataCommand {
+    /// Permanently delete this account's `LocalWeb` data after confirmation.
+    Purge {
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -104,6 +124,7 @@ enum Toggle {
 enum CaCommand {
     Status,
     Install,
+    Remove,
 }
 
 #[derive(Subcommand)]
@@ -291,6 +312,12 @@ async fn main() -> Result<()> {
             install_ca(&paths)?;
             return Ok(());
         }
+        CommandKind::Ca {
+            command: CaCommand::Remove,
+        } => {
+            remove_ca(&paths)?;
+            return Ok(());
+        }
         CommandKind::Hosts {
             command: HostsCommand::Sync,
         } => {
@@ -344,6 +371,12 @@ async fn main() -> Result<()> {
         CommandKind::Runtime {
             command: RuntimeCommand::List,
         } => Request::RuntimeList,
+        CommandKind::Data {
+            command: DataCommand::Purge { dry_run, yes },
+        } => {
+            data_purge(&paths, dry_run, yes).await?;
+            return Ok(());
+        }
         CommandKind::Ca {
             command: CaCommand::Status,
         } => Request::CaStatus,
@@ -575,9 +608,11 @@ fn run_execution(
     spec: ExecutionSpec,
     kind: ExecutionKind,
 ) -> Result<std::process::ExitStatus> {
-    let mut path = OsString::from(spec.shim_dir.as_os_str());
-    path.push(":");
-    path.push(std::env::var_os("PATH").unwrap_or_default());
+    let mut paths = vec![spec.shim_dir];
+    paths.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
+    let path = std::env::join_paths(paths).context("cannot build the project PATH")?;
     let mut command = match kind {
         ExecutionKind::Php(args) => {
             let mut cmd = Command::new(&spec.php);
@@ -640,6 +675,9 @@ fn run_execution(
             cmd
         }
         ExecutionKind::Shell => {
+            #[cfg(windows)]
+            let shell = std::env::var_os("COMSPEC").unwrap_or_else(|| OsString::from("cmd.exe"));
+            #[cfg(not(windows))]
             let shell = std::env::var_os("SHELL").unwrap_or_else(|| OsString::from("/bin/sh"));
             Command::new(shell)
         }
@@ -658,11 +696,15 @@ fn run_execution(
 }
 
 fn helper_path() -> Result<PathBuf> {
-    let installed = PathBuf::from("/usr/lib/localweb/localweb-helper");
-    if installed.is_file() {
-        return Ok(installed);
+    #[cfg(unix)]
+    {
+        let installed = PathBuf::from("/usr/lib/localweb/localweb-helper");
+        if installed.is_file() {
+            return Ok(installed);
+        }
     }
-    let development = std::env::current_exe()?.with_file_name("localweb-helper");
+    let development = std::env::current_exe()?
+        .with_file_name(format!("localweb-helper{}", std::env::consts::EXE_SUFFIX));
     if development.is_file() {
         return Ok(development);
     }
@@ -676,11 +718,141 @@ fn run_helper(operation: &str, input: &[u8]) -> Result<()> {
     )?)
 }
 
+async fn data_purge(paths: &Paths, dry_run: bool, yes: bool) -> Result<()> {
+    if localweb_core::send_request(paths, Request::Status)
+        .await
+        .is_ok()
+    {
+        bail!("the LocalWeb daemon is running; run `localweb shutdown` before purging data");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if std::fs::metadata("/proc/self").is_ok_and(|metadata| metadata.uid() == 0) {
+            bail!("run `localweb data purge` as the account that owns the data, not as root");
+        }
+    }
+    if CaPaths::new(paths).cert.is_file() {
+        println!(
+            "note: the LocalWeb CA is still installed in the system trust store; run `localweb ca remove` first if you want to revoke it"
+        );
+    }
+    let targets = [
+        ("configuration", paths.config.clone()),
+        ("data", paths.data.clone()),
+        ("state", paths.state.clone()),
+        ("runtime", paths.runtime.clone()),
+    ];
+    let mut existing = Vec::new();
+    for (label, path) in targets {
+        let metadata = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error).with_context(|| format!("cannot inspect {}", path.display()));
+            }
+        };
+        if metadata.file_type().is_symlink() {
+            bail!(
+                "refusing to purge {} because it is a symbolic link",
+                path.display()
+            );
+        }
+        if !metadata.is_dir() {
+            bail!(
+                "refusing to purge {} because it is not a directory",
+                path.display()
+            );
+        }
+        let size = directory_size(&path);
+        existing.push((label, path, size));
+    }
+    if existing.is_empty() {
+        println!("No LocalWeb data directories exist for this account");
+        return Ok(());
+    }
+    println!("LocalWeb data for this account:");
+    for (label, path, size) in &existing {
+        println!("  {label:14} {:>10}  {}", human_size(*size), path.display());
+    }
+    if dry_run {
+        println!("Dry run: nothing was deleted");
+        return Ok(());
+    }
+    if !yes {
+        if !std::io::stdin().is_terminal() {
+            bail!("refusing to purge without --yes (standard input is not a terminal)");
+        }
+        print!("Type 'purge' to delete these directories permanently: ");
+        std::io::stdout().flush()?;
+        let mut answer = String::new();
+        std::io::stdin().lock().read_line(&mut answer)?;
+        if answer.trim() != "purge" {
+            bail!("purge cancelled");
+        }
+    }
+    for (label, path, _) in &existing {
+        std::fs::remove_dir_all(path)
+            .with_context(|| format!("cannot remove {label} directory {}", path.display()))?;
+        println!("Removed {label}: {}", path.display());
+    }
+    println!("LocalWeb data for this account was purged");
+    Ok(())
+}
+
+fn directory_size(path: &std::path::Path) -> u64 {
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+        return 0;
+    };
+    if metadata.file_type().is_symlink() {
+        return 0;
+    }
+    if metadata.is_file() {
+        return metadata.len();
+    }
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .map(|entry| directory_size(&entry.path()))
+        .sum()
+}
+
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "human-readable sizes do not need exact integer precision"
+)]
+fn human_size(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KiB", "MiB", "GiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} {}", UNITS[unit])
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
 fn install_ca(paths: &Paths) -> Result<()> {
     let ca = CaPaths::new(paths);
     ca.ensure_ca()?;
     run_helper("install-ca", &std::fs::read(&ca.cert)?)?;
     println!("LocalWeb Development CA installed in the system trust store");
+    Ok(())
+}
+
+fn remove_ca(paths: &Paths) -> Result<()> {
+    let ca = CaPaths::new(paths);
+    if !ca.cert.is_file() {
+        bail!("this account has no LocalWeb CA");
+    }
+    run_helper("remove-ca", &std::fs::read(&ca.cert)?)?;
+    println!("LocalWeb Development CA removed from the system trust store");
     Ok(())
 }
 
@@ -697,4 +869,31 @@ async fn sync_hosts(paths: &Paths) -> Result<()> {
     run_helper("sync-hosts", &serde_json::to_vec(&names)?)?;
     println!("Synchronized {} exact LocalWeb hostnames", names.len());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn human_size_uses_binary_units() {
+        assert_eq!(human_size(0), "0 B");
+        assert_eq!(human_size(1023), "1023 B");
+        assert_eq!(human_size(1024), "1.0 KiB");
+        assert_eq!(human_size(1536), "1.5 KiB");
+        assert_eq!(human_size(1024 * 1024), "1.0 MiB");
+    }
+
+    #[test]
+    fn directory_size_ignores_symlinks() {
+        let root = std::env::temp_dir().join(format!("localweb-cli-size-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("nested")).unwrap();
+        std::fs::write(root.join("a"), b"1234").unwrap();
+        std::fs::write(root.join("nested/b"), b"12").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(root.join("a"), root.join("link")).unwrap();
+        assert_eq!(directory_size(&root), 6);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 }

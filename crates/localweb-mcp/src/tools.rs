@@ -854,13 +854,21 @@ async fn run_helper(operation: &str, input: Vec<u8>) -> Result<(), String> {
 
 /// Finds the installed helper, falling back to a development build.
 fn helper_path() -> Result<PathBuf, String> {
-    let installed = PathBuf::from("/usr/lib/localweb/localweb-helper");
-    if installed.is_file() {
-        return Ok(installed);
+    let name = if cfg!(windows) {
+        "localweb-helper.exe"
+    } else {
+        "localweb-helper"
+    };
+    #[cfg(not(windows))]
+    {
+        let installed = PathBuf::from("/usr/lib/localweb/localweb-helper");
+        if installed.is_file() {
+            return Ok(installed);
+        }
     }
     let development = std::env::current_exe()
         .map_err(|error| format!("cannot locate the current binary: {error}"))?
-        .with_file_name("localweb-helper");
+        .with_file_name(name);
     if development.is_file() {
         return Ok(development);
     }
@@ -983,7 +991,7 @@ mod tests {
     fn arbitrary_programs_pass_through() {
         let (program, prefix) = resolve_program(&spec(), "git").expect("plain programs resolve");
         assert_eq!(program, PathBuf::from("git"));
-        assert!(prefix.is_empty());
+        assert_eq!(prefix, Vec::<std::ffi::OsString>::new());
     }
 
     #[test]
@@ -1003,7 +1011,10 @@ mod tests {
         assert!(optional_bool(&arguments, "flag", false));
         assert_eq!(string_array(&arguments, "items").unwrap(), ["a", "b"]);
         let _ = string_array(&json!({ "items": [1] }), "items").unwrap_err();
-        assert!(string_array(&json!({}), "items").unwrap().is_empty());
+        assert_eq!(
+            string_array(&json!({}), "items").unwrap(),
+            Vec::<String>::new()
+        );
         assert_eq!(
             optional_port(&json!({ "port": 18_000 }), "port").unwrap(),
             Some(18_000)

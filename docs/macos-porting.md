@@ -11,9 +11,10 @@ macOS must keep the same guarantees the Linux packages already provide:
 
 - one privileged pass installs HTTPS trust and exact hostnames, and the same
   pass can be fully undone;
-- uninstall removes every artifact LocalWeb created — launch jobs, trust
-  anchor, `/etc/hosts` block, per-user state, runtime directory — and never
-  touches project source directories;
+- uninstall removes every system artifact LocalWeb created — launch jobs,
+  trust anchor, `/etc/hosts` block, runtime directory — preserves per-user
+  data until `localweb data purge` is run explicitly, and never touches
+  project source directories;
 - the gateway owns port 443, the daemon runs per user, and project services
   (web server, PHP-FPM, databases, workers) stop with the product.
 
@@ -31,7 +32,7 @@ macOS must keep the same guarantees the Linux packages already provide:
 | Runtimes | No darwin bundle: `RuntimeLayout` probes Homebrew (`/opt/homebrew`, then `/usr/local`) for `php@X`/`php`, `node@X`/`node`, `nginx`, `httpd`, `mariadb`, `mysql`, `postgresql@14…17`, `redis`, `mailpit` and Composer's PHAR. nginx/Apache/MariaDB/MySQL/PostgreSQL configuration helpers expose the Homebrew `etc`/`share`/`lib` directories instead of the Linux runtime root. |
 | hosts and DNS | Same managed block in `crates/localweb-core/src/hosts.rs`; the uninstaller flushes `dscacheutil` and `mDNSResponder` after removal. |
 | Packaging | `packaging/macos/build-pkg.sh` builds `dist/LocalWeb-<version>.pkg` on macOS with `pkgbuild`: CLI, `localwebd`, gateway, helper and MCP server under `/usr/local/libexec/localweb`, `localweb` symlink, and `localweb-uninstall`. Per-user setup stays explicit. |
-| Uninstall | `packaging/macos/uninstall.sh` boots out both LaunchAgents/socket jobs, kills prefix processes, sweeps only registered user paths (home or `/private/var/folders/*/*/T/localweb`), removes the hosts block, the CA and its trust copy, app paths, receipts and the DNS cache. Project sources are never touched. |
+| Uninstall | `packaging/macos/uninstall.sh` boots out both LaunchAgents/socket jobs, kills prefix processes, removes the hosts block, the CA and its trust copy, app paths, receipts and the DNS cache. Per-user data can be deleted explicitly with `localweb data purge`; project sources are never touched. |
 | CI | `.github/workflows/macos-smoke.yml` runs `cargo check --workspace --all-targets` and the portable core/gui tests on `macos-latest`. |
 
 ## First run on a MacBook

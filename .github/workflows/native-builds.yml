@@ -3,6 +3,7 @@ name: Native packages and acceptance
 on:
   push:
     branches: [main]
+    tags: ['v*']
   workflow_dispatch:
 
 concurrency:
@@ -48,12 +49,27 @@ jobs:
           name: localweb-${{ matrix.artifact }}
           path: dist/
           if-no-files-found: error
+      - name: Collect native build diagnostics
+        if: always()
+        run: |
+          mkdir -p native-diagnostics
+          cp native-build.log native-diagnostics/ 2>/dev/null || true
+          docker cp lw-ci:/workspace/packaging/php-builds/logs native-diagnostics/php-build-logs 2>/dev/null || true
+          docker cp lw-ci:/workspace/packaging/runtime-root native-diagnostics/runtime-root 2>/dev/null || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: localweb-native-diagnostics-${{ matrix.artifact }}
+          path: native-diagnostics/
+          if-no-files-found: warn
+          retention-days: 7
       - name: Stop isolated CI host
         if: always()
         run: docker logs lw-ci || true; docker rm -f lw-ci || true
 
   release:
     name: Publish verified installers
+    if: startsWith(github.ref, 'refs/tags/v')
     needs: linux
     runs-on: ubuntu-latest
     permissions:
@@ -66,11 +82,14 @@ jobs:
         with:
           pattern: localweb-*
           path: release-files
-      - name: Publish packages for the tested commit
+      - name: Publish packages for the tested tag
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
         run: |
-          test "$(git rev-parse v0.1.0^{commit})" = "$GITHUB_SHA"
+          test "$(git rev-parse "$TAG^{commit}")" = "$GITHUB_SHA"
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          test "v$version" = "$TAG"
           python3 - <<'PY'
           from pathlib import Path
           import hashlib
@@ -79,7 +98,7 @@ jobs:
           assert len(packages) == 2, packages
           Path('SHA256SUMS').write_text(''.join(f'{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}\n' for p in sorted(packages)))
           PY
-          if ! gh release view v0.1.0 >/dev/null 2>&1; then
-            gh release create v0.1.0 --verify-tag --title 'LocalWeb 0.1.0' --notes-file CHANGELOG.md
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --verify-tag --title "LocalWeb $version" --notes-file CHANGELOG.md
           fi
-          gh release upload v0.1.0 release-files/*/*.deb release-files/*/*.pkg.tar.zst SHA256SUMS --clobber
+          gh release upload "$TAG" release-files/*/*.deb release-files/*/*.pkg.tar.zst SHA256SUMS

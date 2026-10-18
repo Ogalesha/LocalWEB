@@ -48,8 +48,10 @@ case "${1:-}" in
         done
 
         if [ -x /usr/lib/localweb/localweb-helper ]; then
-            DPKG_MAINTSCRIPT_PACKAGE=localweb DPKG_MAINTSCRIPT_NAME=prerm \
-                /usr/lib/localweb/localweb-helper package-remove
+            if ! DPKG_MAINTSCRIPT_PACKAGE=localweb DPKG_MAINTSCRIPT_NAME=prerm \
+                /usr/lib/localweb/localweb-helper package-remove; then
+                echo "warning: LocalWeb system integration cleanup was incomplete" >&2
+            fi
         fi
 
         if command -v setcap >/dev/null 2>&1 && [ -e /usr/lib/localweb/localweb-gateway ]; then

@@ -2897,34 +2897,50 @@ fn open_browser(
 fn open_url(url: &str, lang: Lang, notice: &mut Option<Notice>) {
     #[cfg(target_os = "macos")]
     let program = "open";
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    let program = "cmd";
+    #[cfg(not(any(target_os = "macos", windows)))]
     let program = "xdg-open";
-    if let Err(error) = Command::new(program).arg(url).spawn() {
+    let mut command = Command::new(program);
+    #[cfg(windows)]
+    command.args(["/C", "start", ""]).arg(url);
+    #[cfg(not(windows))]
+    command.arg(url);
+    if let Err(error) = command.spawn() {
         *notice = Some(Notice::error(lang.notice_browser(&error.to_string())));
+    }
+}
+
+fn program_filename(name: &str) -> String {
+    if cfg!(windows) {
+        format!("{name}.exe")
+    } else {
+        name.to_owned()
     }
 }
 
 fn localweb_cli_path() -> Result<PathBuf, String> {
     let sibling = std::env::current_exe()
         .map_err(|error| error.to_string())?
-        .with_file_name("localweb");
+        .with_file_name(program_filename("localweb"));
     if sibling.is_file() {
         Ok(sibling)
     } else {
-        Ok(PathBuf::from("localweb"))
+        Ok(PathBuf::from(program_filename("localweb")))
     }
 }
 
 fn find_program(name: &str) -> Option<PathBuf> {
+    let name = program_filename(name);
     if let Ok(executable) = std::env::current_exe() {
-        let sibling = executable.with_file_name(name);
+        let sibling = executable.with_file_name(&name);
         if sibling.is_file() {
             return Some(sibling);
         }
     }
     std::env::var_os("PATH").and_then(|paths| {
         std::env::split_paths(&paths)
-            .map(|directory| directory.join(name))
+            .map(|directory| directory.join(&name))
             .find(|candidate| candidate.is_file())
     })
 }

@@ -12,38 +12,9 @@ refresh_caches() {
 
 case "${1:-}" in
     remove|purge|disappear)
-        if [ -d /var/lib/localweb/users ]; then
-            for registry in /var/lib/localweb/users/*.paths; do
-                [ -f "$registry" ] || continue
-                uid=${registry##*/}
-                uid=${uid%.paths}
-                home=$(getent passwd "$uid" | cut -d: -f6)
-                [ -n "$home" ] || continue
-                while IFS= read -r path; do
-                    case "$path" in
-                        "$home"/*|/run/user/"$uid"/localweb)
-                            rm -rf -- "$path"
-                            ;;
-                    esac
-                done < "$registry"
-            done
-        fi
-
-        uid_min=$(awk '$1 == "UID_MIN" { print $2; exit }' /etc/login.defs)
-        uid_min=${uid_min:-1000}
-        getent passwd | while IFS=: read -r user _ uid _ _ home _; do
-            [ "$uid" -ge "$uid_min" ] 2>/dev/null || continue
-            [ "$uid" -lt 65534 ] || continue
-            [ -n "$home" ] && [ "$home" != / ] || continue
-            rm -rf -- \
-                "$home/.config/localweb" \
-                "$home/.local/share/localweb" \
-                "$home/.local/state/localweb"
-            rm -f -- "$home/.config/systemd/user/"localweb*.service
-            rm -f -- "$home/.config/systemd/user/default.target.wants/"localweb*.service
-            rm -rf -- "/run/user/$uid/localweb"
-        done
-
+        # User data is never removed automatically: package removal is not
+        # consent to destroy projects, databases, configurations or private
+        # CA keys. Use `localweb data purge` from each account instead.
         rm -rf -- /var/lib/localweb /var/log/localweb /usr/lib/localweb
 
         for runtime_dir in /run/user/[0-9]*; do

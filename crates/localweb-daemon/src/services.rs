@@ -3,13 +3,14 @@ use localweb_core::{
     runtime::RuntimeLayout,
 };
 use serde::{Deserialize, Serialize};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt as _;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::Write as _,
     fs,
     io::Write as _,
     net::{Ipv4Addr, SocketAddrV4, TcpListener, TcpStream},
-    os::unix::fs::PermissionsExt as _,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
@@ -65,6 +66,18 @@ pub struct Services<'a> {
 impl Services<'_> {
     pub fn php_binaries(&self, version: &str) -> Result<(PathBuf, PathBuf)> {
         localweb_core::validate_php_version(version)?;
+        #[cfg(windows)]
+        {
+            RuntimeLayout::discover().php(version)
+        }
+        #[cfg(not(windows))]
+        {
+            self.php_binaries_unix(version)
+        }
+    }
+
+    #[cfg(not(windows))]
+    fn php_binaries_unix(&self, version: &str) -> Result<(PathBuf, PathBuf)> {
         let managed = self.paths.data.join("runtimes/php").join(version);
         let bundled = RuntimeLayout::discover();
         let candidates = vec![
@@ -125,56 +138,77 @@ impl Services<'_> {
 
     pub fn node_binaries(version: &str) -> Result<(PathBuf, PathBuf)> {
         localweb_core::validate_node_version(version)?;
-        let layout = RuntimeLayout::discover();
-        if version == "24"
-            && let (Ok(node), Ok(npm)) = (layout.node(), layout.npm_cli())
+        #[cfg(windows)]
         {
-            return Ok((node, npm));
-        }
-        #[cfg(target_os = "macos")]
-        {
-            for prefix in ["/opt/homebrew", "/usr/local"] {
-                for formula in [format!("node@{version}"), "node".to_owned()] {
-                    let node = Path::new(prefix)
-                        .join("opt")
-                        .join(&formula)
-                        .join("bin/node");
-                    if node.is_file()
-                        && let Ok(output) = Command::new(&node)
-                            .arg("-p")
-                            .arg("process.versions.node.split('.')[0]")
-                            .output()
-                        && output.status.success()
-                        && String::from_utf8_lossy(&output.stdout).trim() == version
-                        && let Some(npm) = Self::npm_cli_for(&node)
-                    {
-                        return Ok((node, npm));
-                    }
-                }
-            }
-        }
-        let system = PathBuf::from("/usr/bin/node");
-        if system.is_file() {
-            let output = Command::new(&system)
+            let node = RuntimeLayout::discover().node()?;
+            let output = Command::new(&node)
                 .arg("-p")
                 .arg("process.versions.node.split('.')[0]")
                 .output()?;
             if output.status.success()
                 && String::from_utf8_lossy(&output.stdout).trim() == version
-                && let Some(npm) = Self::npm_cli_for(&system)
+                && let Some(npm) = Self::npm_cli_for(&node)
             {
-                return Ok((system, npm));
+                return Ok((node, npm));
             }
+            return Err(LocalWebError::RuntimeNotInstalled(format!(
+                "Node.js {version} is not installed via Scoop or Chocolatey"
+            )));
         }
-        Err(LocalWebError::RuntimeNotInstalled(format!(
-            "Node.js {version} is not available (bundled: 24)"
-        )))
+        #[cfg(not(windows))]
+        {
+            let layout = RuntimeLayout::discover();
+            if version == "24"
+                && let (Ok(node), Ok(npm)) = (layout.node(), layout.npm_cli())
+            {
+                return Ok((node, npm));
+            }
+            #[cfg(target_os = "macos")]
+            {
+                for prefix in ["/opt/homebrew", "/usr/local"] {
+                    for formula in [format!("node@{version}"), "node".to_owned()] {
+                        let node = Path::new(prefix)
+                            .join("opt")
+                            .join(&formula)
+                            .join("bin/node");
+                        if node.is_file()
+                            && let Ok(output) = Command::new(&node)
+                                .arg("-p")
+                                .arg("process.versions.node.split('.')[0]")
+                                .output()
+                            && output.status.success()
+                            && String::from_utf8_lossy(&output.stdout).trim() == version
+                            && let Some(npm) = Self::npm_cli_for(&node)
+                        {
+                            return Ok((node, npm));
+                        }
+                    }
+                }
+            }
+            let system = PathBuf::from("/usr/bin/node");
+            if system.is_file() {
+                let output = Command::new(&system)
+                    .arg("-p")
+                    .arg("process.versions.node.split('.')[0]")
+                    .output()?;
+                if output.status.success()
+                    && String::from_utf8_lossy(&output.stdout).trim() == version
+                    && let Some(npm) = Self::npm_cli_for(&system)
+                {
+                    return Ok((system, npm));
+                }
+            }
+            Err(LocalWebError::RuntimeNotInstalled(format!(
+                "Node.js {version} is not available (bundled: 24)"
+            )))
+        }
     }
 
     fn npm_cli_for(node: &Path) -> Option<PathBuf> {
         let dir = node.parent()?;
         [
             dir.join("npm-cli.js"),
+            dir.join("node_modules/npm/bin/npm-cli.js"),
             dir.join("../npm/bin/npm-cli.js"),
             dir.join("../lib/node_modules/npm/bin/npm-cli.js"),
             PathBuf::from("/usr/share/npm/bin/npm-cli.js"),
@@ -244,12 +278,26 @@ impl Services<'_> {
         Ok(())
     }
 
+    #[cfg(not(windows))]
     pub fn php_socket(&self, project: &Project) -> PathBuf {
         self.paths
             .runtime
             .join("php")
             .join(&project.php)
             .join(format!("{}.sock", project.name))
+    }
+
+    /// Returns the `FastCGI` upstream for a project's PHP handler.
+    #[must_use]
+    pub fn php_upstream(&self, project: &Project) -> String {
+        #[cfg(windows)]
+        {
+            format!("127.0.0.1:{}", php_cgi_port(&project.php))
+        }
+        #[cfg(not(windows))]
+        {
+            format!("unix:{}", self.php_socket(project).display())
+        }
     }
 
     /// Returns the LocalWeb-owned SQLite file for a project.
@@ -318,20 +366,31 @@ impl Services<'_> {
     }
 
     pub fn php_ini(&self, version: &str) -> Option<PathBuf> {
-        [
-            RuntimeLayout::discover()
-                .root()
-                .join("php")
-                .join(version)
-                .join("etc/php.ini"),
-            self.paths
-                .data
-                .join("runtimes/php")
-                .join(version)
-                .join("etc/php.ini"),
-        ]
-        .into_iter()
-        .find(|path| path.is_file())
+        #[cfg(windows)]
+        {
+            let (php, _) = RuntimeLayout::discover().php(version).ok()?;
+            let directory = php.parent()?;
+            return [directory.join("php.ini"), directory.join("../php.ini")]
+                .into_iter()
+                .find(|path| path.is_file());
+        }
+        #[cfg(not(windows))]
+        {
+            [
+                RuntimeLayout::discover()
+                    .root()
+                    .join("php")
+                    .join(version)
+                    .join("etc/php.ini"),
+                self.paths
+                    .data
+                    .join("runtimes/php")
+                    .join(version)
+                    .join("etc/php.ini"),
+            ]
+            .into_iter()
+            .find(|path| path.is_file())
+        }
     }
 
     pub fn php_command_args(&self, version: &str, args: &[String]) -> Vec<String> {
@@ -343,6 +402,53 @@ impl Services<'_> {
         result
     }
 
+    /// Starts the `FastCGI` handler for one PHP version.
+    ///
+    /// Windows has no `php-fpm`, so a single `php-cgi -b` process serves every
+    /// project that uses the same PHP version.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when PHP cannot be started or does not become ready.
+    pub fn start_php(&self, version: &str, projects: &[Project]) -> Result<()> {
+        #[cfg(windows)]
+        {
+            let _ = projects;
+            let (_, cgi) = self.php_binaries(version)?;
+            let port = php_cgi_port(version);
+            let address = format!("127.0.0.1:{port}");
+            let ini = self.php_ini(version);
+            let config = ini.as_ref().map(|path| path.display().to_string());
+            let mut args = vec!["-b", address.as_str()];
+            if let Some(config) = config.as_deref() {
+                args.extend(["-c", config]);
+            }
+            Self::start_or_restart(&php_unit(version), &cgi, &args)?;
+            wait_for_tcp(port, &format!("PHP {version} CGI"))
+        }
+        #[cfg(not(windows))]
+        {
+            let (_, fpm) = self.php_binaries(version)?;
+            let config = self.render_php(version, projects)?;
+            let config_str = config
+                .to_str()
+                .ok_or_else(|| LocalWebError::Config("non-UTF-8 FPM config path".into()))?;
+            if let Some(ini_path) = self.php_ini(version) {
+                let ini = ini_path.to_str().ok_or_else(|| {
+                    LocalWebError::Config("non-UTF-8 PHP configuration path".into())
+                })?;
+                Self::start_or_restart(
+                    &php_unit(version),
+                    &fpm,
+                    &["-n", "-c", ini, "-F", "-y", config_str],
+                )
+            } else {
+                Self::start_or_restart(&php_unit(version), &fpm, &["-F", "-y", config_str])
+            }
+        }
+    }
+
+    #[cfg(not(windows))]
     pub fn render_php(&self, version: &str, projects: &[Project]) -> Result<PathBuf> {
         let dir = self.paths.config.join("generated/php").join(version);
         fs::create_dir_all(&dir)?;
@@ -384,13 +490,13 @@ impl Services<'_> {
         for project in projects.iter().filter(|p| p.web_server == WebServer::Nginx) {
             let root = project.absolute_document_root()?;
             safe_config_path(&root)?;
-            let socket = self.php_socket(project);
+            let upstream = self.php_upstream(project);
             let port = project.web_port.ok_or_else(|| {
                 LocalWebError::Config(format!("{} has no direct web port", project.name))
             })?;
             write!(servers,
-                "server {{\n listen 127.0.0.1:{port};\n server_name {host};\n root \"{root}\";\n index index.php index.html;\n location / {{ try_files $uri $uri/ /index.php?$query_string; }}\n location ~ \\.php$ {{\n  try_files $uri =404;\n  fastcgi_pass unix:{socket};\n  fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;\n  fastcgi_param SCRIPT_NAME $fastcgi_script_name;\n  fastcgi_param QUERY_STRING $query_string;\n  fastcgi_param REQUEST_METHOD $request_method;\n  fastcgi_param CONTENT_TYPE $content_type;\n  fastcgi_param CONTENT_LENGTH $content_length;\n  fastcgi_param REQUEST_URI $request_uri;\n  fastcgi_param DOCUMENT_URI $document_uri;\n  fastcgi_param DOCUMENT_ROOT $document_root;\n  fastcgi_param SERVER_PROTOCOL $server_protocol;\n  fastcgi_param SERVER_NAME $server_name;\n  fastcgi_param HTTP_HOST $http_host;\n  fastcgi_param HTTPS $fastcgi_https;\n }}\n}}\n",
-                host = project.hostname, root = root.display(), socket = socket.display(),
+                "server {{\n listen 127.0.0.1:{port};\n server_name {host};\n root \"{root}\";\n index index.php index.html;\n location / {{ try_files $uri $uri/ /index.php?$query_string; }}\n location ~ \\.php$ {{\n  try_files $uri =404;\n  fastcgi_pass {upstream};\n  fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;\n  fastcgi_param SCRIPT_NAME $fastcgi_script_name;\n  fastcgi_param QUERY_STRING $query_string;\n  fastcgi_param REQUEST_METHOD $request_method;\n  fastcgi_param CONTENT_TYPE $content_type;\n  fastcgi_param CONTENT_LENGTH $content_length;\n  fastcgi_param REQUEST_URI $request_uri;\n  fastcgi_param DOCUMENT_URI $document_uri;\n  fastcgi_param DOCUMENT_ROOT $document_root;\n  fastcgi_param SERVER_PROTOCOL $server_protocol;\n  fastcgi_param SERVER_NAME $server_name;\n  fastcgi_param HTTP_HOST $http_host;\n  fastcgi_param HTTPS $fastcgi_https;\n }}\n}}\n",
+                host = project.hostname, root = config_path(&root), upstream = upstream,
             ).map_err(|error| LocalWebError::Config(format!("cannot render nginx server: {error}")))?;
         }
         let tmp = self.paths.runtime.join("services/nginx-tmp");
@@ -399,11 +505,11 @@ impl Services<'_> {
         }
         let config = format!(
             "pid {pid};\nerror_log {error};\nevents {{ worker_connections 256; }}\nhttp {{\n include \"{mime}\";\n access_log {access};\n map $http_x_forwarded_proto $fastcgi_https {{\n default off;\n https on;\n }}\n client_body_temp_path {tmp}/client-body;\n proxy_temp_path {tmp}/proxy;\n fastcgi_temp_path {tmp}/fastcgi;\n uwsgi_temp_path {tmp}/uwsgi;\n scgi_temp_path {tmp}/scgi;\n{servers}\n}}\n",
-            mime = RuntimeLayout::discover().nginx_mime_types().display(),
-            pid = self.paths.runtime.join("services/nginx.pid").display(),
-            error = self.paths.state.join("logs/nginx-error.log").display(),
-            access = self.paths.state.join("logs/nginx-access.log").display(),
-            tmp = tmp.display(),
+            mime = config_path(&RuntimeLayout::discover().nginx_mime_types()),
+            pid = config_path(&self.paths.runtime.join("services/nginx.pid")),
+            error = config_path(&self.paths.state.join("logs/nginx-error.log")),
+            access = config_path(&self.paths.state.join("logs/nginx-access.log")),
+            tmp = config_path(&tmp),
         );
         let file = dir.join("nginx.conf");
         atomic_write(&file, config.as_bytes(), 0o600)?;
@@ -420,8 +526,13 @@ impl Services<'_> {
         let mut vhosts = String::new();
         let mut listens = BTreeSet::new();
         let mut module_config = String::new();
+        let mpm = if cfg!(windows) {
+            ("mpm_winnt", "mpm_winnt_module")
+        } else {
+            ("mpm_event", "mpm_event_module")
+        };
         for (name, identifier) in [
-            ("mpm_event", "mpm_event_module"),
+            mpm,
             ("authz_core", "authz_core_module"),
             ("log_config", "log_config_module"),
             ("unixd", "unixd_module"),
@@ -437,7 +548,7 @@ impl Services<'_> {
                 writeln!(
                     module_config,
                     "LoadModule {identifier} \"{}\"",
-                    module.display()
+                    config_path(&module)
                 )
                 .map_err(|error| LocalWebError::Config(error.to_string()))?;
             }
@@ -448,14 +559,19 @@ impl Services<'_> {
         {
             let root = project.absolute_document_root()?;
             safe_config_path(&root)?;
-            let socket = self.php_socket(project);
+            let upstream = self.php_upstream(project);
+            let fcgi = if upstream.starts_with("unix:") {
+                format!("{upstream}|fcgi://localhost")
+            } else {
+                format!("fcgi://{upstream}")
+            };
             let port = project.web_port.ok_or_else(|| {
                 LocalWebError::Config(format!("{} has no direct web port", project.name))
             })?;
             listens.insert(port);
             write!(vhosts,
-                "<VirtualHost 127.0.0.1:{port}>\n ServerName {host}\n DocumentRoot \"{root}\"\n DirectoryIndex index.php index.html\n SetEnvIf X-Forwarded-Proto \"^https$\" HTTPS=on\n <Directory \"{root}\">\n  AllowOverride None\n  Require all granted\n  RewriteEngine On\n  RewriteCond %{{REQUEST_FILENAME}} !-f\n  RewriteCond %{{REQUEST_FILENAME}} !-d\n  RewriteRule ^ index.php [QSA]\n </Directory>\n ProxyPassMatch ^/(.*\\.php(/.*)?)$ unix:{socket}|fcgi://localhost{root}\n</VirtualHost>\n",
-                host = project.hostname, root = root.display(), socket = socket.display(),
+                "<VirtualHost 127.0.0.1:{port}>\n ServerName {host}\n DocumentRoot \"{root}\"\n DirectoryIndex index.php index.html\n SetEnvIf X-Forwarded-Proto \"^https$\" HTTPS=on\n <Directory \"{root}\">\n  AllowOverride None\n  Require all granted\n  RewriteEngine On\n  RewriteCond %{{REQUEST_FILENAME}} !-f\n  RewriteCond %{{REQUEST_FILENAME}} !-d\n  RewriteRule ^ index.php [QSA]\n </Directory>\n ProxyPassMatch ^/(.*\\.php(/.*)?)$ {fcgi}{root}\n</VirtualHost>\n",
+                host = project.hostname, root = config_path(&root), fcgi = fcgi,
             ).map_err(|error| LocalWebError::Config(format!("cannot render Apache vhost: {error}")))?;
         }
         let mut listen_config = String::new();
@@ -464,12 +580,12 @@ impl Services<'_> {
         }
         let config = format!(
             "ServerRoot \"{server_root}\"\n{module_config}ServerName localhost\nServerTokens Prod\nTraceEnable off\n{listen_config}DefaultRuntimeDir \"{run}\"\nPidFile \"{pid}\"\nErrorLog \"{error}\"\nLogFormat \"%h %l %u %t '%r' %>s %b\" localweb\nCustomLog \"{access}\" localweb\nTypesConfig \"{mime}\"\n{vhosts}",
-            server_root = server_root.display(),
-            run = run_dir.display(),
-            pid = self.paths.runtime.join("services/apache.pid").display(),
-            error = self.paths.state.join("logs/apache-error.log").display(),
-            access = self.paths.state.join("logs/apache-access.log").display(),
-            mime = runtime.apache_mime_types().display(),
+            server_root = config_path(&server_root),
+            run = config_path(&run_dir),
+            pid = config_path(&self.paths.runtime.join("services/apache.pid")),
+            error = config_path(&self.paths.state.join("logs/apache-error.log")),
+            access = config_path(&self.paths.state.join("logs/apache-access.log")),
+            mime = config_path(&runtime.apache_mime_types()),
         );
         let file = dir.join("httpd.conf");
         atomic_write(&file, config.as_bytes(), 0o600)?;
@@ -503,7 +619,13 @@ impl Services<'_> {
         let config = self.render_mariadb(&data)?;
         let defaults = format!("--defaults-file={}", config.display());
         Self::start_or_restart("localweb-db-mariadb", &server, &[&defaults])?;
-        wait_for_tcp(MARIADB_PORT, "MariaDB")
+        wait_for_tcp(MARIADB_PORT, "MariaDB")?;
+        #[cfg(unix)]
+        wait_for_file(
+            &self.paths.runtime.join("services/mariadb.sock"),
+            "MariaDB socket",
+        )?;
+        Ok(())
     }
 
     pub fn ensure_project_database(&self, project: &Project) -> Result<()> {
@@ -524,17 +646,28 @@ impl Services<'_> {
         }
         let (_, _, client) = RuntimeLayout::discover().mariadb()?;
         let sql = format!(
-            "CREATE DATABASE IF NOT EXISTS `{database}`; CREATE USER IF NOT EXISTS '{user}'@'127.0.0.1' IDENTIFIED BY '{password}'; ALTER USER '{user}'@'127.0.0.1' IDENTIFIED BY '{password}'; GRANT ALL PRIVILEGES ON `{database}`.* TO '{user}'@'127.0.0.1'; FLUSH PRIVILEGES;",
+            "CREATE DATABASE IF NOT EXISTS `{database}`; CREATE USER IF NOT EXISTS '{user}'@'localhost' IDENTIFIED BY '{password}'; ALTER USER '{user}'@'localhost' IDENTIFIED BY '{password}'; GRANT ALL PRIVILEGES ON `{database}`.* TO '{user}'@'localhost'; CREATE USER IF NOT EXISTS '{user}'@'127.0.0.1' IDENTIFIED BY '{password}'; ALTER USER '{user}'@'127.0.0.1' IDENTIFIED BY '{password}'; GRANT ALL PRIVILEGES ON `{database}`.* TO '{user}'@'127.0.0.1'; FLUSH PRIVILEGES;",
             database = secrets.database_name,
             user = secrets.database_user,
             password = secrets.database_password,
         );
-        let socket = self.paths.runtime.join("services/mariadb.sock");
-        let mut child = Command::new(client)
-            .arg("--no-defaults")
-            .arg("--protocol=socket")
-            .arg(format!("--socket={}", socket.display()))
-            .arg("--user=root")
+        let mut command = Command::new(client);
+        command.arg("--no-defaults");
+        #[cfg(unix)]
+        {
+            let socket = self.paths.runtime.join("services/mariadb.sock");
+            command
+                .arg("--protocol=socket")
+                .arg(format!("--socket={}", socket.display()))
+                .arg("--user=root");
+        };
+        #[cfg(windows)]
+        {
+            command
+                .args(["--protocol=tcp", "--host=127.0.0.1"])
+                .arg(format!("--port={MARIADB_PORT}"));
+        };
+        let mut child = command
             .env("LD_LIBRARY_PATH", RuntimeLayout::discover().library_path())
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
@@ -583,7 +716,13 @@ impl Services<'_> {
         let config = self.render_mysql(&data)?;
         let defaults = format!("--defaults-file={}", config.display());
         Self::start_or_restart("localweb-db-mysql", &server, &[&defaults])?;
-        wait_for_tcp(MYSQL_PORT, "MySQL")
+        wait_for_tcp(MYSQL_PORT, "MySQL")?;
+        #[cfg(unix)]
+        wait_for_file(
+            &self.paths.runtime.join("services/mysql.sock"),
+            "MySQL socket",
+        )?;
+        Ok(())
     }
 
     pub fn ensure_project_mysql_database(&self, project: &Project) -> Result<()> {
@@ -604,17 +743,28 @@ impl Services<'_> {
         }
         let (_, client) = RuntimeLayout::discover().mysql()?;
         let sql = format!(
-            "CREATE DATABASE IF NOT EXISTS `{database}`; CREATE USER IF NOT EXISTS '{user}'@'127.0.0.1' IDENTIFIED BY '{password}'; ALTER USER '{user}'@'127.0.0.1' IDENTIFIED BY '{password}'; GRANT ALL PRIVILEGES ON `{database}`.* TO '{user}'@'127.0.0.1'; FLUSH PRIVILEGES;",
+            "CREATE DATABASE IF NOT EXISTS `{database}`; CREATE USER IF NOT EXISTS '{user}'@'localhost' IDENTIFIED BY '{password}'; ALTER USER '{user}'@'localhost' IDENTIFIED BY '{password}'; GRANT ALL PRIVILEGES ON `{database}`.* TO '{user}'@'localhost'; CREATE USER IF NOT EXISTS '{user}'@'127.0.0.1' IDENTIFIED BY '{password}'; ALTER USER '{user}'@'127.0.0.1' IDENTIFIED BY '{password}'; GRANT ALL PRIVILEGES ON `{database}`.* TO '{user}'@'127.0.0.1'; FLUSH PRIVILEGES;",
             database = secrets.database_name,
             user = secrets.database_user,
             password = secrets.database_password,
         );
-        let socket = self.paths.runtime.join("services/mysql.sock");
-        let mut child = Command::new(client)
-            .arg("--no-defaults")
-            .arg("--protocol=socket")
-            .arg(format!("--socket={}", socket.display()))
-            .arg("--user=root")
+        let mut command = Command::new(client);
+        command.arg("--no-defaults");
+        #[cfg(unix)]
+        {
+            let socket = self.paths.runtime.join("services/mysql.sock");
+            command
+                .arg("--protocol=socket")
+                .arg(format!("--socket={}", socket.display()))
+                .arg("--user=root");
+        };
+        #[cfg(windows)]
+        {
+            command
+                .args(["--protocol=tcp", "--host=127.0.0.1"])
+                .arg(format!("--port={MYSQL_PORT}"));
+        };
+        let mut child = command
             .env("LD_LIBRARY_PATH", RuntimeLayout::discover().library_path())
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
@@ -641,15 +791,35 @@ impl Services<'_> {
         let files = self.paths.runtime.join("services/mysql-files");
         fs::create_dir_all(&files)?;
         let runtime = RuntimeLayout::discover();
+        let basedir = if cfg!(windows) {
+            let (server, _) = runtime.mysql()?;
+            let root = server.parent().and_then(Path::parent).ok_or_else(|| {
+                LocalWebError::Config("MySQL base directory is unavailable".into())
+            })?;
+            format!("basedir={}\n", config_path(root))
+        } else {
+            String::new()
+        };
+        let skip_name_resolve = if cfg!(windows) {
+            ""
+        } else {
+            "skip-name-resolve\n"
+        };
+        #[cfg(unix)]
+        let socket = format!(
+            "socket={}\n",
+            config_path(&self.paths.runtime.join("services/mysql.sock"))
+        );
+        #[cfg(windows)]
+        let socket = String::new();
         let config = format!(
-            "[client]\nport={port}\nsocket={socket}\n[mysqld]\ndatadir={data}\nport={port}\nbind-address=127.0.0.1\nsocket={socket}\npid-file={pid}\nlog-error={log}\nlc-messages-dir={messages}\nmax-connections=40\nskip-name-resolve\ndisable-log-bin\nsecure-file-priv={files}\n",
+            "[client]\nport={port}\n{socket}[mysqld]\ndatadir={data}\n{basedir}port={port}\nbind-address=127.0.0.1\n{socket}pid-file={pid}\nlog-error={log}\nlc-messages-dir={messages}\nmax-connections=40\n{skip_name_resolve}disable-log-bin\nsecure-file-priv={files}\n",
             port = MYSQL_PORT,
-            socket = self.paths.runtime.join("services/mysql.sock").display(),
-            data = data.display(),
-            pid = self.paths.runtime.join("services/mysql.pid").display(),
-            log = self.paths.state.join("logs/mysql.log").display(),
-            messages = runtime.mysql_messages_dir().display(),
-            files = files.display(),
+            data = config_path(data),
+            pid = config_path(&self.paths.runtime.join("services/mysql.pid")),
+            log = config_path(&self.paths.state.join("logs/mysql.log")),
+            messages = config_path(&runtime.mysql_messages_dir()),
+            files = config_path(&files),
         );
         let file = directory.join("my.cnf");
         atomic_write(&file, config.as_bytes(), 0o600)?;
@@ -677,6 +847,7 @@ impl Services<'_> {
             })?;
         let data = self.paths.data.join("databases/postgres").join(major);
         fs::create_dir_all(&data)?;
+        #[cfg(unix)]
         fs::set_permissions(&data, fs::Permissions::from_mode(0o700))?;
         if !data.join("PG_VERSION").is_file() {
             let output = Command::new(initdb)
@@ -700,12 +871,15 @@ impl Services<'_> {
                 )));
             }
         }
-        let socket = self.paths.runtime.join("services/postgres");
-        fs::create_dir_all(&socket)?;
-        fs::set_permissions(&socket, fs::Permissions::from_mode(0o700))?;
+        let socket_dir = self.paths.runtime.join("services/postgres");
+        fs::create_dir_all(&socket_dir)?;
+        #[cfg(unix)]
+        fs::set_permissions(&socket_dir, fs::Permissions::from_mode(0o700))?;
         let data = data.display().to_string();
-        let socket = format!("unix_socket_directories={}", socket.display());
         let libraries = format!("dynamic_library_path={}", layout.postgres_lib().display());
+        #[cfg(unix)]
+        let socket = format!("unix_socket_directories={}", socket_dir.display());
+        #[cfg(unix)]
         Self::start_or_restart(
             "localweb-db-postgres",
             &server,
@@ -724,12 +898,23 @@ impl Services<'_> {
                 &libraries,
             ],
         )?;
+        #[cfg(windows)]
+        Self::start_or_restart(
+            "localweb-db-postgres",
+            &server,
+            &[
+                "-D",
+                &data,
+                "-c",
+                "listen_addresses=127.0.0.1",
+                "-c",
+                "port=33073",
+                "-c",
+                &libraries,
+            ],
+        )?;
         let library_path = layout.library_path();
-        wait_for_postgres(
-            &client,
-            &self.paths.runtime.join("services/postgres"),
-            &library_path,
-        )
+        wait_for_postgres(&client, &socket_dir, &library_path)
     }
 
     pub fn ensure_project_postgres_database(&self, project: &Project) -> Result<()> {
@@ -737,16 +922,27 @@ impl Services<'_> {
         let sql = postgres_provision_sql(&secrets)?;
         let layout = RuntimeLayout::discover();
         let (_, _, psql) = layout.postgres()?;
-        let mut child = Command::new(psql)
-            .args([
-                "--no-psqlrc",
-                "--set=ON_ERROR_STOP=1",
-                "--username=localweb_admin",
-                "--dbname=postgres",
-                "--port=33073",
-                "--host",
-            ])
-            .arg(self.paths.runtime.join("services/postgres"))
+        let mut command = Command::new(psql);
+        command.args([
+            "--no-psqlrc",
+            "--set=ON_ERROR_STOP=1",
+            "--username=localweb_admin",
+            "--dbname=postgres",
+        ]);
+        #[cfg(unix)]
+        {
+            command
+                .arg(format!("--port={POSTGRES_PORT}"))
+                .arg("--host")
+                .arg(self.paths.runtime.join("services/postgres"));
+        };
+        #[cfg(windows)]
+        {
+            command
+                .args(["--host=127.0.0.1"])
+                .arg(format!("--port={POSTGRES_PORT}"));
+        };
+        let mut child = command
             .env("LD_LIBRARY_PATH", layout.library_path())
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
@@ -1062,15 +1258,31 @@ impl Services<'_> {
         let directory = self.paths.config.join("generated/mariadb");
         fs::create_dir_all(&directory)?;
         let runtime = RuntimeLayout::discover();
+        let basedir = if cfg!(windows) {
+            format!("basedir={}\n", config_path(&runtime.mariadb_basedir()))
+        } else {
+            String::new()
+        };
+        let skip_name_resolve = if cfg!(windows) {
+            ""
+        } else {
+            "skip-name-resolve\n"
+        };
+        #[cfg(unix)]
+        let socket = format!(
+            "socket={}\n",
+            config_path(&self.paths.runtime.join("services/mariadb.sock"))
+        );
+        #[cfg(windows)]
+        let socket = String::new();
         let config = format!(
-            "[client]\nport={port}\nsocket={socket}\n[mysqld]\ndatadir={data}\nport={port}\nbind-address=127.0.0.1\nsocket={socket}\npid-file={pid}\nlog-error={log}\nplugin-dir={plugins}\nlc-messages-dir={messages}\nmax-connections=40\nskip-name-resolve\n",
+            "[client]\nport={port}\n{socket}[mysqld]\ndatadir={data}\n{basedir}port={port}\nbind-address=127.0.0.1\n{socket}pid-file={pid}\nlog-error={log}\nplugin-dir={plugins}\nlc-messages-dir={messages}\nmax-connections=40\n{skip_name_resolve}",
             port = MARIADB_PORT,
-            socket = self.paths.runtime.join("services/mariadb.sock").display(),
-            data = data.display(),
-            pid = self.paths.runtime.join("services/mariadb.pid").display(),
-            log = self.paths.state.join("logs/mariadb.log").display(),
-            plugins = runtime.mariadb_plugin_dir().display(),
-            messages = runtime.mariadb_messages_dir().display(),
+            data = config_path(data),
+            pid = config_path(&self.paths.runtime.join("services/mariadb.pid")),
+            log = config_path(&self.paths.state.join("logs/mariadb.log")),
+            plugins = config_path(&runtime.mariadb_plugin_dir()),
+            messages = config_path(&runtime.mariadb_messages_dir()),
         );
         let file = directory.join("my.cnf");
         atomic_write(&file, config.as_bytes(), 0o600)?;
@@ -1089,13 +1301,14 @@ impl Services<'_> {
         let config = format!(
             "bind 127.0.0.1\nprotected-mode yes\nport {port}\ndaemonize no\nsupervised no\nsave \"\"\nappendonly no\nmaxmemory {memory}mb\nmaxmemory-policy allkeys-lru\ndir {working}\npidfile {pid}\nlogfile {log}\n",
             memory = project.resources.cache_memory_mb,
-            working = working.display(),
-            pid = working.join("redis.pid").display(),
-            log = self
-                .paths
-                .state
-                .join(format!("logs/{}-redis.log", project.name))
-                .display(),
+            working = config_path(&working),
+            pid = config_path(&working.join("redis.pid")),
+            log = config_path(
+                &self
+                    .paths
+                    .state
+                    .join(format!("logs/{}-redis.log", project.name))
+            ),
         );
         let file = directory.join(format!("{}.conf", project.name));
         atomic_write(&file, config.as_bytes(), 0o600)?;
@@ -1113,6 +1326,26 @@ impl Services<'_> {
 
 pub fn php_unit(version: &str) -> String {
     format!("localweb-php-{}", version.replace('.', "-"))
+}
+
+#[cfg(windows)]
+fn php_cgi_port(version: &str) -> u16 {
+    version
+        .rsplit('.')
+        .next()
+        .and_then(|minor| minor.parse::<u16>().ok())
+        .map_or(11_800, |minor| 11_800 + minor)
+}
+
+fn config_path(path: &Path) -> String {
+    #[cfg(windows)]
+    {
+        path.display().to_string().replace('\\', "/")
+    }
+    #[cfg(not(windows))]
+    {
+        path.display().to_string()
+    }
 }
 
 pub fn redis_unit(project: &Project) -> String {
@@ -1145,6 +1378,7 @@ fn validate_sql_identifier(identifier: &str) -> Result<()> {
     Ok(())
 }
 
+#[cfg(not(windows))]
 fn php_matches_version(php: &Path, version: &str) -> bool {
     Command::new(php)
         .args(["-n", "-r", "echo PHP_MAJOR_VERSION.'.'.PHP_MINOR_VERSION;"])
@@ -1155,6 +1389,7 @@ fn php_matches_version(php: &Path, version: &str) -> bool {
         })
 }
 
+#[cfg(not(windows))]
 fn fpm_matches_version(fpm: &Path, version: &str) -> bool {
     Command::new(fpm)
         .args(["-n", "-v"])
@@ -1200,18 +1435,37 @@ fn wait_for_tcp(port: u16, service: &str) -> Result<()> {
     )))
 }
 
+#[cfg(unix)]
+fn wait_for_file(path: &Path, description: &str) -> Result<()> {
+    for _ in 0..50 {
+        if path.exists() {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    Err(LocalWebError::Service(format!(
+        "{description} {} was not created",
+        path.display()
+    )))
+}
+
 fn wait_for_postgres(client: &Path, socket_dir: &Path, library_path: &str) -> Result<()> {
+    #[cfg(windows)]
+    let _ = socket_dir;
     for _ in 0..100 {
-        let ready = Command::new(client)
-            .args([
-                "--no-psqlrc",
-                "--no-password",
-                "--set=ON_ERROR_STOP=1",
-                "--username=localweb_admin",
-                "--dbname=postgres",
-                "--host",
-            ])
-            .arg(socket_dir)
+        let mut command = Command::new(client);
+        command.args([
+            "--no-psqlrc",
+            "--no-password",
+            "--set=ON_ERROR_STOP=1",
+            "--username=localweb_admin",
+            "--dbname=postgres",
+        ]);
+        #[cfg(unix)]
+        command.arg("--host").arg(socket_dir);
+        #[cfg(windows)]
+        command.arg("--host=127.0.0.1");
+        let ready = command
             .arg(format!("--port={POSTGRES_PORT}"))
             .args([
                 "--quiet",
@@ -1246,10 +1500,11 @@ fn safe_config_path(path: &Path) -> Result<()> {
     let text = path
         .to_str()
         .ok_or_else(|| LocalWebError::Config("non-UTF-8 project path".into()))?;
-    if text
-        .bytes()
-        .any(|b| b.is_ascii_control() || matches!(b, b'"' | b'\\' | b'$' | b';' | b'{' | b'}'))
-    {
+    if text.bytes().any(|b| {
+        b.is_ascii_control()
+            || matches!(b, b'"' | b'$' | b';' | b'{' | b'}')
+            || (!cfg!(windows) && b == b'\\')
+    }) {
         return Err(LocalWebError::Config(
             "project path contains characters unsafe for native service configuration".into(),
         ));
@@ -1264,6 +1519,36 @@ mod tests {
     fn rejects_config_injection() {
         safe_config_path(Path::new("/tmp/evil\nlisten=0.0.0.0")).unwrap_err();
         safe_config_path(Path::new("/tmp/safe site")).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rendered_database_configs_pin_the_runtime_socket() {
+        let root =
+            std::env::temp_dir().join(format!("localweb-services-config-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = Paths {
+            config: root.join("config"),
+            data: root.join("data"),
+            state: root.join("state"),
+            runtime: root.join("runtime"),
+        };
+        let services = Services { paths: &paths };
+        let mariadb = services
+            .render_mariadb(&paths.data.join("mariadb"))
+            .unwrap();
+        let text = std::fs::read_to_string(mariadb).unwrap();
+        assert!(text.contains(&format!(
+            "socket={}",
+            paths.runtime.join("services/mariadb.sock").display()
+        )));
+        let mysql = services.render_mysql(&paths.data.join("mysql")).unwrap();
+        let text = std::fs::read_to_string(mysql).unwrap();
+        assert!(text.contains(&format!(
+            "socket={}",
+            paths.runtime.join("services/mysql.sock").display()
+        )));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

@@ -26,9 +26,12 @@ RUN for unit in nginx apache2 httpd mariadb mysql postgresql redis redis-server;
 RUN if [ -f /usr/lib/x86_64-linux-gnu/libaio.so.1t64 ]; then \
       ln -sf /usr/lib/x86_64-linux-gnu/libaio.so.1t64 /usr/local/lib/libaio.so.1 && ldconfig; \
     fi
+# Pin the toolchain so a new stable release cannot change Clippy's lint set
+# between a green build and the release tag.
+ARG RUST_VERSION=1.99.1
 ENV RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo PATH=/opt/cargo/bin:$PATH
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal && \
-    rustup component add rustfmt clippy && \
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain ${RUST_VERSION} && \
+    rustup component add rustfmt clippy --toolchain ${RUST_VERSION} && \
     chmod -R a+rX /opt/rustup /opt/cargo && chown -R builder:builder /opt/cargo
 COPY --chown=builder:builder . /workspace
 WORKDIR /workspace

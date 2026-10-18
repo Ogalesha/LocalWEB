@@ -182,8 +182,12 @@ localweb shutdown
 Closing the desktop window leaves projects running. **Stop LocalWeb** stops
 the managed environment; **Stop** on a project affects that project.
 The displayed project state is the daemon's active-project state, not a
-continuous health check of every service. Gateway state is checked through
-the native service manager. Worker counts describe configured workers.
+continuous health check of every service. When a project starts or restarts,
+the daemon reads a bounded HTTP/1.x status line from its direct loopback port:
+2xx/3xx and authentication challenges (401/403) count as reachable, while
+404, 5xx, malformed responses and timeouts fail the start. Gateway state is
+checked through the native service manager. Worker counts describe configured
+workers.
 
 ## AI assistants (MCP)
 
@@ -221,10 +225,21 @@ sudo apt remove localweb     # Ubuntu
 sudo pacman -R localweb      # Arch / Omarchy
 ```
 
-Package removal deletes LocalWeb's services, settings, databases, logs,
-certificates and host mappings. **Source project folders are kept.** Export
-any LocalWeb database data you want to retain first.
-Package upgrades preserve LocalWeb state.
+Package removal stops LocalWeb's services and removes its system integration,
+binaries, logs and host mappings. **Per-user data is preserved:** projects,
+databases, settings, generated certificates and the private CA keys are never
+deleted by `apt remove` or `pacman -R`, and upgrades keep them as well.
+To erase this account's LocalWeb data explicitly:
+
+```bash
+localweb ca remove              # remove this account's CA from system trust
+localweb data purge --dry-run   # list directories and sizes
+localweb data purge             # requires typing "purge" to confirm
+```
+
+`localweb data purge` only removes directories owned by the calling account
+and refuses symlinked paths. Source project folders outside LocalWeb data
+directories are never touched.
 
 ## Build and contribute
 
