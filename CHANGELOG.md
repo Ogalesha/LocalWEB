@@ -21,7 +21,10 @@ All notable changes to this project are documented here. The format follows
 - Packaging for macOS: `packaging/macos/build-pkg.sh` builds `LocalWeb-<version>.pkg` with `pkgbuild`, and `packaging/macos/uninstall.sh` removes launch agents, the CA trust copy, `/usr/local/bin` entries and the `/private/var/folders` runtime while preserving per-user data and project sources.
 - Desktop UI in 14 languages (English, Italiano, Shqip, Chinese, French, Greek, Hindi, Polish, Portuguese, Russian, Spanish, Swedish, Turkish, Ukrainian) with bundled Noto CJK SC and Devanagari fonts and native punctuation.
 - Settings view with the resolved MCP server path, copyable client configuration, read-only environment summary and relocated maintenance actions, translated into all 14 languages.
-- Native CI now also exercises the GUI under a headless Wayland compositor and installs the X libraries the X11 smoke test needs on Arch.
+- Native CI now also exercises the GUI under a headless Wayland compositor (Weston) and under sway, the wlroots stack
+  Omarchy's Hyprland builds on, and installs the X libraries the X11 smoke test needs on Arch.
+- A Windows smoke job cross-builds the workspace for `x86_64-pc-windows-msvc` with cargo-xwin and runs the CLI,
+  the daemon's named pipe, the MCP status call and the GUI screenshot test under Wine.
 - Per-project fixed direct HTTP ports (`18000-18999`, `--web-port`) and database proxy ports (`19000-19999`, `--db-port`) for MariaDB, MySQL and PostgreSQL; existing projects are migrated on the next daemon start and the environment exposes the proxy as `DB_PORT`.
 
 ### Changed

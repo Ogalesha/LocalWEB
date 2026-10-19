@@ -101,6 +101,43 @@ wayland_smoke() {
     test -s "$screenshot"
 }
 
+wlroots_smoke() {
+    screenshot=/tmp/localweb-gui-wlroots-smoke.png
+    rm -f "$screenshot"
+    cargo build -p localweb-gui --features screenshot
+    runtime_dir=$(mktemp -d /tmp/localweb-wlroots.XXXXXX)
+    chmod 700 "$runtime_dir"
+    XDG_RUNTIME_DIR="$runtime_dir" WLR_BACKENDS=headless WLR_LIBINPUT_NO_DEVICES=1 \
+        WLR_RENDERER_ALLOW_SOFTWARE=1 sway >/tmp/sway-smoke.log 2>&1 &
+    sway_pid=$!
+    display=""
+    for _ in $(seq 1 60); do
+        for candidate in "$runtime_dir"/wayland-[0-9]*; do
+            if [ -S "$candidate" ]; then
+                display=$(basename "$candidate")
+                break
+            fi
+        done
+        [ -n "$display" ] && break
+        sleep 0.5
+    done
+    if [ -z "$display" ] || [ ! -S "$runtime_dir/$display" ]; then
+        cat /tmp/sway-smoke.log >&2 || true
+        kill "$sway_pid" 2>/dev/null || true
+        rm -rf "$runtime_dir"
+        return 1
+    fi
+    status=0
+    XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$display" \
+        LIBGL_ALWAYS_SOFTWARE=1 EFRAME_SCREENSHOT_TO="$screenshot" \
+        timeout 90 target/debug/localweb-gui || status=$?
+    kill "$sway_pid" 2>/dev/null || true
+    wait "$sway_pid" 2>/dev/null || true
+    rm -rf "$runtime_dir"
+    [ "$status" -eq 0 ] || return "$status"
+    test -s "$screenshot"
+}
+
 run_step ci-inputs source scripts/ci-inputs.sh
 run_step build-php-runtimes sh scripts/build-php-runtimes.sh
 run_step stage-runtime sh scripts/stage-runtime.sh
@@ -111,6 +148,7 @@ run_step cargo-clippy cargo clippy --workspace --all-targets -- -D warnings
 run_step cargo-test cargo test --workspace
 run_step gui-smoke gui_smoke
 run_step wayland-smoke wayland_smoke
+run_step wlroots-smoke wlroots_smoke
 run_step package sh scripts/build-native-package.sh
 run_step install install_package
 run_step acceptance python3 scripts/acceptance.py /usr/lib/localweb
