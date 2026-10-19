@@ -3,7 +3,7 @@ members = ["crates/localweb-core", "crates/localweb-daemon", "crates/localweb-cl
 resolver = "2"
 
 [workspace.package]
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 license = "MIT"
 rust-version = "1.92"
@@ -22,7 +22,7 @@ http-body-util = "0.1"
 hyper = { version = "1", features = ["full"] }
 hyper-util = { version = "0.1", features = ["full"] }
 libc = "0.2"
-localweb-core = { path = "crates/localweb-core", version = "=0.1.1" }
+localweb-core = { path = "crates/localweb-core", version = "=0.1.2" }
 mimalloc = "0.1"
 pem = "3"
 rcgen = { version = "0.13", features = ["x509-parser"] }

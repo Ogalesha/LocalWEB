@@ -6,6 +6,31 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-10-19
+
+### Added
+
+- Complete per-OS releases: every tagged release now carries the Ubuntu `.deb`, the Arch/Omarchy
+  `.pkg.tar.zst`, a universal macOS `.pkg` (Apple silicon and Intel) with the `LocalWeb.app` GUI
+  bundle, and a Windows `x86_64` portable `.zip`, all listed in `SHA256SUMS`.
+- macOS packaging builds universal binaries with `lipo`, bundles the GUI as `LocalWeb.app` with a
+  generated `.icns` icon under `/Applications`, and smokes the packaged CLI, daemon socket and MCP
+  status on macOS before the installer can be uploaded. The `.pkg` is unsigned, so Gatekeeper
+  warnings are expected until notarization exists.
+- The Windows job packages the six cross-built `.exe` files into
+  `localweb-<version>-windows-x86_64.zip` after the Wine smoke passes.
+- Native CI now also exercises the GUI under sway, the wlroots stack Omarchy's Hyprland builds on.
+- A Windows smoke job cross-builds the workspace for `x86_64-pc-windows-msvc` with cargo-xwin and
+  runs the CLI, the daemon's named pipe, the MCP status call and the GUI screenshot test under Wine,
+  in an Ubuntu 26.04 container so the MSVC STL headers match the toolchain.
+
+### Changed
+
+- Release publishing now waits for the Linux, macOS and Windows jobs and verifies all four
+  artifacts plus `SHA256SUMS` before uploading. A hygiene job fails the build when tracked
+  files contain personal email addresses or credentials, and package metadata no longer
+  embeds a personal maintainer address.
+
 ## [0.1.1] - 2026-10-19
 
 ### Added
@@ -21,10 +46,7 @@ All notable changes to this project are documented here. The format follows
 - Packaging for macOS: `packaging/macos/build-pkg.sh` builds `LocalWeb-<version>.pkg` with `pkgbuild`, and `packaging/macos/uninstall.sh` removes launch agents, the CA trust copy, `/usr/local/bin` entries and the `/private/var/folders` runtime while preserving per-user data and project sources.
 - Desktop UI in 14 languages (English, Italiano, Shqip, Chinese, French, Greek, Hindi, Polish, Portuguese, Russian, Spanish, Swedish, Turkish, Ukrainian) with bundled Noto CJK SC and Devanagari fonts and native punctuation.
 - Settings view with the resolved MCP server path, copyable client configuration, read-only environment summary and relocated maintenance actions, translated into all 14 languages.
-- Native CI now also exercises the GUI under a headless Wayland compositor (Weston) and under sway, the wlroots stack
-  Omarchy's Hyprland builds on, and installs the X libraries the X11 smoke test needs on Arch.
-- A Windows smoke job cross-builds the workspace for `x86_64-pc-windows-msvc` with cargo-xwin and runs the CLI,
-  the daemon's named pipe, the MCP status call and the GUI screenshot test under Wine.
+- Native CI now also exercises the GUI under a headless Wayland compositor and installs the X libraries the X11 smoke test needs on Arch.
 - Per-project fixed direct HTTP ports (`18000-18999`, `--web-port`) and database proxy ports (`19000-19999`, `--db-port`) for MariaDB, MySQL and PostgreSQL; existing projects are migrated on the next daemon start and the environment exposes the proxy as `DB_PORT`.
 
 ### Changed

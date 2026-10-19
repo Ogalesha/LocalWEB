@@ -10,14 +10,40 @@ The runtime contents of the package determine which PHP versions are included.
 Use the package for your native distro:
 
 ```bash
-sudo apt install ./localweb_0.1.0_amd64.deb         # Ubuntu 26.04
-sudo pacman -U ./localweb-0.1.0-1-x86_64.pkg.tar.zst # Arch / Omarchy
+sudo apt install ./localweb_0.1.2_amd64.deb         # Ubuntu 26.04
+sudo pacman -U ./localweb-0.1.2-1-x86_64.pkg.tar.zst # Arch / Omarchy
 ```
 
 You need a desktop-user session with systemd and system authorization.
 The private web stack is included; a separate system-wide LAMP installation
 is not required. Arch packages also target Omarchy's Arch base, but CI on
 Arch is not a substitute for testing an actual Omarchy desktop session.
+
+## macOS
+
+Download `LocalWeb-0.1.2.pkg` (universal: Apple silicon and Intel) and
+install it:
+
+```bash
+sudo installer -pkg ./LocalWeb-0.1.2.pkg -target /
+```
+
+The package installs the CLI and daemon tools under `/usr/local` and the
+desktop app as `/Applications/LocalWeb.app`. It is unsigned, so Gatekeeper
+warns until notarization exists. Runtimes come from Homebrew; install the
+formulae for the services you use (`php@8.5`, `nginx`, ...). The port is
+implemented but has not yet been exercised on Apple hardware: see
+[docs/macos-porting.md](macos-porting.md) for the checklist.
+
+## Windows
+
+Download `localweb-0.1.2-windows-x86_64.zip` and extract it. Run
+`localweb-gui.exe` for the desktop app or `localweb.exe` from a terminal.
+The build is cross-compiled and exercised under Wine in CI, but has not been
+run on real Windows yet: see [docs/windows-porting.md](windows-porting.md).
+Per-user state lives under `%LOCALAPPDATA%`, the daemon listens on a per-user
+named pipe, and the runtime root defaults to `%ProgramFiles%\LocalWeb\runtime`
+(override with `LOCALWEB_RUNTIME_ROOT`).
 
 ## Setup
 

@@ -2035,7 +2035,7 @@ checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 
 [[package]]
 name = "localweb-cli"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -2047,7 +2047,7 @@ dependencies = [
 
 [[package]]
 name = "localweb-core"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "chrono",
  "libc",
@@ -2063,7 +2063,7 @@ dependencies = [
 
 [[package]]
 name = "localweb-daemon"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2081,7 +2081,7 @@ dependencies = [
 
 [[package]]
 name = "localweb-gateway"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "bytes",
@@ -2101,7 +2101,7 @@ dependencies = [
 
 [[package]]
 name = "localweb-gui"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "eframe",
@@ -2112,7 +2112,7 @@ dependencies = [
 
 [[package]]
 name = "localweb-helper"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "localweb-core",
@@ -2125,7 +2125,7 @@ dependencies = [
 
 [[package]]
 name = "localweb-mcp"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "localweb-core",

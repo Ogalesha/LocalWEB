@@ -1,10 +1,10 @@
-# Maintainer: Ogalesha <maintainers@localweb.invalid>
+# Maintainer: LocalWeb <maintainers@localweb.invalid>
 # LocalWeb on Arch Linux (and Arch-based systems such as Omarchy).
 # Status: definition only — the first Arch-host build and acceptance run
 # are still pending. Confirm the makedepends names on a current Arch
 # host before that build; adjust them here if the archive moved on.
 pkgname=localweb
-pkgver=0.1.1
+pkgver=0.1.2
 pkgrel=1
 pkgdesc="Native local web development environment (self-contained stack)"
 arch=('x86_64')

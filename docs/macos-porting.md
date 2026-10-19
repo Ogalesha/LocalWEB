@@ -31,20 +31,20 @@ macOS must keep the same guarantees the Linux packages already provide:
 | Runtime paths | `Paths::discover` uses `$TMPDIR/localweb` when `XDG_RUNTIME_DIR` is absent. The registry and uninstaller treat `/private/var/folders/...` as valid. |
 | Runtimes | No darwin bundle: `RuntimeLayout` probes Homebrew (`/opt/homebrew`, then `/usr/local`) for `php@X`/`php`, `node@X`/`node`, `nginx`, `httpd`, `mariadb`, `mysql`, `postgresql@14…17`, `redis`, `mailpit` and Composer's PHAR. nginx/Apache/MariaDB/MySQL/PostgreSQL configuration helpers expose the Homebrew `etc`/`share`/`lib` directories instead of the Linux runtime root. |
 | hosts and DNS | Same managed block in `crates/localweb-core/src/hosts.rs`; the uninstaller flushes `dscacheutil` and `mDNSResponder` after removal. |
-| Packaging | `packaging/macos/build-pkg.sh` builds `dist/LocalWeb-<version>.pkg` on macOS with `pkgbuild`: CLI, `localwebd`, gateway, helper and MCP server under `/usr/local/libexec/localweb`, `localweb` symlink, and `localweb-uninstall`. Per-user setup stays explicit. |
-| Uninstall | `packaging/macos/uninstall.sh` boots out both LaunchAgents/socket jobs, kills prefix processes, removes the hosts block, the CA and its trust copy, app paths, receipts and the DNS cache. Per-user data can be deleted explicitly with `localweb data purge`; project sources are never touched. |
-| CI | `.github/workflows/macos-smoke.yml` runs `cargo check --workspace --all-targets` and the portable core/gui tests on `macos-latest`. |
+| Packaging | `packaging/macos/build-pkg.sh` builds a universal `dist/LocalWeb-<version>.pkg` on macOS with `pkgbuild`: CLI, `localwebd`, gateway, helper and MCP server under `/usr/local/libexec/localweb`, a `localweb` symlink, `localweb-uninstall`, and the GUI as `/Applications/LocalWeb.app` (Info.plist plus a generated `.icns` icon). The installer is unsigned. |
+| Uninstall | `packaging/macos/uninstall.sh` boots out both LaunchAgents/socket jobs, kills prefix processes, removes the hosts block, the CA, its trust copy, `/Applications/LocalWeb.app`, receipts and the DNS cache. Per-user data can be deleted explicitly with `localweb data purge`; project sources are never touched. |
+| CI | `.github/workflows/macos-smoke.yml` runs `cargo check --workspace --all-targets` and the portable core/gui tests on `macos-latest`. The `macos-package` job in `native-builds.yml` lipo-links universal binaries, runs `scripts/macos-smoke.sh` (CLI, daemon socket, MCP status) and builds the `.pkg`, checking the payload contains the GUI. |
 
 ## First run on a MacBook
 
 ```sh
 # 1. Toolchain and runtimes (Homebrew, Apple silicon paths shown).
-brew install php@8.5 nginx httpd mariadb mysql postgresql@17 redis mailpit node composer
+brew install php@8.5 nginx httpd mariadb mysql postgresql@17 redis mailpit node composer librsvg
 
 # 2. Build and install the package.
 cargo build --release --workspace
 sh packaging/macos/build-pkg.sh
-sudo installer -pkg dist/LocalWeb-0.1.0.pkg -target /
+sudo installer -pkg dist/LocalWeb-0.1.2.pkg -target /
 
 # 3. Per-user setup (each privileged step asks for an administrator password).
 localweb setup          # LaunchAgents, CA in ~/.local/share/localweb, path registry
@@ -62,9 +62,6 @@ The daemon and gateway logs live in `~/.local/state/localweb/logs/`
 - **No hardware run yet.** The gateway socket-activation path, launchd
   enable/disable semantics, `security` fingerprint checks and the `osascript`
   quoting must be exercised on the target Mac.
-- **GUI bundle.** Only the CLI, daemon, gateway, helper and MCP server are
-  packaged; an `.app` wrapper (and its icon/notarization) is still to do.
-  `cargo run -p localweb-gui` works for local testing where eframe builds.
 - **Homebrew is a prerequisite.** Runtimes are detected, never installed
   automatically; missing formulae surface as `runtime is not installed`
   errors naming the component.
@@ -87,6 +84,8 @@ The daemon and gateway logs live in `~/.local/state/localweb/logs/`
 - `cargo fmt --check` parses every macOS module, including cfg-gated code.
 - `sh -n packaging/macos/uninstall.sh` and `sh -n packaging/macos/build-pkg.sh`
   validate script syntax.
+- `scripts/macos-smoke.sh` (CLI, daemon socket, MCP status) runs on macOS;
+  the `macos-package` CI job exercises it on every push.
 
 ## Uninstall parity checklist (run on hardware)
 

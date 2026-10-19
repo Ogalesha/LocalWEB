@@ -90,11 +90,64 @@ jobs:
         run: cargo install --locked cargo-xwin
       - name: Cross-build and exercise the Windows binaries under Wine
         run: bash scripts/windows-wine-smoke.sh
+      - name: Package the Windows binaries
+        run: bash scripts/build-windows-zip.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: localweb-windows-amd64
+          path: dist/*.zip
+          if-no-files-found: error
+
+  macos-package:
+    name: macOS installer (universal)
+    runs-on: macos-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - name: Build universal release binaries
+        run: |
+          cargo build --release --workspace --target aarch64-apple-darwin
+          cargo build --release --workspace --target x86_64-apple-darwin
+          mkdir -p target/universal/release
+          for binary in localweb localwebd localweb-gateway localweb-helper localweb-gui localweb-mcp; do
+            lipo -create \
+              "target/aarch64-apple-darwin/release/$binary" \
+              "target/x86_64-apple-darwin/release/$binary" \
+              -output "target/universal/release/$binary"
+          done
+          file target/universal/release/localweb | grep -q "universal binary"
+      - name: Smoke the universal binaries
+        run: bash scripts/macos-smoke.sh target/universal/release
+      - name: Build the installer
+        env:
+          LOCALWEB_BIN_DIR: target/universal/release
+        run: |
+          if ! command -v rsvg-convert >/dev/null; then
+            brew install librsvg || true
+          fi
+          sh packaging/macos/build-pkg.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: localweb-macos-universal
+          path: dist/*.pkg
+          if-no-files-found: error
+
+  hygiene:
+    name: Repository hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Check tracked files for personal data and credentials
+        run: bash scripts/check-hygiene.sh
 
   release:
     name: Publish verified installers
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [linux, windows-wine]
+    needs: [hygiene, linux, windows-wine, macos-package]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -118,11 +171,11 @@ jobs:
           from pathlib import Path
           import hashlib
           root = Path('release-files')
-          packages = [p for p in root.rglob('*') if p.is_file() and p.name.endswith(('.deb', '.pkg.tar.zst'))]
-          assert len(packages) == 2, packages
+          packages = [p for p in root.rglob('*') if p.is_file() and p.name.endswith(('.deb', '.pkg.tar.zst', '.pkg', '.zip'))]
+          assert len(packages) == 4, packages
           Path('SHA256SUMS').write_text(''.join(f'{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}\n' for p in sorted(packages)))
           PY
           if ! gh release view "$TAG" >/dev/null 2>&1; then
             gh release create "$TAG" --verify-tag --title "LocalWeb $version" --notes-file CHANGELOG.md
           fi
-          gh release upload "$TAG" release-files/*/*.deb release-files/*/*.pkg.tar.zst SHA256SUMS
+          gh release upload "$TAG" release-files/*/*.deb release-files/*/*.pkg.tar.zst release-files/*/*.pkg release-files/*/*.zip SHA256SUMS

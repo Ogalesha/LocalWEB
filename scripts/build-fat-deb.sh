@@ -81,7 +81,7 @@ cat > "$stage/DEBIAN/control" <<EOF
 Package: localweb
 Version: $version
 Architecture: amd64
-Maintainer: Ogalesha <maintainers@localweb.invalid>
+Maintainer: LocalWeb <maintainers@localweb.invalid>
 Section: devel
 Priority: optional
 Installed-Size: $installed_size
