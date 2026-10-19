@@ -15,7 +15,7 @@ RUN if command -v apt-get >/dev/null; then \
         curl ca-certificates python xz sudo systemd systemd-sysvcompat dbus polkit libcap \
         nginx apache mariadb mariadb-clients postgresql redis openssl libzip patchelf \
         oniguruma icu libxml2 sqlite libpng libjpeg-turbo freetype2 libaio numactl \
-        libx11 libxkbcommon wayland mesa xdg-utils xorg-server-xvfb zstd; \
+        libx11 libxcursor libxi libxrandr libxinerama libxkbcommon libxkbcommon-x11 wayland mesa xdg-utils xorg-server-xvfb zstd; \
     fi
 RUN if getent passwd 1000 >/dev/null; then userdel "$(getent passwd 1000 | cut -d: -f1)"; fi && \
     useradd --create-home --uid 1000 builder && \
