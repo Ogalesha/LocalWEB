@@ -7,12 +7,24 @@ set -euo pipefail
 target=x86_64-pc-windows-msvc
 exe_dir="target/$target/release"
 
-for tool in cargo-xwin wine64 xvfb-run llvm-lib python3; do
+for tool in cargo-xwin xvfb-run llvm-lib python3; do
     command -v "$tool" >/dev/null || {
         echo "missing required tool: $tool" >&2
         exit 2
     }
 done
+
+wine_bin="${WINE_BIN:-}"
+if [ -z "$wine_bin" ]; then
+    wine_bin=$(command -v wine64 || command -v wine || true)
+fi
+if [ -z "$wine_bin" ] && [ -x /usr/lib/wine/wine64 ]; then
+    wine_bin=/usr/lib/wine/wine64
+fi
+if [ -z "$wine_bin" ]; then
+    echo "missing required tool: wine64 (install wine64 or set WINE_BIN)" >&2
+    exit 2
+fi
 
 cargo xwin build --release --target "$target" --workspace
 cargo xwin build --release --target "$target" -p localweb-gui --features localweb-gui/screenshot
@@ -28,28 +40,29 @@ daemon_pid=""
 cleanup() {
     [ -n "$daemon_pid" ] && kill "$daemon_pid" 2>/dev/null || true
     pkill -x wineserver 2>/dev/null || true
+    pkill -x wineserver64 2>/dev/null || true
     for _ in $(seq 1 60); do
-        pgrep -x wineserver >/dev/null || break
+        pgrep -x wineserver >/dev/null 2>&1 || pgrep -x wineserver64 >/dev/null 2>&1 || break
         sleep 0.5
     done
     rm -rf "$wineprefix" "$runtime_dir"
 }
 trap cleanup EXIT
 
-version=$(timeout 180 wine64 "$exe_dir/localweb.exe" --version)
+version=$(timeout 180 "$wine_bin" "$exe_dir/localweb.exe" --version)
 printf '%s' "$version" | grep -Eq '^localweb [0-9]+\.[0-9]+\.[0-9]+' || {
     echo "unexpected --version output: $version" >&2
     exit 1
 }
 
-timeout 180 wine64 "$exe_dir/localweb.exe" --help | grep -q "Commands:" || {
+timeout 180 "$wine_bin" "$exe_dir/localweb.exe" --help | grep -q "Commands:" || {
     echo "localweb.exe --help did not list commands" >&2
     exit 1
 }
 
 daemon_log=/tmp/localweb-wine-daemon.log
 rm -f "$daemon_log"
-wine64 "$exe_dir/localwebd.exe" >"$daemon_log" 2>&1 &
+"$wine_bin" "$exe_dir/localwebd.exe" >"$daemon_log" 2>&1 &
 daemon_pid=$!
 for _ in $(seq 1 240); do
     grep -q "daemon listening" "$daemon_log" && break
@@ -68,7 +81,7 @@ grep -q "daemon listening" "$daemon_log" || {
     sleep 1
     printf '%s\n' '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"localweb_status","arguments":{}}}'
     sleep 3
-} | timeout 120 wine64 "$exe_dir/localweb-mcp.exe" 2>/dev/null >/tmp/localweb-wine-mcp.json
+} | timeout 120 "$wine_bin" "$exe_dir/localweb-mcp.exe" 2>/dev/null >/tmp/localweb-wine-mcp.json
 
 python3 - <<'PY'
 import json
@@ -83,7 +96,7 @@ PY
 screenshot=/tmp/localweb-gui-windows-smoke.png
 rm -f "$screenshot"
 timeout 180 xvfb-run -a env LIBGL_ALWAYS_SOFTWARE=1 \
-    EFRAME_SCREENSHOT_TO="Z:$screenshot" wine64 "$exe_dir/localweb-gui.exe"
+    EFRAME_SCREENSHOT_TO="Z:$screenshot" "$wine_bin" "$exe_dir/localweb-gui.exe"
 test -s "$screenshot"
 
 echo "Windows Wine smoke passed: CLI, daemon pipe, MCP status, GUI screenshot"

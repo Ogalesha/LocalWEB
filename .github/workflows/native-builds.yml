@@ -70,25 +70,24 @@ jobs:
   windows-wine:
     name: Windows binaries (Wine smoke)
     runs-on: ubuntu-latest
+    container: ubuntu:26.04
     timeout-minutes: 120
     steps:
+      - name: Install Wine, LLVM tools and xvfb
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            wine64 clang lld llvm nasm xvfb python3 curl ca-certificates \
+            build-essential pkg-config libssl-dev git
+          llvm_bin=$(dirname "$(find /usr/lib -name llvm-lib -print -quit)")
+          ln -sf "$llvm_bin/llvm-lib" /usr/local/bin/llvm-lib
+          ln -sf "$llvm_bin/llvm-ar" /usr/local/bin/llvm-ar
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
-      - name: Install Wine, LLVM tools and xvfb
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends wine64 clang lld llvm nasm xvfb
-          llvm_bin=$(dirname "$(find /usr/lib -name llvm-lib -print -quit)")
-          sudo ln -sf "$llvm_bin/llvm-lib" /usr/local/bin/llvm-lib
-          sudo ln -sf "$llvm_bin/llvm-ar" /usr/local/bin/llvm-ar
       - name: Install cargo-xwin
         run: cargo install --locked cargo-xwin
-      - uses: actions/cache@v4
-        with:
-          path: ~/.cache/xwin
-          key: xwin-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
       - name: Cross-build and exercise the Windows binaries under Wine
         run: bash scripts/windows-wine-smoke.sh
 
