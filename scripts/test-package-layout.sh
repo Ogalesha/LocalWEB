@@ -38,7 +38,8 @@ install -D -m 0644 "$workspace/packaging/runtime-manifest.example.json" "$fixtur
 LOCALWEB_RUNTIME_ROOT="$fixture" LOCALWEB_DIST_DIR="$output" SOURCE_DATE_EPOCH=0 \
     "$workspace/scripts/build-fat-deb.sh" >/dev/null
 
-package="$output/localweb_0.1.0_amd64.deb"
+version=$(sed -n 's/^version = "\(.*\)"/\1/p' "$workspace/Cargo.toml" | head -1)
+package="$output/localweb_${version}_amd64.deb"
 dpkg-deb --info "$package" >/dev/null
 for installed in \
     ./usr/lib/localweb/localwebd \

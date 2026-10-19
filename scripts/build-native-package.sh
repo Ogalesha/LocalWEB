@@ -1,5 +1,11 @@
 #!/bin/bash
 set -euo pipefail
+version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+[ -n "$version" ] || {
+    echo "Could not determine the LocalWeb version from Cargo.toml" >&2
+    exit 2
+}
+export LOCALWEB_VERSION="$version"
 if command -v dpkg >/dev/null; then
     rm -f dist/*.deb
     exec sh scripts/build-fat-deb.sh
@@ -26,7 +32,7 @@ size=$(du -sk "$stage/usr" | cut -f1)
 cat > "$stage/.PKGINFO" <<EOF
 pkgname = localweb
 pkgbase = localweb
-pkgver = 0.1.0-1
+pkgver = ${version}-1
 pkgdesc = Native local web development environment
 url = https://github.com/Ogalesha/LocalWEB
 builddate = ${SOURCE_DATE_EPOCH:-0}
@@ -48,4 +54,4 @@ depend = mesa
 depend = xdg-utils
 EOF
 cp packaging/arch/localweb.install "$stage/.INSTALL"
-tar -C "$stage" --zstd -cf dist/localweb-0.1.0-1-x86_64.pkg.tar.zst .PKGINFO .INSTALL usr
+tar -C "$stage" --zstd -cf "dist/localweb-${version}-1-x86_64.pkg.tar.zst" .PKGINFO .INSTALL usr

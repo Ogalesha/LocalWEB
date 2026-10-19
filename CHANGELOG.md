@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-19
+
 ### Added
 
 - PHP 8.0–8.5 selection, actual bundled-availability labels and editable app presets; 8.6 is excluded until stable.
@@ -19,6 +21,7 @@ All notable changes to this project are documented here. The format follows
 - Packaging for macOS: `packaging/macos/build-pkg.sh` builds `LocalWeb-<version>.pkg` with `pkgbuild`, and `packaging/macos/uninstall.sh` removes launch agents, the CA trust copy, `/usr/local/bin` entries and the `/private/var/folders` runtime while preserving per-user data and project sources.
 - Desktop UI in 14 languages (English, Italiano, Shqip, Chinese, French, Greek, Hindi, Polish, Portuguese, Russian, Spanish, Swedish, Turkish, Ukrainian) with bundled Noto CJK SC and Devanagari fonts and native punctuation.
 - Settings view with the resolved MCP server path, copyable client configuration, read-only environment summary and relocated maintenance actions, translated into all 14 languages.
+- Native CI now also exercises the GUI under a headless Wayland compositor and installs the X libraries the X11 smoke test needs on Arch.
 - Per-project fixed direct HTTP ports (`18000-18999`, `--web-port`) and database proxy ports (`19000-19999`, `--db-port`) for MariaDB, MySQL and PostgreSQL; existing projects are migrated on the next daemon start and the environment exposes the proxy as `DB_PORT`.
 
 ### Changed
@@ -92,5 +95,6 @@ All notable changes to this project are documented here. The format follows
 - Real maintainer identity in the Debian control file.
 - Mailpit web UI opens straight from the project ledger.
 
-[Unreleased]: https://github.com/Ogalesha/LocalWEB/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/Ogalesha/LocalWEB/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/Ogalesha/LocalWEB/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/Ogalesha/LocalWEB/releases/tag/v0.1.0

@@ -4,7 +4,7 @@
 # are still pending. Confirm the makedepends names on a current Arch
 # host before that build; adjust them here if the archive moved on.
 pkgname=localweb
-pkgver=0.1.0
+pkgver=0.1.1
 pkgrel=1
 pkgdesc="Native local web development environment (self-contained stack)"
 arch=('x86_64')

@@ -3,7 +3,11 @@ set -eu
 
 workspace=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 runtime_root=${LOCALWEB_RUNTIME_ROOT:-$workspace/packaging/runtime-root}
-version=${LOCALWEB_VERSION:-0.1.0}
+version=${LOCALWEB_VERSION:-$(sed -n 's/^version = "\(.*\)"/\1/p' "$workspace/Cargo.toml" | head -1)}
+[ -n "$version" ] || {
+    echo "Could not determine the LocalWeb version from Cargo.toml" >&2
+    exit 2
+}
 architecture=$(dpkg --print-architecture)
 [ "$architecture" = amd64 ] || {
     echo "The initial LocalWeb package supports amd64 only" >&2

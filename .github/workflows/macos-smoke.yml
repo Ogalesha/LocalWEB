@@ -7,6 +7,7 @@ on:
       - "crates/**"
       - "Cargo.toml"
       - "Cargo.lock"
+      - ".github/ci/**"
       - ".github/workflows/macos-smoke.yml"
   workflow_dispatch:
 

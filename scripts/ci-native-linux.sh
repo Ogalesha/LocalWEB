@@ -71,6 +71,36 @@ gui_smoke() {
     test -s "$screenshot"
 }
 
+wayland_smoke() {
+    screenshot=/tmp/localweb-gui-wayland-smoke.png
+    rm -f "$screenshot"
+    cargo build -p localweb-gui --features screenshot
+    runtime_dir=$(mktemp -d /tmp/localweb-wayland.XXXXXX)
+    chmod 700 "$runtime_dir"
+    XDG_RUNTIME_DIR="$runtime_dir" weston --backend=headless-backend.so \
+        --socket=localweb-wayland --width=800 --height=600 >/tmp/weston-smoke.log 2>&1 &
+    weston_pid=$!
+    for _ in $(seq 1 60); do
+        [ -S "$runtime_dir/localweb-wayland" ] && break
+        sleep 0.5
+    done
+    if [ ! -S "$runtime_dir/localweb-wayland" ]; then
+        cat /tmp/weston-smoke.log >&2 || true
+        kill "$weston_pid" 2>/dev/null || true
+        rm -rf "$runtime_dir"
+        return 1
+    fi
+    status=0
+    XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY=localweb-wayland \
+        LIBGL_ALWAYS_SOFTWARE=1 EFRAME_SCREENSHOT_TO="$screenshot" \
+        timeout 90 target/debug/localweb-gui || status=$?
+    kill "$weston_pid" 2>/dev/null || true
+    wait "$weston_pid" 2>/dev/null || true
+    rm -rf "$runtime_dir"
+    [ "$status" -eq 0 ] || return "$status"
+    test -s "$screenshot"
+}
+
 run_step ci-inputs source scripts/ci-inputs.sh
 run_step build-php-runtimes sh scripts/build-php-runtimes.sh
 run_step stage-runtime sh scripts/stage-runtime.sh
@@ -80,6 +110,7 @@ run_step cargo-fmt cargo fmt --all --check
 run_step cargo-clippy cargo clippy --workspace --all-targets -- -D warnings
 run_step cargo-test cargo test --workspace
 run_step gui-smoke gui_smoke
+run_step wayland-smoke wayland_smoke
 run_step package sh scripts/build-native-package.sh
 run_step install install_package
 run_step acceptance python3 scripts/acceptance.py /usr/lib/localweb

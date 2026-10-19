@@ -9,13 +9,13 @@ RUN if command -v apt-get >/dev/null; then \
         redis-server libssl-dev libcurl4-openssl-dev libzip-dev libonig-dev \
         libicu-dev libxml2-dev libsqlite3-dev libpng-dev libjpeg-dev libfreetype-dev \
         libaio1t64 libnuma1 patchelf libx11-dev libxkbcommon-dev libwayland-dev libgl-dev \
-        libegl-dev xdg-utils xvfb zstd; \
+        libegl-dev xdg-utils xvfb weston zstd; \
     else \
       pacman -Syu --noconfirm --needed base-devel autoconf bison re2c pkgconf git \
         curl ca-certificates python xz sudo systemd systemd-sysvcompat dbus polkit libcap \
         nginx apache mariadb mariadb-clients postgresql redis openssl libzip patchelf \
         oniguruma icu libxml2 sqlite libpng libjpeg-turbo freetype2 libaio numactl \
-        libx11 libxcursor libxi libxrandr libxinerama libxkbcommon libxkbcommon-x11 wayland mesa xdg-utils xorg-server-xvfb zstd; \
+        libx11 libxcursor libxi libxrandr libxinerama libxkbcommon libxkbcommon-x11 wayland mesa xdg-utils xorg-server-xvfb weston zstd; \
     fi
 RUN if getent passwd 1000 >/dev/null; then userdel "$(getent passwd 1000 | cut -d: -f1)"; fi && \
     useradd --create-home --uid 1000 builder && \
