@@ -79,13 +79,16 @@ job passes. They can then be attached to a GitHub Release.
 
 ## Install and get started
 
-Download the package for your OS from [GitHub Releases](https://github.com/Ogalesha/LocalWEB/releases)
-when available, or from a successful native-build workflow. Check its
-SHA-256 against the accompanying `SHA256SUMS` file.
+Download the package for your OS from [GitHub Releases](https://github.com/Ogalesha/LocalWEB/releases).
+Version tags are stable releases; the **LocalWeb rolling builds** pre-release is
+rebuilt from every successful push to `main`. Release assets download without an
+account, while the artifacts attached to individual **Actions** runs require a
+GitHub sign-in. Check the package's SHA-256 against the accompanying
+`SHA256SUMS` file.
 
 ```bash
-sudo apt install ./localweb_0.1.0_amd64.deb       # Ubuntu
-sudo pacman -U ./localweb-0.1.0-1-x86_64.pkg.tar.zst  # Arch / Omarchy
+sudo apt install ./localweb_0.1.2_amd64.deb          # Ubuntu
+sudo pacman -U ./localweb-0.1.2-1-x86_64.pkg.tar.zst # Arch / Omarchy
 ```
 
 Open the desktop app and choose **Set up LocalWeb**, then **Install CA**.

@@ -1,8 +1,10 @@
 # Installation and first steps
 
 Download LocalWeb only from its [GitHub repository](https://github.com/Ogalesha/LocalWEB):
-release assets, or artifacts from a successful **Native packages and acceptance**
-workflow. Check the package's SHA-256 against its accompanying `SHA256SUMS`.
+versioned releases (stable) or the **LocalWeb rolling builds** pre-release, which
+is rebuilt from every successful push to `main`. Both publish a `SHA256SUMS`
+file. The artifacts attached to individual **Native packages and acceptance**
+runs are the raw build outputs, but GitHub requires a sign-in to download them.
 The runtime contents of the package determine which PHP versions are included.
 
 ## Linux

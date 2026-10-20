@@ -179,3 +179,37 @@ jobs:
             gh release create "$TAG" --verify-tag --title "LocalWeb $version" --notes-file CHANGELOG.md
           fi
           gh release upload "$TAG" release-files/*/*.deb release-files/*/*.pkg.tar.zst release-files/*/*.pkg release-files/*/*.zip SHA256SUMS
+
+  rolling:
+    name: Publish rolling build
+    if: github.ref == 'refs/heads/main'
+    needs: [hygiene, linux, windows-wine, macos-package]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v5
+        with:
+          pattern: localweb-*
+          path: release-files
+      - name: Publish rolling packages for main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib
+          root = Path('release-files')
+          packages = [p for p in root.rglob('*') if p.is_file() and p.name.endswith(('.deb', '.pkg.tar.zst', '.pkg', '.zip'))]
+          assert len(packages) == 4, packages
+          Path('SHA256SUMS').write_text(''.join(f'{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}\n' for p in sorted(packages)))
+          PY
+          notes="Automatic pre-release rebuilt from the latest successful push to main (version $version, commit $GITHUB_SHA). Packages are unsigned; verify SHA256SUMS."
+          if gh release view rolling >/dev/null 2>&1; then
+            gh release edit rolling --notes "$notes"
+          else
+            gh release create rolling --prerelease --title "LocalWeb rolling builds" --notes "$notes"
+          fi
+          gh release upload rolling release-files/*/*.deb release-files/*/*.pkg.tar.zst release-files/*/*.pkg release-files/*/*.zip SHA256SUMS --clobber
