@@ -57,10 +57,13 @@ downloads are build inputs, not alternative LocalWeb distribution channels.
 | Ubuntu 26.04 amd64 | `.deb` | systemd, system certificate store and system authorization |
 | Arch Linux amd64 | `.pkg.tar.zst` | systemd, Arch certificate store and system authorization |
 | Omarchy amd64 | Arch package | Uses the same Arch base and integration |
+| macOS 12+ arm64/x86_64 | `.pkg` (universal) | launchd agents and system keychain trust for the development CA |
+| Windows 10/11 x86_64 | `.zip` (portable) | Named pipes, scheduled task and user certificate store |
 
 The package carries LocalWeb's private web stack. It does not replace the
 machine's PHP, web servers, databases or caches. A normal desktop session
-with systemd is required.
+with the platform service manager (systemd, launchd or Task Scheduler) is
+required.
 
 ### Validation status
 
@@ -69,21 +72,25 @@ The expanded stack and platform ports are checked by
 [Native packages and acceptance](https://github.com/Ogalesha/LocalWEB/actions/workflows/native-builds.yml).
 For the source revision you are installing, check that its platform job
 passed. Arch CI covers the base used by Omarchy; an Omarchy desktop session
-still needs its own final acceptance check.
+still needs its own final acceptance check. macOS jobs build and smoke the
+universal binaries on a macOS runner, and the Windows binaries are
+cross-built and exercised under Wine; a final acceptance run on real macOS
+and Windows hosts is still pending.
 
 Each job builds and installs the package, tests PHP 8.0–8.5 with both web
 servers and all four database choices, checks Redis,
 Mailpit and the PHP CLI, then exercises stop, removal and source-folder
 preservation. Packages are uploaded as workflow artifacts only after the
-job passes. They can then be attached to a GitHub Release.
+job passes. Tagged versions and the rolling pre-release publish the same
+files as public release assets.
 
 ## Install and get started
 
 Download the package for your OS from [GitHub Releases](https://github.com/Ogalesha/LocalWEB/releases).
-Version tags are stable releases; the **LocalWeb rolling builds** pre-release is
-rebuilt from every successful push to `main`. Release assets download without an
-account, while the artifacts attached to individual **Actions** runs require a
-GitHub sign-in. Check the package's SHA-256 against the accompanying
+Version tags are stable releases; the [LocalWeb rolling builds](https://github.com/Ogalesha/LocalWEB/releases/tag/rolling)
+pre-release is rebuilt from every successful push to `main`. Release assets
+download without an account, while the artifacts attached to individual
+**Actions** runs require a GitHub sign-in. Check the package's SHA-256 against the accompanying
 `SHA256SUMS` file.
 
 ```bash
