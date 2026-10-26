@@ -23,7 +23,7 @@ use std::{
     time::{Duration, Instant},
 };
 use theme::{
-    ACCENT, ACCENT_SOFT, ACCENT_SOFT_PRESSED, ACCENT_TEXT, BANNER_TITLE_SIZE, BODY_SIZE, BORDER,
+    ACCENT_SOFT, ACCENT_SOFT_PRESSED, ACCENT_TEXT, BANNER_TITLE_SIZE, BODY_SIZE, BORDER,
     BORDER_STRONG, CANVAS, DANGER, DANGER_SOFT, FOCUS, INK, INK_MUTED, LABEL_SIZE, MONO_SIZE, NAV,
     NAV_MUTED, RADIUS_CARD, RADIUS_CONTROL, RAIL_WIDTH, SECTION_TITLE_SIZE, SMALL_SIZE, STATUS_OFF,
     SUCCESS, SUCCESS_SOFT, SURFACE, SURFACE_HOVER, SURFACE_MUTED, WARNING, configure_style,
@@ -577,6 +577,7 @@ impl LocalWebApp {
                         ui.add_space(14.0);
                         let mut next_lang = self.lang;
                         ui.scope(|ui| {
+                            ui.visuals_mut().override_text_color = Some(NAV_MUTED);
                             let widgets = &mut ui.style_mut().visuals.widgets;
                             widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
                             widgets.inactive.bg_stroke = Stroke::NONE;
@@ -584,12 +585,12 @@ impl LocalWebApp {
                             widgets.hovered.weak_bg_fill = theme::NAV_HOVER;
                             widgets.hovered.bg_stroke = Stroke::NONE;
                             widgets.hovered.fg_stroke.color = Color32::WHITE;
-                            widgets.active.weak_bg_fill = theme::ACCENT_HOVER;
+                            widgets.active.weak_bg_fill = theme::NAV_HOVER;
                             widgets.active.bg_stroke = Stroke::NONE;
-                            widgets.active.fg_stroke.color = INK;
-                            widgets.open.weak_bg_fill = ACCENT;
+                            widgets.active.fg_stroke.color = Color32::WHITE;
+                            widgets.open.weak_bg_fill = theme::NAV_HOVER;
                             widgets.open.bg_stroke = Stroke::NONE;
-                            widgets.open.fg_stroke.color = INK;
+                            widgets.open.fg_stroke.color = Color32::WHITE;
                             ui.spacing_mut().interact_size.y = 36.0;
                             let mut popup_style = (*ui.ctx().style_of(egui::Theme::Light)).clone();
                             popup_style.visuals.window_fill = theme::SURFACE;
@@ -848,7 +849,7 @@ impl LocalWebApp {
         } else {
             match state {
                 EnvironmentState::Ready => (Icon::Check, SUCCESS, Color32::WHITE),
-                EnvironmentState::Unavailable => (Icon::Warning, DANGER, Color32::WHITE),
+                EnvironmentState::Unavailable => (Icon::Warning, WARNING, Color32::WHITE),
                 EnvironmentState::Checking | EnvironmentState::Stopped => {
                     (Icon::Minus, SURFACE_MUTED, INK_MUTED)
                 }
@@ -1415,11 +1416,14 @@ impl LocalWebApp {
                             )
                             .on_hover_text(domain);
                             let path = item.project.path.display().to_string();
-                            ui.label(
-                                RichText::new(truncate_middle(&path, 20))
-                                    .size(MONO_SIZE)
-                                    .color(INK_MUTED)
-                                    .monospace(),
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(truncate_middle(&path, 18))
+                                        .size(MONO_SIZE)
+                                        .color(INK_MUTED)
+                                        .monospace(),
+                                )
+                                .truncate(),
                             )
                             .on_hover_text(path);
                         },
