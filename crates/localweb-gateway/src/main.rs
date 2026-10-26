@@ -13,7 +13,12 @@ use hyper_util::{
 use localweb_core::{GatewayRoute, Paths, certificate::CaPaths, validate_domain};
 use rustls::{ServerConfig, server::ResolvesServerCertUsingSni, sign::CertifiedKey};
 use std::{
-    collections::HashMap, convert::Infallible, fs, io::BufReader, net::SocketAddr, sync::Arc,
+    collections::HashMap,
+    convert::Infallible,
+    fs,
+    io::BufReader,
+    net::{Ipv4Addr, SocketAddr},
+    sync::Arc,
 };
 use tokio::{
     net::TcpListener,
@@ -34,8 +39,24 @@ const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Parser)]
 struct Args {
+    #[arg(
+        long,
+        default_value = "127.0.0.1",
+        value_parser = parse_loopback_address
+    )]
+    bind_address: Ipv4Addr,
     #[arg(long, default_value_t = 443)]
     https_port: u16,
+}
+
+fn parse_loopback_address(value: &str) -> std::result::Result<Ipv4Addr, String> {
+    let address = value
+        .parse::<Ipv4Addr>()
+        .map_err(|error| format!("invalid IPv4 address: {error}"))?;
+    if !address.is_loopback() {
+        return Err("gateway address must be inside IPv4 loopback (127.0.0.0/8)".into());
+    }
+    Ok(address)
 }
 
 #[derive(Clone)]
@@ -55,7 +76,7 @@ async fn main() -> Result<()> {
         routes: Arc::new(routes),
         client: Client::builder(TokioExecutor::new()).build_http(),
     };
-    let https = https_listener(args.https_port).await?;
+    let https = https_listener(args.bind_address, args.https_port).await?;
     let tls = TlsAcceptor::from(Arc::new(config));
     loop {
         let (stream, peer) = https.accept().await?;
@@ -73,12 +94,12 @@ async fn main() -> Result<()> {
     }
 }
 
-async fn https_listener(port: u16) -> Result<TcpListener> {
+async fn https_listener(address: Ipv4Addr, port: u16) -> Result<TcpListener> {
     #[cfg(target_os = "macos")]
     if let Some(listener) = launchd_listener()? {
         return Ok(listener);
     }
-    TcpListener::bind(("127.0.0.1", port))
+    TcpListener::bind((address, port))
         .await
         .context("bind HTTPS loopback port")
 }
@@ -278,5 +299,15 @@ mod tests {
             page(StatusCode::SERVICE_UNAVAILABLE, "Stopped", "Start it").status(),
             StatusCode::SERVICE_UNAVAILABLE
         );
+    }
+
+    #[test]
+    fn gateway_accepts_only_ipv4_loopback_addresses() {
+        assert_eq!(
+            parse_loopback_address("127.0.0.2").unwrap(),
+            Ipv4Addr::new(127, 0, 0, 2)
+        );
+        parse_loopback_address("0.0.0.0").unwrap_err();
+        parse_loopback_address("192.0.2.1").unwrap_err();
     }
 }

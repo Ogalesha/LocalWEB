@@ -1,10 +1,9 @@
 use anyhow::{Context, Result, bail};
 use localweb_core::{
     atomic_write,
-    hosts::{remove_managed_block, transform_hosts},
+    hosts::{HostsSync, remove_managed_block, transform_hosts_at},
     platform::TrustStore,
 };
-#[cfg(unix)]
 use serde::Deserialize;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
@@ -34,6 +33,13 @@ struct UserPaths {
     data: PathBuf,
     state: PathBuf,
     runtime: PathBuf,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum HostsInput {
+    Current(HostsSync),
+    Legacy(Vec<String>),
 }
 
 fn main() -> Result<()> {
@@ -294,15 +300,22 @@ fn read_input(input: Option<&Path>) -> Result<Vec<u8>> {
 }
 
 fn sync_hosts(input: Option<&Path>) -> Result<()> {
-    let domains: Vec<String> =
-        serde_json::from_slice(&read_input(input)?).context("expected JSON hostname array")?;
-    if domains.len() > 1000 {
+    let request: HostsInput = serde_json::from_slice(&read_input(input)?)
+        .context("expected a LocalWeb hosts synchronization request")?;
+    let request = match request {
+        HostsInput::Current(request) => request,
+        HostsInput::Legacy(domains) => HostsSync {
+            address: std::net::Ipv4Addr::LOCALHOST,
+            domains,
+        },
+    };
+    if request.domains.len() > 1000 {
         bail!("too many hostnames");
     }
     let path = hosts_path();
     ensure_regular_root_owned(&path)?;
     let original = fs::read_to_string(&path)?;
-    let updated = transform_hosts(&original, &domains)?;
+    let updated = transform_hosts_at(&original, request.address, &request.domains)?;
     atomic_write(&path, updated.as_bytes(), 0o644)?;
     Ok(())
 }
@@ -403,6 +416,31 @@ fn ensure_regular_root_owned(path: &Path) -> Result<()> {
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hosts_payload_preserves_the_selected_loopback_address() {
+        let input: HostsInput =
+            serde_json::from_str(r#"{"address":"127.0.0.2","domains":["indeks.dev"]}"#).unwrap();
+        let HostsInput::Current(request) = input else {
+            panic!("current hosts payload parsed as legacy");
+        };
+        assert_eq!(request.address, std::net::Ipv4Addr::new(127, 0, 0, 2));
+        assert_eq!(request.domains, ["indeks.dev"]);
+    }
+
+    #[test]
+    fn legacy_hosts_payload_remains_parseable_for_safe_upgrades() {
+        let input: HostsInput = serde_json::from_str(r#"["legacy.dev"]"#).unwrap();
+        let HostsInput::Legacy(domains) = input else {
+            panic!("legacy hosts payload parsed as current");
+        };
+        assert_eq!(domains, ["legacy.dev"]);
+    }
 }
 
 #[cfg(windows)]

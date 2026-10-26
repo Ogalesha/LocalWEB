@@ -4,14 +4,14 @@
 # are still pending. Confirm the makedepends names on a current Arch
 # host before that build; adjust them here if the archive moved on.
 pkgname=localweb
-pkgver=0.1.2
+pkgver=0.1.3
 pkgrel=1
 pkgdesc="Native local web development environment (self-contained stack)"
 arch=('x86_64')
 url="https://github.com/Ogalesha/LocalWEB"
 license=('MIT')
 depends=('glibc' 'gcc-libs' 'systemd' 'polkit' 'ca-certificates'
-         'libcap' 'libx11' 'libxcb' 'libxkbcommon' 'wayland' 'libgl'
+         'libcap' 'nss' 'libx11' 'libxcb' 'libxkbcommon' 'wayland' 'libgl'
          'xdg-utils')
 makedepends=('cargo' 'nginx' 'php' 'php-fpm' 'mariadb' 'mariadb-clients'
               'redis' 'apache' 'nodejs' 'npm' 'php-gd' 'php-intl' 'postgresql' 'python')

@@ -22,6 +22,29 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 /// How often the cron loop wakes up to run due scheduled tasks.
 const CRON_TICK_INTERVAL: Duration = Duration::from_secs(30);
+/// Standard HTTPS port used on a LocalWeb-owned loopback address.
+const GATEWAY_HTTPS_PORT: u16 = 443;
+/// First dedicated IPv4 loopback host considered on Linux.
+const GATEWAY_LOOPBACK_START: u8 = 2;
+/// Last dedicated IPv4 loopback host considered on Linux.
+const GATEWAY_LOOPBACK_END: u8 = 254;
+/// First unprivileged HTTPS fallback port. The selected port is loopback-only.
+const GATEWAY_FALLBACK_START: u16 = 8_443;
+/// Last unprivileged HTTPS fallback port considered by `LocalWeb`.
+const GATEWAY_FALLBACK_END: u16 = 8_499;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+struct GatewayState {
+    #[serde(default)]
+    schema_version: u16,
+    #[serde(default = "default_gateway_bind_address")]
+    bind_address: Ipv4Addr,
+    https_port: u16,
+}
+
+const fn default_gateway_bind_address() -> Ipv4Addr {
+    Ipv4Addr::LOCALHOST
+}
 
 mod backend;
 mod proxy;
@@ -55,6 +78,7 @@ async fn main() -> Result<()> {
     let config = GlobalConfig::load_or_create(&paths)?;
     CaPaths::new(&paths).ensure_ca()?;
     ensure_project_ports(&paths)?;
+    initialize_gateway_endpoint(&paths)?;
     let mut listener = localweb_core::transport::DaemonListener::bind(&paths)
         .await
         .context("bind daemon endpoint")?;
@@ -172,9 +196,13 @@ async fn execute(request: Request, state: &Arc<State>) -> localweb_core::Result<
     match request {
         Request::Status => {
             let projects = load_projects(&state.paths)?;
+            let gateway_running = is_active("localweb-gateway");
+            let gateway_endpoint = load_gateway_endpoint(&state.paths);
             Ok(Response::Status(Status {
                 daemon_running: true,
-                gateway_running: is_active("localweb-gateway"),
+                gateway_running,
+                gateway_bind_address: gateway_endpoint.map(|endpoint| endpoint.bind_address),
+                gateway_https_port: gateway_endpoint.map(|endpoint| endpoint.https_port),
                 project_count: projects.len(),
                 active_projects: state.running.lock().await.len(),
             }))
@@ -201,6 +229,7 @@ async fn execute(request: Request, state: &Arc<State>) -> localweb_core::Result<
         }
         Request::ProjectList => {
             let running = state.running.lock().await;
+            let gateway_endpoint = active_gateway_endpoint(&state.paths);
             Ok(Response::Projects(
                 load_projects(&state.paths)?
                     .into_iter()
@@ -208,6 +237,8 @@ async fn execute(request: Request, state: &Arc<State>) -> localweb_core::Result<
                         let active = running.contains(&project.name);
                         let mail_web_url = mail_web_url(&state.paths, &project);
                         ProjectStatus {
+                            public_url: gateway_endpoint
+                                .map(|endpoint| gateway_url(&project.hostname, endpoint)),
                             project,
                             running: active,
                             mail_web_url,
@@ -221,6 +252,8 @@ async fn execute(request: Request, state: &Arc<State>) -> localweb_core::Result<
             let running = state.running.lock().await.contains(&name);
             let mail_web_url = mail_web_url(&state.paths, &project);
             Ok(Response::Project(ProjectStatus {
+                public_url: active_gateway_endpoint(&state.paths)
+                    .map(|endpoint| gateway_url(&project.hostname, endpoint)),
                 project,
                 running,
                 mail_web_url,
@@ -254,6 +287,8 @@ async fn execute(request: Request, state: &Arc<State>) -> localweb_core::Result<
             assign_project_ports(&projects, &mut project)?;
             save_project(&state.paths, &project)?;
             Ok(Response::Project(ProjectStatus {
+                public_url: active_gateway_endpoint(&state.paths)
+                    .map(|endpoint| gateway_url(&project.hostname, endpoint)),
                 project,
                 running: false,
                 mail_web_url: None,
@@ -334,11 +369,14 @@ async fn execute(request: Request, state: &Arc<State>) -> localweb_core::Result<
         Request::CaStatus => {
             let ca = CaPaths::new(&state.paths);
             let exists = ca.cert.is_file() && ca.key.is_file();
-            let trusted =
+            let system_trusted =
                 exists && localweb_core::platform::TrustStore::detect()?.trusted(&ca.cert);
+            let browser_trusted = exists && localweb_core::platform::browser_ca_trusted(&ca.cert);
             Ok(Response::Ca(CaStatus {
                 exists,
-                trusted,
+                trusted: system_trusted && browser_trusted,
+                system_trusted,
+                browser_trusted,
                 certificate: ca.cert,
             }))
         }
@@ -352,14 +390,16 @@ fn running_message(state: &State, name: &str) -> localweb_core::Result<Response>
         || "an unknown direct port".to_owned(),
         |port| format!("http://127.0.0.1:{port}"),
     );
-    Ok(Response::Message(if is_active("localweb-gateway") {
-        format!(
-            "{name} is running at {direct} and https://{}",
-            project.hostname
-        )
-    } else {
-        format!("{name} is running at {direct}")
-    }))
+    Ok(Response::Message(
+        if let Some(endpoint) = active_gateway_endpoint(&state.paths) {
+            format!(
+                "{name} is running at {direct} and {}",
+                gateway_url(&project.hostname, endpoint)
+            )
+        } else {
+            format!("{name} is running at {direct}")
+        },
+    ))
 }
 
 #[cfg(unix)]
@@ -485,11 +525,13 @@ fn setup_project_services(
     };
     services.check_project(project)?;
     CaPaths::new(&state.paths).ensure_leaf(&project.hostname)?;
-    if !hosts_has_domain(&project.hostname) {
-        warn!(
-            hostname = %project.hostname,
-            "hostname is absent from /etc/hosts; the HTTPS gateway route will not resolve"
-        );
+    let gateway_address = load_gateway_endpoint(&state.paths)
+        .map_or(Ipv4Addr::LOCALHOST, |endpoint| endpoint.bind_address);
+    if !hosts_has_domain(&project.hostname, gateway_address) {
+        return Err(LocalWebError::HostMapping(format!(
+            "{} must map to {gateway_address} in the managed /etc/hosts block; run `localweb hosts sync` and start the project again",
+            project.hostname
+        )));
     }
     if project.database == localweb_core::Database::Mariadb {
         services.ensure_mariadb()?;
@@ -624,7 +666,13 @@ async fn stop_project_locked(state: &Arc<State>, name: &str) -> localweb_core::R
     let project = find_project(&state.paths, name)?;
     let mut active = state.running.lock().await.clone();
     if !active.remove(name) {
-        return Ok(());
+        let project_owned = project.clone();
+        let stopped =
+            tokio::task::spawn_blocking(move || stop_project_owned_services(&project_owned))
+                .await
+                .map_err(|error| join_failed(&error))?;
+        stop_db_proxy(state, name).await;
+        return stopped;
     }
     let state_owned = Arc::clone(state);
     let project_owned = project.clone();
@@ -679,19 +727,9 @@ fn stop_project_services(
     let mut failures = Vec::new();
     record(
         &mut failures,
-        "stop supervisor",
-        Services::stop_supervisor(project),
+        "stop project-owned services",
+        stop_project_owned_services(project),
     );
-    if project.cache == localweb_core::Cache::Redis {
-        record(&mut failures, "stop Redis", Services::stop_redis(project));
-    }
-    if project.mail {
-        record(
-            &mut failures,
-            "stop Mailpit",
-            Services::stop_mailpit(project),
-        );
-    }
     record(
         &mut failures,
         "rewrite web configuration",
@@ -722,6 +760,30 @@ fn stop_project_services(
     Ok(())
 }
 
+fn stop_project_owned_services(project: &Project) -> localweb_core::Result<()> {
+    let mut failures = Vec::new();
+    record(
+        &mut failures,
+        "stop supervisor",
+        Services::stop_supervisor(project),
+    );
+    if project.cache == localweb_core::Cache::Redis {
+        record(&mut failures, "stop Redis", Services::stop_redis(project));
+    }
+    if project.mail {
+        record(
+            &mut failures,
+            "stop Mailpit",
+            Services::stop_mailpit(project),
+        );
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(LocalWebError::Service(failures.join("; ")))
+    }
+}
+
 fn load_desired_running(paths: &Paths) -> localweb_core::Result<BTreeSet<String>> {
     let file = paths.state.join("active-projects.json");
     if !file.is_file() {
@@ -746,8 +808,142 @@ const DATABASE_PORT_START: u16 = 19_000;
 /// Last port of the fixed database proxy range for projects.
 const DATABASE_PORT_END: u16 = 19_999;
 
+fn gateway_state_file(paths: &Paths) -> std::path::PathBuf {
+    paths.state.join("gateway-state.json")
+}
+
+fn legacy_gateway_state_file(paths: &Paths) -> std::path::PathBuf {
+    paths.runtime.join("gateway-state.json")
+}
+
+fn load_gateway_endpoint(paths: &Paths) -> Option<GatewayState> {
+    let bytes = fs::read(gateway_state_file(paths)).ok()?;
+    let state: GatewayState = serde_json::from_slice(&bytes).ok()?;
+    (state.schema_version == 1 && state.bind_address.is_loopback() && state.https_port != 0)
+        .then_some(state)
+}
+
+fn load_legacy_gateway_endpoint(paths: &Paths) -> Option<GatewayState> {
+    let bytes = fs::read(legacy_gateway_state_file(paths)).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+fn persist_gateway_endpoint(paths: &Paths, endpoint: GatewayState) -> localweb_core::Result<()> {
+    let bytes = serde_json::to_vec_pretty(&endpoint)
+        .map_err(|error| LocalWebError::Config(error.to_string()))?;
+    atomic_write(&gateway_state_file(paths), &bytes, 0o600)?;
+    match fs::remove_file(legacy_gateway_state_file(paths)) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
+}
+
+fn active_gateway_endpoint(paths: &Paths) -> Option<GatewayState> {
+    is_active("localweb-gateway")
+        .then(|| load_gateway_endpoint(paths))
+        .flatten()
+}
+
+fn gateway_url(hostname: &str, endpoint: GatewayState) -> String {
+    if endpoint.https_port == GATEWAY_HTTPS_PORT {
+        format!("https://{hostname}")
+    } else {
+        format!("https://{hostname}:{}", endpoint.https_port)
+    }
+}
+
+fn initialize_gateway_endpoint(paths: &Paths) -> localweb_core::Result<GatewayState> {
+    let gateway_active = is_active("localweb-gateway");
+    if let Some(endpoint) = load_gateway_endpoint(paths)
+        && (gateway_active || !endpoint_in_use(endpoint))
+    {
+        return Ok(endpoint);
+    }
+    if gateway_active || load_legacy_gateway_endpoint(paths).is_some() {
+        Services::stop("localweb-gateway")?;
+    }
+    let endpoint = choose_gateway_endpoint(
+        |address| {
+            !endpoint_in_use(GatewayState {
+                schema_version: 1,
+                bind_address: address,
+                https_port: GATEWAY_HTTPS_PORT,
+            })
+        },
+        port_available_at,
+    )?;
+    persist_gateway_endpoint(paths, endpoint)?;
+    Ok(endpoint)
+}
+
+fn select_gateway_endpoint(
+    paths: &Paths,
+    gateway_active: bool,
+) -> localweb_core::Result<GatewayState> {
+    if let Some(endpoint) = load_gateway_endpoint(paths)
+        && (gateway_active || !endpoint_in_use(endpoint))
+    {
+        return Ok(endpoint);
+    }
+    initialize_gateway_endpoint(paths)
+}
+
+fn choose_gateway_endpoint(
+    mut standard_available: impl FnMut(Ipv4Addr) -> bool,
+    mut fallback_available: impl FnMut(Ipv4Addr, u16) -> bool,
+) -> localweb_core::Result<GatewayState> {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    for host in GATEWAY_LOOPBACK_START..=GATEWAY_LOOPBACK_END {
+        let address = Ipv4Addr::new(127, 0, 0, host);
+        if standard_available(address) {
+            return Ok(GatewayState {
+                schema_version: 1,
+                bind_address: address,
+                https_port: GATEWAY_HTTPS_PORT,
+            });
+        }
+    }
+    if standard_available(Ipv4Addr::LOCALHOST) {
+        return Ok(GatewayState {
+            schema_version: 1,
+            bind_address: Ipv4Addr::LOCALHOST,
+            https_port: GATEWAY_HTTPS_PORT,
+        });
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let fallback_address = Ipv4Addr::new(127, 0, 0, GATEWAY_LOOPBACK_START);
+    #[cfg(any(not(unix), target_os = "macos"))]
+    let fallback_address = Ipv4Addr::LOCALHOST;
+    for port in GATEWAY_FALLBACK_START..=GATEWAY_FALLBACK_END {
+        if fallback_available(fallback_address, port) {
+            return Ok(GatewayState {
+                schema_version: 1,
+                bind_address: fallback_address,
+                https_port: port,
+            });
+        }
+    }
+    Err(LocalWebError::Service(format!(
+        "no isolated LocalWeb HTTPS endpoint is available on loopback port 443 or in {GATEWAY_FALLBACK_START}-{GATEWAY_FALLBACK_END}"
+    )))
+}
+
 fn port_available(port: u16) -> bool {
-    TcpListener::bind((Ipv4Addr::LOCALHOST, port)).is_ok()
+    port_available_at(Ipv4Addr::LOCALHOST, port)
+}
+
+fn port_available_at(address: Ipv4Addr, port: u16) -> bool {
+    TcpListener::bind((address, port)).is_ok()
+}
+
+fn endpoint_in_use(endpoint: GatewayState) -> bool {
+    std::net::TcpStream::connect_timeout(
+        &std::net::SocketAddr::from((endpoint.bind_address, endpoint.https_port)),
+        Duration::from_millis(100),
+    )
+    .is_ok()
 }
 
 fn allocate_port(start: u16, end: u16, used: &BTreeSet<u16>) -> localweb_core::Result<u16> {
@@ -916,6 +1112,9 @@ fn shutdown_services(state: &State) -> localweb_core::Result<()> {
             failures.push(error.to_string());
         }
     }
+    if !is_active("localweb-gateway") {
+        let _ = fs::remove_file(legacy_gateway_state_file(&state.paths));
+    }
     if failures.is_empty() {
         Ok(())
     } else {
@@ -994,27 +1193,56 @@ fn apply_services(state: &State, active: &BTreeSet<String>) -> localweb_core::Re
     write_routes(state, active)?;
     let gateway = std::env::current_exe()?
         .with_file_name(format!("localweb-gateway{}", std::env::consts::EXE_SUFFIX));
-    if gateway_should_skip(is_active("localweb-gateway"), port_in_use(443)) {
-        info!("HTTPS gateway skipped because port 443 is already in use");
-        return Ok(());
+    let gateway_active = is_active("localweb-gateway");
+    let mut endpoint = select_gateway_endpoint(&state.paths, gateway_active)?;
+    if let Err(primary) = start_gateway_service(&gateway, endpoint) {
+        if endpoint.https_port != GATEWAY_HTTPS_PORT {
+            return Err(primary);
+        }
+        Services::stop("localweb-gateway")?;
+        let fallback_port = (GATEWAY_FALLBACK_START..=GATEWAY_FALLBACK_END)
+            .find(|port| port_available_at(endpoint.bind_address, *port))
+            .ok_or_else(|| {
+                LocalWebError::Service(format!(
+                    "standard HTTPS endpoint failed ({primary}); no fallback port is free in {GATEWAY_FALLBACK_START}-{GATEWAY_FALLBACK_END}"
+                ))
+            })?;
+        endpoint.https_port = fallback_port;
+        start_gateway_service(&gateway, endpoint).map_err(|fallback| {
+            LocalWebError::Service(format!(
+                "standard HTTPS endpoint failed ({primary}); fallback failed ({fallback})"
+            ))
+        })?;
     }
-    Services::start_or_restart("localweb-gateway", &gateway, &[])?;
-    services::wait_for_unit_active("localweb-gateway", "HTTPS gateway")?;
+    persist_gateway_endpoint(&state.paths, endpoint)?;
+    if endpoint.https_port != GATEWAY_HTTPS_PORT {
+        warn!(
+            standard_port = GATEWAY_HTTPS_PORT,
+            fallback_port = endpoint.https_port,
+            bind_address = %endpoint.bind_address,
+            "standard HTTPS binding is unavailable; using a loopback fallback without modifying other services"
+        );
+    } else if endpoint.bind_address != Ipv4Addr::LOCALHOST {
+        info!(
+            bind_address = %endpoint.bind_address,
+            "gateway isolated on a dedicated loopback address"
+        );
+    }
     Ok(())
 }
 
-/// Returns true when the gateway unit is down and another process owns port
-/// 443, in which case `LocalWeb` keeps serving projects over direct HTTP.
-fn gateway_should_skip(unit_active: bool, port_443_busy: bool) -> bool {
-    !unit_active && port_443_busy
-}
-
-fn port_in_use(port: u16) -> bool {
-    std::net::TcpStream::connect_timeout(
-        &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
-        Duration::from_millis(100),
-    )
-    .is_ok()
+fn start_gateway_service(
+    gateway: &std::path::Path,
+    endpoint: GatewayState,
+) -> localweb_core::Result<()> {
+    let bind_address = endpoint.bind_address.to_string();
+    let https_port = endpoint.https_port.to_string();
+    Services::start_or_restart(
+        "localweb-gateway",
+        gateway,
+        &["--bind-address", &bind_address, "--https-port", &https_port],
+    )?;
+    services::wait_for_unit_active("localweb-gateway", "HTTPS gateway")
 }
 
 fn write_routes(state: &State, active: &BTreeSet<String>) -> localweb_core::Result<()> {
@@ -1043,10 +1271,11 @@ fn write_routes(state: &State, active: &BTreeSet<String>) -> localweb_core::Resu
     )
 }
 
-fn hosts_has_domain(domain: &str) -> bool {
+fn hosts_has_domain(domain: &str, address: Ipv4Addr) -> bool {
     let Ok(contents) = fs::read_to_string("/etc/hosts") else {
         return false;
     };
+    let expected_address = address.to_string();
     let mut managed = false;
     for line in contents.lines() {
         if line == localweb_core::hosts::BEGIN {
@@ -1056,7 +1285,12 @@ fn hosts_has_domain(domain: &str) -> bool {
         if line == localweb_core::hosts::END {
             managed = false;
         }
-        if managed && line.split_whitespace().collect::<Vec<_>>() == ["127.0.0.1", domain] {
+        let mut fields = line.split_whitespace();
+        if managed
+            && fields.next() == Some(expected_address.as_str())
+            && fields.next() == Some(domain)
+            && fields.next().is_none()
+        {
             return true;
         }
     }
@@ -1312,6 +1546,10 @@ fn find_project(paths: &Paths, name: &str) -> localweb_core::Result<Project> {
         .ok_or_else(|| LocalWebError::ProjectNotFound(name.into()))
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the ordered Doctor checklist stays auditable in one function"
+)]
 fn doctor(state: &State) -> Vec<Diagnostic> {
     let mut checks = Vec::new();
     let detail = if cfg!(target_os = "macos") {
@@ -1335,6 +1573,109 @@ fn doctor(state: &State) -> Vec<Diagnostic> {
         check: "daemon socket".into(),
         detail: state.paths.socket().display().to_string(),
         fix: None,
+    });
+    let gateway_endpoint = active_gateway_endpoint(&state.paths);
+    let selected_gateway = load_gateway_endpoint(&state.paths);
+    checks.push(Diagnostic {
+        level: if gateway_endpoint.is_some() {
+            "OK"
+        } else {
+            "WARNING"
+        }
+        .into(),
+        check: "HTTPS gateway".into(),
+        detail: gateway_endpoint.map_or_else(
+            || "stopped; it starts when the first project starts".into(),
+            |endpoint| {
+                format!(
+                    "listening on {}:{}",
+                    endpoint.bind_address, endpoint.https_port
+                )
+            },
+        ),
+        fix: gateway_endpoint
+            .is_none()
+            .then(|| "Start a project with `localweb project start NAME`".into()),
+    });
+    if selected_gateway.is_some_and(|endpoint| endpoint.https_port != GATEWAY_HTTPS_PORT) {
+        checks.push(Diagnostic {
+            level: "WARNING".into(),
+            check: "standard HTTPS port".into(),
+            detail: "standard binding is unavailable; LocalWeb leaves its owner untouched".into(),
+            fix: Some(format!(
+                "Use the HTTPS URL shown by LocalWeb with its fallback port ({GATEWAY_FALLBACK_START}-{GATEWAY_FALLBACK_END})"
+            )),
+        });
+    } else if let Some(endpoint) =
+        selected_gateway.filter(|endpoint| endpoint.bind_address != Ipv4Addr::LOCALHOST)
+    {
+        checks.push(Diagnostic {
+            level: "OK".into(),
+            check: "HTTPS isolation".into(),
+            detail: format!(
+                "LocalWeb owns {}:443; services on 127.0.0.1 remain untouched",
+                endpoint.bind_address
+            ),
+            fix: None,
+        });
+    } else {
+        checks.push(Diagnostic {
+            level: "OK".into(),
+            check: "standard HTTPS port".into(),
+            detail: if gateway_endpoint
+                .is_some_and(|endpoint| endpoint.https_port == GATEWAY_HTTPS_PORT)
+            {
+                "owned by the LocalWeb gateway".into()
+            } else {
+                "available for LocalWeb".into()
+            },
+            fix: None,
+        });
+    }
+    let ca = CaPaths::new(&state.paths);
+    let ca_exists = ca.cert.is_file() && ca.key.is_file();
+    let system_ca_trusted = ca_exists
+        && localweb_core::platform::TrustStore::detect().is_ok_and(|store| store.trusted(&ca.cert));
+    let browser_ca_trusted = ca_exists && localweb_core::platform::browser_ca_trusted(&ca.cert);
+    let ca_trusted = system_ca_trusted && browser_ca_trusted;
+    checks.push(Diagnostic {
+        level: if ca_trusted { "OK" } else { "WARNING" }.into(),
+        check: "HTTPS certificate authority".into(),
+        detail: if ca_trusted {
+            "LocalWeb Development CA is trusted by the system and Chromium-family browsers".into()
+        } else if system_ca_trusted {
+            "CA is trusted by the operating system but not by Brave/Chromium".into()
+        } else if browser_ca_trusted {
+            "CA is trusted by Brave/Chromium but not by the operating system".into()
+        } else if ca_exists {
+            "CA exists but is not trusted by the system or Brave/Chromium".into()
+        } else {
+            "LocalWeb Development CA is missing".into()
+        },
+        fix: (!ca_trusted).then(|| "Run `localweb ca install`".into()),
+    });
+    let expected_address =
+        selected_gateway.map_or(Ipv4Addr::LOCALHOST, |endpoint| endpoint.bind_address);
+    let missing_hosts = load_projects(&state.paths)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|project| !hosts_has_domain(&project.hostname, expected_address))
+        .map(|project| project.hostname)
+        .collect::<Vec<_>>();
+    checks.push(Diagnostic {
+        level: if missing_hosts.is_empty() {
+            "OK"
+        } else {
+            "WARNING"
+        }
+        .into(),
+        check: "exact host mappings".into(),
+        detail: if missing_hosts.is_empty() {
+            format!("all configured project hostnames map to {expected_address}")
+        } else {
+            format!("missing: {}", missing_hosts.join(", "))
+        },
+        fix: (!missing_hosts.is_empty()).then(|| "Run `localweb hosts sync`".into()),
     });
     checks.extend(runtime_diagnostics());
     checks
@@ -1516,20 +1857,64 @@ mod tests {
     }
 
     #[test]
-    fn gateway_is_skipped_only_when_443_is_owned_by_another_stack() {
-        assert!(gateway_should_skip(false, true));
-        assert!(!gateway_should_skip(false, false));
-        assert!(!gateway_should_skip(true, false));
-        assert!(!gateway_should_skip(true, true));
+    fn gateway_url_includes_only_nonstandard_ports() {
+        assert_eq!(
+            gateway_url(
+                "demo.test",
+                GatewayState {
+                    schema_version: 1,
+                    bind_address: Ipv4Addr::new(127, 0, 0, 2),
+                    https_port: 443,
+                }
+            ),
+            "https://demo.test"
+        );
+        assert_eq!(
+            gateway_url(
+                "demo.test",
+                GatewayState {
+                    schema_version: 1,
+                    bind_address: Ipv4Addr::new(127, 0, 0, 2),
+                    https_port: 8_443,
+                }
+            ),
+            "https://demo.test:8443"
+        );
+    }
+
+    #[test]
+    #[cfg(all(unix, not(target_os = "macos")))]
+    fn gateway_prefers_a_free_dedicated_loopback_address() {
+        let endpoint = choose_gateway_endpoint(
+            |address| address == Ipv4Addr::new(127, 0, 0, 4),
+            |_, _| false,
+        )
+        .unwrap();
+        assert_eq!(endpoint.bind_address, Ipv4Addr::new(127, 0, 0, 4));
+        assert_eq!(endpoint.https_port, GATEWAY_HTTPS_PORT);
+    }
+
+    #[test]
+    fn gateway_uses_a_high_port_only_after_standard_endpoints_fail() {
+        let endpoint =
+            choose_gateway_endpoint(|_| false, |_, port| port == GATEWAY_FALLBACK_START + 2)
+                .unwrap();
+        assert_eq!(endpoint.https_port, GATEWAY_FALLBACK_START + 2);
+        assert!(endpoint.bind_address.is_loopback());
     }
 
     #[test]
     fn port_probe_detects_a_listening_socket() {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
-        assert!(port_in_use(port));
+        let endpoint = GatewayState {
+            schema_version: 1,
+            bind_address: Ipv4Addr::LOCALHOST,
+            https_port: port,
+        };
+        assert!(endpoint_in_use(endpoint));
         drop(listener);
-        assert!(!port_in_use(port));
+        assert!(!endpoint_in_use(endpoint));
     }
 
     #[test]

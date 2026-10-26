@@ -193,6 +193,191 @@ impl TrustStore {
     }
 }
 
+/// Installs the `LocalWeb` CA into the per-user NSS database used by
+/// Chromium-family browsers on Linux.
+///
+/// # Errors
+/// Returns an error when the user home cannot be resolved or `certutil` fails.
+pub fn install_browser_ca(certificate: &Path) -> Result<()> {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        install_linux_browser_ca(certificate, &browser_nss_database()?)
+    }
+    #[cfg(any(not(unix), target_os = "macos"))]
+    {
+        let _ = certificate;
+        Ok(())
+    }
+}
+
+/// Removes the `LocalWeb` CA from the per-user Linux browser NSS database.
+///
+/// # Errors
+/// Returns an error when `certutil` cannot remove an existing entry.
+pub fn remove_browser_ca() -> Result<()> {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        remove_linux_browser_ca(&browser_nss_database()?)
+    }
+    #[cfg(any(not(unix), target_os = "macos"))]
+    {
+        Ok(())
+    }
+}
+
+/// Reports whether Chromium-family browsers trust the exact `LocalWeb` CA.
+#[must_use]
+pub fn browser_ca_trusted(certificate: &Path) -> bool {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        browser_nss_database()
+            .is_ok_and(|database| linux_browser_ca_trusted(certificate, &database))
+    }
+    #[cfg(any(not(unix), target_os = "macos"))]
+    {
+        let _ = certificate;
+        true
+    }
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+const NSS_CERTUTIL: &str = "/usr/bin/certutil";
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn browser_nss_database() -> Result<PathBuf> {
+    let user_home = std::env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .ok_or_else(|| LocalWebError::Config("HOME is required for browser trust setup".into()))?;
+    Ok(nss_database_for_home(&user_home))
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn nss_database_for_home(user_home: &Path) -> PathBuf {
+    user_home.join(".pki/nssdb")
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn nss_database_argument(database: &Path) -> std::ffi::OsString {
+    let mut argument = std::ffi::OsString::from("sql:");
+    argument.push(database.as_os_str());
+    argument
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn install_linux_browser_ca(certificate: &Path, database: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+    use std::process::Stdio;
+
+    if !Path::new(NSS_CERTUTIL).is_file() {
+        return Err(LocalWebError::RuntimeNotInstalled(
+            "NSS certutil (/usr/bin/certutil); reinstall the LocalWeb package".into(),
+        ));
+    }
+    fs::create_dir_all(database)?;
+    fs::set_permissions(database, fs::Permissions::from_mode(0o700))?;
+    let database_argument = nss_database_argument(database);
+    if !database.join("cert9.db").is_file() {
+        let output = Command::new(NSS_CERTUTIL)
+            .args(["-N", "--empty-password", "-d"])
+            .arg(&database_argument)
+            .stdin(Stdio::null())
+            .output()?;
+        require_certutil_success(&output, "initialize the browser certificate database")?;
+    }
+    if linux_browser_ca_trusted(certificate, database) {
+        return Ok(());
+    }
+    if linux_browser_nickname_exists(database) {
+        let output = Command::new(NSS_CERTUTIL)
+            .args(["-D", "-d"])
+            .arg(&database_argument)
+            .args(["-n", CA_COMMON_NAME])
+            .stdin(Stdio::null())
+            .output()?;
+        require_certutil_success(&output, "replace the browser CA")?;
+    }
+    let output = Command::new(NSS_CERTUTIL)
+        .args(["-A", "-d"])
+        .arg(&database_argument)
+        .args(["-n", CA_COMMON_NAME, "-t", "C,,", "-a", "-i"])
+        .arg(certificate)
+        .stdin(Stdio::null())
+        .output()?;
+    require_certutil_success(&output, "install the browser CA")?;
+    if !linux_browser_ca_trusted(certificate, database) {
+        return Err(LocalWebError::Service(
+            "certutil completed but Brave/Chromium does not trust the LocalWeb CA".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn remove_linux_browser_ca(database: &Path) -> Result<()> {
+    if !database.join("cert9.db").is_file() || !linux_browser_nickname_exists(database) {
+        return Ok(());
+    }
+    let output = Command::new(NSS_CERTUTIL)
+        .args(["-D", "-d"])
+        .arg(nss_database_argument(database))
+        .args(["-n", CA_COMMON_NAME])
+        .stdin(std::process::Stdio::null())
+        .output()?;
+    require_certutil_success(&output, "remove the browser CA")
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn linux_browser_nickname_exists(database: &Path) -> bool {
+    Command::new(NSS_CERTUTIL)
+        .args(["-L", "-d"])
+        .arg(nss_database_argument(database))
+        .args(["-n", CA_COMMON_NAME])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn linux_browser_ca_trusted(certificate: &Path, database: &Path) -> bool {
+    let Ok(expected) = fs::read(certificate) else {
+        return false;
+    };
+    let Ok(output) = Command::new(NSS_CERTUTIL)
+        .args(["-L", "-a", "-d"])
+        .arg(nss_database_argument(database))
+        .args(["-n", CA_COMMON_NAME])
+        .stdin(std::process::Stdio::null())
+        .output()
+    else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    certificate_der(&expected).is_some_and(|expected| {
+        certificate_der(&output.stdout).is_some_and(|actual| actual == expected)
+    })
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn certificate_der(bytes: &[u8]) -> Option<Vec<u8>> {
+    x509_parser::pem::parse_x509_pem(bytes)
+        .ok()
+        .map(|(_, pem)| pem.contents)
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn require_certutil_success(output: &std::process::Output, action: &str) -> Result<()> {
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(LocalWebError::Service(format!(
+        "certutil could not {action}: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    )))
+}
+
 #[cfg(target_os = "macos")]
 fn macos_trust() -> Result<()> {
     let certificate = TrustStore::Macos.certificate_path();
@@ -339,5 +524,16 @@ mod tests {
             assert_eq!(TrustStore::from_os_release(text).unwrap(), expected);
         }
         TrustStore::from_os_release("ID=unknown").unwrap_err();
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn nss_database_path_and_argument_are_user_scoped() {
+        let database = nss_database_for_home(Path::new("/home/developer"));
+        assert_eq!(database, Path::new("/home/developer/.pki/nssdb"));
+        assert_eq!(
+            nss_database_argument(&database),
+            std::ffi::OsString::from("sql:/home/developer/.pki/nssdb")
+        );
     }
 }

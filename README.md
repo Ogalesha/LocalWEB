@@ -29,7 +29,7 @@ requirements still determine which PHP and database versions it can use.
 | **Background workers** | Supervisor-style process management using the native service manager; Laravel queue and Symfony Messenger presets, or a custom executable and arguments. |
 | **Scheduled tasks** | Five-field cron schedules, framework presets, logs and overlap protection while the project is active. |
 | **Local domains** | Exact project entries in `/etc/hosts`, with `.dev` as the default suffix. |
-| **Direct ports and HTTPS domains** | Every project gets a fixed loopback HTTP port (18000–18999) and, for network databases, a fixed loopback database port (19000–19999) forwarded to the shared engine. A local TLS gateway and certificate authority add `https://<project>.dev` when port 443 is free, so LocalWeb coexists with other local stacks. |
+| **Direct ports and HTTPS domains** | Every project gets a fixed loopback HTTP port (18000–18999) and, for network databases, a fixed loopback database port (19000–19999) forwarded to the shared engine. On Linux the TLS gateway owns a dedicated loopback identity such as `127.0.0.2:443`, so other local stacks can keep `127.0.0.1:443`. |
 | **Desktop app** | Project search, runtime/service selection, start/stop/restart, browser and Mailpit opening, details and connection settings. |
 | **CLI** | Project management, PHP/Composer/Node commands, shell access, environment values and diagnostics. |
 | **AI assistants (MCP)** | A Model Context Protocol server (`localweb-mcp`) that lets AI assistants create, start, inspect and test projects through the same daemon as the desktop app. |
@@ -94,8 +94,8 @@ download without an account, while the artifacts attached to individual
 `SHA256SUMS` file.
 
 ```bash
-sudo apt install ./localweb_0.1.2_amd64.deb          # Ubuntu
-sudo pacman -U ./localweb-0.1.2-1-x86_64.pkg.tar.zst # Arch / Omarchy
+sudo apt install ./localweb_0.1.3_amd64.deb          # Ubuntu
+sudo pacman -U ./localweb-0.1.3-1-x86_64.pkg.tar.zst # Arch / Omarchy
 ```
 
 Open the desktop app and choose **Set up LocalWeb**, then **Install CA**.
@@ -149,11 +149,15 @@ with `--web-port` and `--db-port`, or let LocalWeb allocate them from the
 fixed ranges above. `localweb project info <name>` shows both endpoints, and
 the environment values expose the database proxy port as `DB_PORT`.
 
-When the HTTPS gateway can bind `127.0.0.1:443`, project domains also work
-as `https://<name>.dev`. If another stack already holds port 443, LocalWeb
-keeps running on its direct ports and skips the gateway. `.dev` domains use
-browsers' built-in HSTS policy; `.test` is available when that policy would
-interfere with a development workflow.
+On Linux the HTTPS gateway selects a dedicated address from `127.0.0.2/24`
+and normally owns port 443 there. Exact `/etc/hosts` entries point only
+LocalWeb domains to that address, so another stack may continue using
+`127.0.0.1:443` while `https://indeks.dev` remains portless. A high port in
+`8443-8499` is a last-resort fallback and is always shown explicitly. `.dev`
+domains use browsers' built-in HSTS policy; `.test` remains available.
+`localweb ca install` registers the public development CA with both Ubuntu and
+the current user's Brave/Chromium NSS database; restart browsers that were
+already running during the first installation.
 
 ## Background work
 

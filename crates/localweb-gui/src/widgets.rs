@@ -34,6 +34,7 @@ pub enum PillKind {
 pub struct Pill<'a> {
     icon: Option<Icon>,
     label: &'a str,
+    accessible_label: Option<&'a str>,
     kind: PillKind,
     enabled: bool,
     min_width: f32,
@@ -46,16 +47,24 @@ impl<'a> Pill<'a> {
         Self {
             icon: None,
             label,
+            accessible_label: None,
             kind,
             enabled: true,
             min_width: 0.0,
-            height: 38.0,
+            height: 44.0,
         }
     }
 
     #[must_use]
     pub fn icon(mut self, icon: Icon) -> Self {
         self.icon = Some(icon);
+        self
+    }
+
+    /// Supplies the assistive-technology name for an icon-only control.
+    #[must_use]
+    pub fn accessible_label(mut self, label: &'a str) -> Self {
+        self.accessible_label = Some(label);
         self
     }
 
@@ -73,7 +82,7 @@ impl<'a> Pill<'a> {
 
     #[must_use]
     pub fn height(mut self, height: f32) -> Self {
-        self.height = height;
+        self.height = height.max(44.0);
         self
     }
 
@@ -243,7 +252,11 @@ impl<'a> Pill<'a> {
             );
         }
         response.widget_info(|| {
-            egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, self.label.to_owned())
+            egui::WidgetInfo::labeled(
+                egui::WidgetType::Button,
+                enabled,
+                self.accessible_label.unwrap_or(self.label).to_owned(),
+            )
         });
         response
     }
@@ -382,8 +395,9 @@ pub fn callout(ui: &mut Ui, icon: Icon, content: impl FnOnce(&mut Ui)) {
 }
 
 /// Small square icon button used for dismiss and similar affordances.
-pub fn icon_button(ui: &mut Ui, icon: Icon, size: f32) -> Response {
-    let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
+pub fn icon_button(ui: &mut Ui, icon: Icon, size: f32, accessible_label: &str) -> Response {
+    let target_size = size.max(44.0);
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(target_size), Sense::click());
     let pressed = response.is_pointer_button_down_on();
     let t = ui
         .ctx()
@@ -406,7 +420,7 @@ pub fn icon_button(ui: &mut Ui, icon: Icon, size: f32) -> Response {
         };
         crate::icons::paint(
             ui.painter(),
-            egui::Rect::from_center_size(rect.center(), Vec2::splat(size * 0.58)),
+            egui::Rect::from_center_size(rect.center(), Vec2::splat((size * 0.58).min(20.0))),
             icon,
             color,
             1.6,
@@ -415,12 +429,13 @@ pub fn icon_button(ui: &mut Ui, icon: Icon, size: f32) -> Response {
     if response.has_focus() {
         focus_ring(ui, rect, theme::FOCUS);
     }
-    response
-        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, String::new()));
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, accessible_label.to_owned())
+    });
     response
 }
 
-/// Checkbox with a full-width 36 px clickable row.
+/// Checkbox with a full-width, accessible 44 px minimum clickable row.
 #[must_use]
 pub fn check_row(ui: &mut Ui, checked: &mut bool, label: &str) -> Response {
     let width = ui.available_width();
@@ -430,7 +445,7 @@ pub fn check_row(ui: &mut Ui, checked: &mut bool, label: &str) -> Response {
         theme::INK,
         (width - 32.0).max(80.0),
     );
-    let height = (galley.size().y + 12.0).max(36.0);
+    let height = (galley.size().y + 12.0).max(44.0);
     let (rect, response) = ui.allocate_exact_size(Vec2::new(width, height), Sense::click());
     let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
     let pressed = response.is_pointer_button_down_on();
@@ -533,7 +548,7 @@ pub fn empty_card(
 /// Navigation rail item: icon plus label, selected state and hover.
 pub fn rail_item(ui: &mut Ui, label: &str, icon: Icon, selected: bool) -> Response {
     let (rect, response) =
-        ui.allocate_exact_size(Vec2::new(ui.available_width(), 42.0), Sense::click());
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), 44.0), Sense::click());
     let pressed = response.is_pointer_button_down_on() && !selected;
     let t = ui.ctx().animate_bool_with_time(
         response.id.with("hover"),

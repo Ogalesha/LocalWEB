@@ -6,7 +6,8 @@
 
 use localweb_core::{
     Cache, Database, ExecutionSpec, NewProject, Paths, Request, Response, SupervisorConfig,
-    WebServer, certificate::CaPaths, parse_cron_line, send_request, validate_php_version,
+    WebServer, certificate::CaPaths, hosts::HostsSync, parse_cron_line, send_request,
+    validate_php_version,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -729,18 +730,29 @@ async fn ca_install() -> Result<String, String> {
         .await
         .map_err(|error| format!("cannot read the CA certificate: {error}"))?;
     run_helper("install-ca", certificate).await?;
-    Ok("LocalWeb Development CA installed in the system trust store".to_owned())
+    localweb_core::platform::install_browser_ca(&ca.cert).map_err(|error| error.to_string())?;
+    Ok("LocalWeb Development CA installed for the system and Chromium-family browsers".to_owned())
 }
 
 /// Rewrites the managed hosts block with every project hostname.
 async fn hosts_sync() -> Result<String, String> {
     let paths = paths()?;
     let hostnames = project_hostnames(&paths).await?;
-    let payload = serde_json::to_vec(&hostnames).map_err(|error| error.to_string())?;
+    let Response::Status(status) = converse(&paths, Request::Status).await? else {
+        return Err(unexpected());
+    };
+    let address = status
+        .gateway_bind_address
+        .unwrap_or(localweb_core::hosts::DEFAULT_GATEWAY_ADDRESS);
+    let request = HostsSync {
+        address,
+        domains: hostnames,
+    };
+    let payload = serde_json::to_vec(&request).map_err(|error| error.to_string())?;
     run_helper("sync-hosts", payload).await?;
     Ok(format!(
-        "Synchronized {} LocalWeb hostnames in the system hosts file",
-        hostnames.len()
+        "Synchronized {} LocalWeb hostnames to {address} in the system hosts file",
+        request.domains.len()
     ))
 }
 

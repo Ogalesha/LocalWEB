@@ -12,8 +12,8 @@ The runtime contents of the package determine which PHP versions are included.
 Use the package for your native distro:
 
 ```bash
-sudo apt install ./localweb_0.1.2_amd64.deb         # Ubuntu 26.04
-sudo pacman -U ./localweb-0.1.2-1-x86_64.pkg.tar.zst # Arch / Omarchy
+sudo apt install ./localweb_0.1.3_amd64.deb         # Ubuntu 26.04
+sudo pacman -U ./localweb-0.1.3-1-x86_64.pkg.tar.zst # Arch / Omarchy
 ```
 
 You need a desktop-user session with systemd and system authorization.
@@ -23,11 +23,11 @@ Arch is not a substitute for testing an actual Omarchy desktop session.
 
 ## macOS
 
-Download `LocalWeb-0.1.2.pkg` (universal: Apple silicon and Intel) and
+Download `LocalWeb-0.1.3.pkg` (universal: Apple silicon and Intel) and
 install it:
 
 ```bash
-sudo installer -pkg ./LocalWeb-0.1.2.pkg -target /
+sudo installer -pkg ./LocalWeb-0.1.3.pkg -target /
 ```
 
 The package installs the CLI and daemon tools under `/usr/local` and the
@@ -39,7 +39,7 @@ implemented but has not yet been exercised on Apple hardware: see
 
 ## Windows
 
-Download `localweb-0.1.2-windows-x86_64.zip` and extract it. Run
+Download `localweb-0.1.3-windows-x86_64.zip` and extract it. Run
 `localweb-gui.exe` for the desktop app or `localweb.exe` from a terminal.
 The build is cross-compiled and exercised under Wine in CI, but has not been
 run on real Windows yet: see [docs/windows-porting.md](windows-porting.md).
@@ -78,7 +78,10 @@ localweb project start acme
 ```
 
 That folder answers on its fixed direct HTTP port (`localweb project info`
-prints it) and, when the gateway can bind port 443, on `https://acme.dev`.
+prints it) and through the HTTPS gateway. On Linux the gateway uses a
+dedicated loopback address, so `https://acme.dev` stays portless even when
+another application owns `127.0.0.1:443`. A URL such as
+`https://acme.dev:8443` is used only if the dedicated low-port binding fails.
 Pin the ports with `--web-port` and `--db-port` when another local stack
 needs a different assignment. `--domain acme.test` avoids browsers'
 built-in HSTS policy for `.dev`.
@@ -86,6 +89,10 @@ built-in HSTS policy for `.dev`.
 The project **Details** panel shows configuration and optional connection
 settings. Use those values in your app; LocalWeb does not modify `.env`.
 The terminal equivalent is `localweb env acme --format dotenv`.
+
+`localweb ca install` registers the public development CA with Ubuntu and the
+current user's Brave/Chromium NSS database. Restart browsers that were already
+running when trust was installed.
 
 Adding a project does not immediately start it. Project autostart means
 it starts on the next LocalWeb launch. Login autostart is separately opt-in:

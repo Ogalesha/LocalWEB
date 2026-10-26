@@ -2,7 +2,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use localweb_core::{
     Cache, Database, ExecutionSpec, NewProject, Paths, Request, Response, SupervisorConfig,
-    WebServer, certificate::CaPaths, send_request,
+    WebServer, certificate::CaPaths, hosts::HostsSync, send_request,
 };
 use std::{
     ffi::OsString,
@@ -465,16 +465,23 @@ async fn main() -> Result<()> {
     }
     match response {
         other if json => println!("{}", serde_json::to_string_pretty(&other)?),
-        Response::Status(status) => println!(
-            "Daemon: running\nGateway: {}\nProjects: {} total, {} active",
-            if status.gateway_running {
-                "running"
+        Response::Status(status) => {
+            let gateway = if status.gateway_running {
+                match (status.gateway_bind_address, status.gateway_https_port) {
+                    (Some(address), Some(443)) => format!("running on https://{address}"),
+                    (Some(address), Some(port)) => {
+                        format!("running on https://{address}:{port}")
+                    }
+                    _ => "running".to_owned(),
+                }
             } else {
-                "stopped"
-            },
-            status.project_count,
-            status.active_projects
-        ),
+                "stopped".to_owned()
+            };
+            println!(
+                "Daemon: running\nGateway: {gateway}\nProjects: {} total, {} active",
+                status.project_count, status.active_projects
+            );
+        }
         Response::Projects(projects) => {
             for item in projects {
                 println!(
@@ -486,34 +493,44 @@ async fn main() -> Result<()> {
                 );
             }
         }
-        Response::Project(item) => println!(
-            "{} ({})\nPath: {}\nDocument root: {}\nPHP: {}\nWeb: {:?}\nWeb URL: {}\nDatabase: {:?}\nDatabase URL: {}\nCache: {:?}\nSupervisor: {}\nState: {}",
-            item.project.name,
-            item.project.hostname,
-            item.project.path.display(),
-            item.project.document_root.display(),
-            item.project.php,
-            item.project.web_server,
-            item.project
+        Response::Project(item) => {
+            let direct_url = item
+                .project
                 .web_port
-                .map_or_else(|| "-".to_owned(), |port| format!("http://127.0.0.1:{port}")),
-            item.project.database,
-            item.project
-                .database_port
-                .map_or_else(|| "-".to_owned(), |port| format!("127.0.0.1:{port}")),
-            item.project.cache,
-            if item.project.supervisor.enabled {
-                "enabled"
-            } else {
-                "disabled"
-            },
-            if item.running { "running" } else { "stopped" }
-        ),
+                .map_or_else(|| "-".to_owned(), |port| format!("http://127.0.0.1:{port}"));
+            println!(
+                "{} ({})\nPath: {}\nDocument root: {}\nPHP: {}\nWeb: {:?}\nPublic URL: {}\nDirect URL: {}\nDatabase: {:?}\nDatabase URL: {}\nCache: {:?}\nSupervisor: {}\nState: {}",
+                item.project.name,
+                item.project.hostname,
+                item.project.path.display(),
+                item.project.document_root.display(),
+                item.project.php,
+                item.project.web_server,
+                item.public_url.as_deref().unwrap_or("gateway stopped"),
+                direct_url,
+                item.project.database,
+                item.project
+                    .database_port
+                    .map_or_else(|| "-".to_owned(), |port| format!("127.0.0.1:{port}")),
+                item.project.cache,
+                if item.project.supervisor.enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                },
+                if item.running { "running" } else { "stopped" }
+            );
+        }
         Response::Message(message) => println!("{message}"),
         Response::Ca(status) => println!(
-            "CA: {}\nSystem trust copy: {}\nCertificate: {}",
+            "CA: {}\nSystem trust: {}\nBrave/Chromium trust: {}\nCertificate: {}",
             if status.exists { "present" } else { "missing" },
-            if status.trusted {
+            if status.system_trusted {
+                "installed"
+            } else {
+                "not installed"
+            },
+            if status.browser_trusted {
                 "installed"
             } else {
                 "not installed"
@@ -852,7 +869,8 @@ fn install_ca(paths: &Paths) -> Result<()> {
     let ca = CaPaths::new(paths);
     ca.ensure_ca()?;
     run_helper("install-ca", &std::fs::read(&ca.cert)?)?;
-    println!("LocalWeb Development CA installed in the system trust store");
+    localweb_core::platform::install_browser_ca(&ca.cert)?;
+    println!("LocalWeb Development CA installed for the system and Chromium-family browsers");
     Ok(())
 }
 
@@ -861,8 +879,9 @@ fn remove_ca(paths: &Paths) -> Result<()> {
     if !ca.cert.is_file() {
         bail!("this account has no LocalWeb CA");
     }
+    localweb_core::platform::remove_browser_ca()?;
     run_helper("remove-ca", &std::fs::read(&ca.cert)?)?;
-    println!("LocalWeb Development CA removed from the system trust store");
+    println!("LocalWeb Development CA removed from system and browser trust stores");
     Ok(())
 }
 
@@ -876,8 +895,22 @@ async fn sync_hosts(paths: &Paths) -> Result<()> {
         .into_iter()
         .map(|item| item.project.hostname)
         .collect();
-    run_helper("sync-hosts", &serde_json::to_vec(&names)?)?;
-    println!("Synchronized {} exact LocalWeb hostnames", names.len());
+    let address = match send_request(paths, Request::Status).await? {
+        Response::Status(status) => status
+            .gateway_bind_address
+            .unwrap_or(localweb_core::hosts::DEFAULT_GATEWAY_ADDRESS),
+        Response::Error { code, message } => bail!("{code}: {message}"),
+        _ => bail!("unexpected daemon response"),
+    };
+    let request = HostsSync {
+        address,
+        domains: names,
+    };
+    run_helper("sync-hosts", &serde_json::to_vec(&request)?)?;
+    println!(
+        "Synchronized {} exact LocalWeb hostnames to {address}",
+        request.domains.len()
+    );
     Ok(())
 }
 

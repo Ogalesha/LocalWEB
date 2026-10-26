@@ -46,6 +46,7 @@ depend = systemd
 depend = polkit
 depend = ca-certificates
 depend = libcap
+depend = nss
 depend = libx11
 depend = libxcb
 depend = libxkbcommon

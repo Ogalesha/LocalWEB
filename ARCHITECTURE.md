@@ -7,7 +7,7 @@ LocalWeb uses native Rust processes on Ubuntu, Arch Linux, Omarchy and macOS. On
             ├── Unix socket (0600) ── localwebd ── systemd --user
  egui GUI ──┘                              │
  Browser ── HTTP 127.0.0.1:18000-18999 ────┤
-                                           ├── localweb-gateway :443 (HTTPS when free)
+                                           ├── localweb-gateway 127.0.0.2:443 (HTTPS, Linux default)
  Browser ── HTTPS/SNI ─────────────────────┤        │
                                            │        ├── nginx 127.0.0.1:<project port>
                                            │        └── Apache 127.0.0.1:<project port>

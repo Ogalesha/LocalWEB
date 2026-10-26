@@ -1,5 +1,5 @@
 use localweb_core::{
-    Cache, Database, LocalWebError, Paths, Project, Result, WebServer, atomic_write,
+    Cache, Database, LocalWebError, Paths, Profile, Project, Result, WebServer, atomic_write,
     runtime::RuntimeLayout,
 };
 use serde::{Deserialize, Serialize};
@@ -257,6 +257,17 @@ impl Services<'_> {
             Cache::None => {}
             Cache::Redis => {
                 RuntimeLayout::discover().redis()?;
+                if project.profile == Profile::Laravel
+                    && !composer_lock_has_package(&project.path, "predis/predis")
+                {
+                    self.require_php_module(&project.php, "redis")
+                        .map_err(|error| {
+                            LocalWebError::RuntimeNotInstalled(format!(
+                                "PHP {} lacks the redis extension required by this Laravel project; use a LocalWeb runtime that includes phpredis or add predis/predis to the project ({error})",
+                                project.php,
+                            ))
+                        })?;
+                }
             }
             Cache::Memcached => {
                 return Err(LocalWebError::Service(
@@ -1324,6 +1335,25 @@ impl Services<'_> {
     }
 }
 
+fn composer_lock_has_package(project_path: &Path, package: &str) -> bool {
+    let Ok(contents) = fs::read_to_string(project_path.join("composer.lock")) else {
+        return false;
+    };
+    let Ok(document) = serde_json::from_str::<serde_json::Value>(&contents) else {
+        return false;
+    };
+    ["packages", "packages-dev"].into_iter().any(|section| {
+        document
+            .get(section)
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|packages| {
+                packages.iter().any(|item| {
+                    item.get("name").and_then(serde_json::Value::as_str) == Some(package)
+                })
+            })
+    })
+}
+
 pub fn php_unit(version: &str) -> String {
     format!("localweb-php-{}", version.replace('.', "-"))
 }
@@ -1515,6 +1545,22 @@ fn safe_config_path(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detects_composer_packages_without_string_matching() {
+        let root =
+            std::env::temp_dir().join(format!("localweb-composer-lock-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("composer.lock"),
+            r#"{"packages":[{"name":"predis/predis"}],"packages-dev":[]}"#,
+        )
+        .unwrap();
+        assert!(composer_lock_has_package(&root, "predis/predis"));
+        assert!(!composer_lock_has_package(&root, "ext-redis"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn rejects_config_injection() {
         safe_config_path(Path::new("/tmp/evil\nlisten=0.0.0.0")).unwrap_err();

@@ -6,6 +6,29 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-10-26
+
+### Added
+
+- Gateway endpoint metadata in the daemon protocol and per-project public URLs, including the selected fallback port.
+- Doctor checks for gateway endpoint, standard-port ownership, CA trust and exact host mappings.
+- Automated WCAG AA text-contrast and 3:1 control/focus-contrast tests for the native GUI.
+
+### Changed
+
+- On Linux the HTTPS gateway now selects a dedicated loopback address such as `127.0.0.2:443`; exact LocalWeb domains map there while applications on `127.0.0.1:443` remain untouched. Ports 8443–8499 are now only a last-resort fallback.
+- Interactive GUI targets have a 44 px minimum and icon-only controls expose accessible names.
+- Supervisor workers use bounded `Restart=on-failure` behavior with at most five starts in 30 seconds.
+
+### Fixed
+
+- Project stop now cleans project-owned worker/cache/mail services even when persisted running state drifted.
+- Laravel projects configured for Redis fail early with an actionable PHP-extension diagnostic unless Composer provides `predis/predis`, preventing a broken queue worker restart loop.
+- Project and CLI views show the effective HTTPS URL instead of implying that port 443 is always available.
+- Portless `.dev` URLs no longer reach another local stack and receive its mismatched certificate when that stack owns `127.0.0.1:443`.
+- Project start now reports `HostMappingError` with the exact expected loopback address instead of logging a hidden warning and claiming the project is usable.
+- `localweb ca install` now updates the current user's NSS database used by Brave and Chromium on Linux; CA status and Doctor no longer report success when only command-line clients trust HTTPS.
+
 ## [0.1.2] - 2026-10-19
 
 ### Added

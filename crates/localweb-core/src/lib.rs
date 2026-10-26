@@ -46,6 +46,8 @@ pub enum LocalWebError {
     ProjectNotFound(String),
     #[error("hostname already assigned: {0}")]
     DomainConflict(String),
+    #[error("host mapping error: {0}")]
+    HostMapping(String),
     #[error("runtime is not installed: {0}")]
     RuntimeNotInstalled(String),
     #[error("service failed: {0}")]
@@ -63,6 +65,7 @@ impl LocalWebError {
             Self::Config(_) => "InvalidConfiguration",
             Self::ProjectNotFound(_) => "ProjectNotFound",
             Self::DomainConflict(_) => "DomainConflict",
+            Self::HostMapping(_) => "HostMappingError",
             Self::RuntimeNotInstalled(_) => "RuntimeNotInstalled",
             Self::Service(_) => "ServiceStartFailed",
             Self::Protocol(_) => "ProtocolError",
@@ -1255,11 +1258,21 @@ pub struct ExecutionSpec {
 
 /// State of the local development certificate authority.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the wire response exposes existence and two independent trust stores"
+)]
 pub struct CaStatus {
     /// Whether the CA certificate exists.
     pub exists: bool,
-    /// Whether the CA is present in the system trust store.
+    /// Whether every trust store needed by the current platform accepts the CA.
     pub trusted: bool,
+    /// Whether the CA is present in the operating-system trust store.
+    #[serde(default)]
+    pub system_trusted: bool,
+    /// Whether Chromium-family browsers accept the CA.
+    #[serde(default)]
+    pub browser_trusted: bool,
     /// Path of the CA certificate.
     pub certificate: PathBuf,
 }
@@ -1271,6 +1284,19 @@ pub struct Status {
     pub daemon_running: bool,
     /// Whether the HTTPS gateway unit is active.
     pub gateway_running: bool,
+    /// Dedicated IPv4 loopback address selected for the gateway.
+    ///
+    /// On Linux this is normally `127.0.0.2`, keeping `LocalWeb` independent
+    /// from applications already listening on `127.0.0.1`.
+    #[serde(default)]
+    pub gateway_bind_address: Option<std::net::Ipv4Addr>,
+    /// Planned or active loopback HTTPS port for the gateway.
+    ///
+    /// Port 443 is preferred on the dedicated address. A high port is selected
+    /// only when a standard binding is unavailable, so `LocalWeb` never stops
+    /// or rewrites an unrelated service.
+    #[serde(default)]
+    pub gateway_https_port: Option<u16>,
     /// Number of configured projects.
     pub project_count: usize,
     /// Number of projects currently running.
@@ -1287,6 +1313,10 @@ pub struct ProjectStatus {
     /// Mailpit web UI URL when the project has mail enabled.
     #[serde(default)]
     pub mail_web_url: Option<String>,
+    /// Public HTTPS URL through the `LocalWeb` gateway, including a fallback
+    /// port when the standard HTTPS port belongs to another application.
+    #[serde(default)]
+    pub public_url: Option<String>,
 }
 
 /// Hostname-to-upstream mapping served by the gateway.
@@ -1350,6 +1380,14 @@ mod tests {
         validate_domain("acme.dev").unwrap();
         validate_domain("bad..dev").unwrap_err();
         validate_domain("x.dev\n127.0.0.1 evil.dev").unwrap_err();
+    }
+
+    #[test]
+    fn host_mapping_error_has_a_stable_protocol_code() {
+        assert_eq!(
+            LocalWebError::HostMapping("indeks.dev".into()).code(),
+            "HostMappingError"
+        );
     }
 
     #[test]
@@ -1515,11 +1553,14 @@ mod tests {
             project,
             running: false,
             mail_web_url: None,
+            public_url: None,
         };
         let mut value = serde_json::to_value(&status).unwrap();
         value.as_object_mut().unwrap().remove("mail_web_url");
+        value.as_object_mut().unwrap().remove("public_url");
         let parsed: ProjectStatus = serde_json::from_value(value).unwrap();
         assert_eq!(parsed.mail_web_url, None);
+        assert_eq!(parsed.public_url, None);
         std::fs::remove_dir_all(path).unwrap();
     }
 }

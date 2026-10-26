@@ -71,9 +71,9 @@ pub const DANGER_SOFT: Color32 = Color32::from_rgb(251, 235, 236);
 // Structure.
 
 /// Hairline structure.
-pub const BORDER: Color32 = Color32::from_rgb(201, 212, 193);
+pub const BORDER: Color32 = Color32::from_rgb(116, 136, 119);
 /// Stronger hairline for hovered structure.
-pub const BORDER_STRONG: Color32 = Color32::from_rgb(175, 192, 166);
+pub const BORDER_STRONG: Color32 = Color32::from_rgb(73, 96, 78);
 /// Inactive status marks.
 pub const STATUS_OFF: Color32 = Color32::from_rgb(111, 128, 117);
 
@@ -136,7 +136,7 @@ pub fn configure_style(context: &egui::Context) {
     context.style_mut_of(egui::Theme::Light, |style| {
         style.spacing.item_spacing = egui::vec2(10.0, 8.0);
         style.spacing.button_padding = egui::vec2(14.0, 8.0);
-        style.spacing.interact_size.y = 38.0;
+        style.spacing.interact_size.y = 44.0;
         style.visuals.override_text_color = Some(INK);
         style
             .text_styles
@@ -156,6 +156,65 @@ pub fn configure_style(context: &egui::Context) {
             FontId::new(12.5, FontFamily::Monospace),
         );
     });
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::items_after_test_module,
+    reason = "contrast tests stay beside the public tokens they audit"
+)]
+mod tests {
+    use super::*;
+
+    fn luminance(color: Color32) -> f32 {
+        let channel = |value: u8| {
+            let value = f32::from(value) / 255.0;
+            if value <= 0.040_45 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(color.r()) + 0.7152 * channel(color.g()) + 0.0722 * channel(color.b())
+    }
+
+    fn contrast(a: Color32, b: Color32) -> f32 {
+        let (lighter, darker) = if luminance(a) >= luminance(b) {
+            (luminance(a), luminance(b))
+        } else {
+            (luminance(b), luminance(a))
+        };
+        (lighter + 0.05) / (darker + 0.05)
+    }
+
+    #[test]
+    fn text_pairs_meet_wcag_aa() {
+        for (foreground, background) in [
+            (INK, CANVAS),
+            (INK_MUTED, CANVAS),
+            (INK, SURFACE),
+            (NAV_MUTED, NAV),
+            (INK, ACCENT),
+            (Color32::WHITE, DANGER),
+            (ACCENT_TEXT, ACCENT_SOFT),
+            (DANGER, DANGER_SOFT),
+            (FOCUS, CANVAS),
+        ] {
+            assert!(
+                contrast(foreground, background) >= 4.5,
+                "contrast ratio was {}",
+                contrast(foreground, background)
+            );
+        }
+    }
+
+    #[test]
+    fn control_borders_and_focus_meet_three_to_one() {
+        assert!(contrast(BORDER, SURFACE) >= 3.0);
+        assert!(contrast(BORDER_STRONG, SURFACE) >= 3.0);
+        assert!(contrast(FOCUS, CANVAS) >= 3.0);
+        assert!(contrast(NAV_MUTED, NAV) >= 3.0);
+    }
 }
 
 fn install_fonts(context: &egui::Context) {

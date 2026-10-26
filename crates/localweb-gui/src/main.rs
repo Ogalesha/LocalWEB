@@ -1291,7 +1291,11 @@ impl LocalWebApp {
                             }
                         });
                         ui.add_space(2.0);
-                        ui.label(medium(&item.project.hostname).size(13.0).color(ACCENT_TEXT));
+                        ui.label(
+                            medium(item.public_url.as_deref().unwrap_or(&item.project.hostname))
+                                .size(13.0)
+                                .color(ACCENT_TEXT),
+                        );
                         ui.label(
                             RichText::new(format!(
                                 "PHP {} · {} · {}",
@@ -1366,7 +1370,13 @@ impl LocalWebApp {
                         egui::Layout::top_down(egui::Align::Min),
                         |ui| {
                             ui.set_min_width(150.0);
-                            ui.label(medium(&item.project.hostname).size(13.0).color(ACCENT_TEXT));
+                            ui.label(
+                                medium(
+                                    item.public_url.as_deref().unwrap_or(&item.project.hostname),
+                                )
+                                .size(13.0)
+                                .color(ACCENT_TEXT),
+                            );
                             let path = item.project.path.display().to_string();
                             ui.label(
                                 RichText::new(truncate_middle(&path, 20))
@@ -1449,6 +1459,7 @@ impl LocalWebApp {
         let details = if wide {
             Pill::new("", PillKind::Ghost)
                 .icon(Icon::ChevronDown)
+                .accessible_label(lang.project_details())
                 .height(36.0)
                 .show(ui)
                 .on_hover_text(lang.project_details())
@@ -1524,14 +1535,10 @@ impl LocalWebApp {
                 .show(ui)
                 .clicked()
             {
-                let gateway_running = self
-                    .status
-                    .as_ref()
-                    .is_some_and(|status| status.gateway_running);
                 open_browser(
                     &item.project.hostname,
                     item.project.web_port,
-                    gateway_running,
+                    item.public_url.as_deref(),
                     lang,
                     &mut self.notice,
                 );
@@ -1540,6 +1547,7 @@ impl LocalWebApp {
                 let mail = if wide {
                     Pill::new("", PillKind::Ghost)
                         .icon(Icon::Mail)
+                        .accessible_label("Mailpit")
                         .height(36.0)
                         .show(ui)
                         .on_hover_text("Mailpit")
@@ -2483,19 +2491,19 @@ impl DirectoryPicker {
                 ui.add_space(16.0);
                 ui.vertical(|ui| {
                     ui.horizontal(|ui| {
-                        if icon_button(ui, Icon::ChevronLeft, 36.0)
+                        if icon_button(ui, Icon::ChevronLeft, 36.0, lang.picker_back())
                             .on_hover_text(lang.picker_back())
                             .clicked()
                         {
                             self.go_back();
                         }
-                        if icon_button(ui, Icon::ChevronRight, 36.0)
+                        if icon_button(ui, Icon::ChevronRight, 36.0, lang.picker_forward())
                             .on_hover_text(lang.picker_forward())
                             .clicked()
                         {
                             self.go_forward();
                         }
-                        if icon_button(ui, Icon::ChevronUp, 36.0)
+                        if icon_button(ui, Icon::ChevronUp, 36.0, lang.picker_parent())
                             .on_hover_text(lang.picker_parent())
                             .clicked()
                         {
@@ -2810,7 +2818,7 @@ impl Notice {
                         }
                     });
                     ui.add_space(4.0);
-                    if icon_button(ui, Icon::Close, 36.0).clicked() {
+                    if icon_button(ui, Icon::Close, 36.0, lang.cancel()).clicked() {
                         dismissed = true;
                     }
                 });
@@ -2879,18 +2887,19 @@ fn child_directories(path: &Path) -> Result<Vec<PathBuf>, String> {
 fn open_browser(
     hostname: &str,
     web_port: Option<u16>,
-    gateway_running: bool,
+    public_url: Option<&str>,
     lang: Lang,
     notice: &mut Option<Notice>,
 ) {
-    let url = if gateway_running {
-        format!("https://{hostname}")
-    } else {
-        web_port.map_or_else(
-            || format!("https://{hostname}"),
-            |port| format!("http://127.0.0.1:{port}"),
-        )
-    };
+    let url = public_url.map_or_else(
+        || {
+            web_port.map_or_else(
+                || format!("https://{hostname}"),
+                |port| format!("http://127.0.0.1:{port}"),
+            )
+        },
+        str::to_owned,
+    );
     open_url(&url, lang, notice);
 }
 
@@ -3056,6 +3065,7 @@ mod tests {
             project,
             running: true,
             mail_web_url: None,
+            public_url: Some("https://connection.test:8443".into()),
         });
         app.handle_response(Action::RefreshStatus, Err("socket unavailable".into()));
         assert!(app.projects[0].running);
@@ -3103,6 +3113,7 @@ mod tests {
                 project: project.clone(),
                 running: false,
                 mail_web_url: None,
+                public_url: None,
             });
             let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(840.0, 560.0));
             let output = ctx.run_ui(

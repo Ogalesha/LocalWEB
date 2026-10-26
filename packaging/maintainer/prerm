@@ -57,6 +57,24 @@ case "${1:-}" in
         if command -v setcap >/dev/null 2>&1 && [ -e /usr/lib/localweb/localweb-gateway ]; then
             setcap -r /usr/lib/localweb/localweb-gateway 2>/dev/null || true
         fi
+
+        if [ -x /usr/bin/certutil ]; then
+            for registry in /var/lib/localweb/users/*.paths; do
+                [ -f "$registry" ] || continue
+                uid=${registry##*/}
+                uid=${uid%.paths}
+                case "$uid" in
+                    *[!0-9]*|'') continue ;;
+                esac
+                user=$(getent passwd "$uid" | cut -d: -f1)
+                user_home=$(getent passwd "$uid" | cut -d: -f6)
+                [ -n "$user" ] || continue
+                [ -f "$user_home/.pki/nssdb/cert9.db" ] || continue
+                runuser -u "$user" -- /usr/bin/certutil \
+                    -D -d "sql:$user_home/.pki/nssdb" \
+                    -n "LocalWeb Development CA" 2>/dev/null || true
+            done
+        fi
         ;;
 esac
 

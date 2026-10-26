@@ -85,7 +85,7 @@ Maintainer: LocalWeb <maintainers@localweb.invalid>
 Section: devel
 Priority: optional
 Installed-Size: $installed_size
-Depends: libc6 (>= 2.42), libgcc-s1, systemd, polkitd, ca-certificates, libcap2-bin, libx11-6, libxcb1, libxkbcommon0, libwayland-client0, libegl1, libgl1, xdg-utils
+Depends: libc6 (>= 2.42), libgcc-s1, systemd, polkitd, ca-certificates, libcap2-bin, libnss3-tools, libx11-6, libxcb1, libxkbcommon0, libwayland-client0, libegl1, libgl1, xdg-utils
 Description: Native local web development environment
  LocalWeb bundles nginx, Apache, PHP, Composer, MariaDB, MySQL, PostgreSQL,
  Redis, Node.js with npm/npx, and Mailpit.

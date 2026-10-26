@@ -44,7 +44,7 @@ brew install php@8.5 nginx httpd mariadb mysql postgresql@17 redis mailpit node 
 # 2. Build and install the package.
 cargo build --release --workspace
 sh packaging/macos/build-pkg.sh
-sudo installer -pkg dist/LocalWeb-0.1.2.pkg -target /
+sudo installer -pkg dist/LocalWeb-0.1.3.pkg -target /
 
 # 3. Per-user setup (each privileged step asks for an administrator password).
 localweb setup          # LaunchAgents, CA in ~/.local/share/localweb, path registry

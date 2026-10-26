@@ -286,8 +286,10 @@ mod linux {
             )),
             OsString::from("--property=NoNewPrivileges=yes"),
             OsString::from("--property=PrivateTmp=yes"),
-            OsString::from("--property=Restart=always"),
+            OsString::from("--property=Restart=on-failure"),
             OsString::from("--property=RestartSec=2s"),
+            OsString::from("--property=StartLimitIntervalSec=30s"),
+            OsString::from("--property=StartLimitBurst=5"),
             OsString::from("--property=KillMode=control-group"),
             OsString::from(format!("--setenv=LD_LIBRARY_PATH={library_path}")),
             OsString::from("--"),
@@ -317,6 +319,16 @@ mod linux {
                 arguments
                     .iter()
                     .any(|argument| argument == "queue:work; touch /tmp/unsafe")
+            );
+            assert!(
+                arguments
+                    .iter()
+                    .any(|argument| argument == "--property=Restart=on-failure")
+            );
+            assert!(
+                arguments
+                    .iter()
+                    .any(|argument| argument == "--property=StartLimitBurst=5")
             );
             assert!(
                 arguments

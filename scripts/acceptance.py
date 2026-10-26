@@ -16,6 +16,7 @@ import urllib.request
 
 binary_dir = Path(sys.argv[1]).resolve()
 mac = sys.platform == "darwin"
+gateway_address = "127.0.0.1" if mac else "127.0.0.2"
 base = Path(tempfile.mkdtemp(prefix="lw-accept-", dir=Path.home()))
 for name in ("config", "data", "state", "runtime"):
     (base / name).mkdir(mode=0o700)
@@ -87,7 +88,7 @@ try:
     mcp.wait(timeout=10)
     mcp = None
     domains = [f"php8-{minor}-{web}-{db}.test" for minor in range(6) for web in ("nginx", "apache") for db in ("mariadb", "mysql", "postgres", "sqlite")]
-    helper("sync-hosts", json.dumps(domains).encode())
+    helper("sync-hosts", json.dumps({"address": gateway_address, "domains": domains}).encode())
     ca = request("ca_status")
     certificate = Path(ca["certificate"]).read_bytes()
     try:
@@ -180,4 +181,4 @@ finally:
             request("shutdown")
         finally:
             daemon.wait(timeout=30)
-    helper("sync-hosts", b"[]")
+    helper("sync-hosts", json.dumps({"address": gateway_address, "domains": []}).encode())

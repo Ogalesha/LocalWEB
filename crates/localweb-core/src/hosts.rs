@@ -3,12 +3,29 @@
 //! All functions preserve content outside the managed marker pair and reject malformed blocks.
 
 use crate::{LocalWebError, Result, validate_domain};
-use std::collections::BTreeSet;
+use serde::{Deserialize, Serialize};
+use std::{collections::BTreeSet, net::Ipv4Addr};
 
 /// Starts the LocalWeb-owned hosts section.
 pub const BEGIN: &str = "# BEGIN LOCALWEB - DO NOT EDIT";
 /// Ends the LocalWeb-owned hosts section.
 pub const END: &str = "# END LOCALWEB";
+
+/// Stable gateway address used to isolate Linux from services on `127.0.0.1`.
+#[cfg(all(unix, not(target_os = "macos")))]
+pub const DEFAULT_GATEWAY_ADDRESS: Ipv4Addr = Ipv4Addr::new(127, 0, 0, 2);
+/// Default gateway address on platforms without Linux's dedicated loopback policy.
+#[cfg(any(not(unix), target_os = "macos"))]
+pub const DEFAULT_GATEWAY_ADDRESS: Ipv4Addr = Ipv4Addr::LOCALHOST;
+
+/// Strict payload accepted by the privileged helper when synchronizing hosts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostsSync {
+    /// Loopback address owned by the `LocalWeb` gateway.
+    pub address: Ipv4Addr,
+    /// Exact project hostnames that `LocalWeb` manages.
+    pub domains: Vec<String>,
+}
 
 /// Replaces the managed hosts section with exact loopback mappings.
 ///
@@ -19,6 +36,21 @@ pub const END: &str = "# END LOCALWEB";
 ///
 /// Returns an error for invalid hostnames or malformed `LocalWeb` marker pairs.
 pub fn transform_hosts(existing: &str, domains: &[String]) -> Result<String> {
+    transform_hosts_at(existing, Ipv4Addr::LOCALHOST, domains)
+}
+
+/// Replaces the managed hosts section with exact mappings to one loopback address.
+///
+/// # Errors
+///
+/// Returns an error for a non-loopback address, invalid hostnames, or malformed
+/// `LocalWeb` marker pairs.
+pub fn transform_hosts_at(existing: &str, address: Ipv4Addr, domains: &[String]) -> Result<String> {
+    if !address.is_loopback() {
+        return Err(LocalWebError::Config(format!(
+            "LocalWeb host mappings require an IPv4 loopback address, got {address}"
+        )));
+    }
     let mut names = BTreeSet::new();
     for domain in domains {
         validate_domain(domain)?;
@@ -28,7 +60,8 @@ pub fn transform_hosts(existing: &str, domains: &[String]) -> Result<String> {
     output.push_str(BEGIN);
     output.push('\n');
     for name in names {
-        output.push_str("127.0.0.1 ");
+        output.push_str(&address.to_string());
+        output.push(' ');
         output.push_str(name);
         output.push('\n');
     }
@@ -100,6 +133,20 @@ mod tests {
         transform_hosts("", &["a.dev\n0.0.0.0 evil.dev".into()]).unwrap_err();
         transform_hosts(BEGIN, &[]).unwrap_err();
         transform_hosts(END, &[]).unwrap_err();
+        transform_hosts_at("", Ipv4Addr::new(192, 0, 2, 1), &["safe.dev".into()]).unwrap_err();
+    }
+
+    #[test]
+    fn supports_a_dedicated_loopback_without_touching_other_entries() {
+        let original = "127.0.0.1 localhost\n127.0.0.1 external.test\n";
+        let result = transform_hosts_at(
+            original,
+            Ipv4Addr::new(127, 0, 0, 2),
+            &["indeks.dev".into()],
+        )
+        .unwrap();
+        assert!(result.contains("127.0.0.1 external.test\n"));
+        assert!(result.contains("127.0.0.2 indeks.dev\n"));
     }
 
     #[test]
