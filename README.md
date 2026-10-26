@@ -112,9 +112,9 @@ local-domain changes. Project services run as your desktop user.
 
 ## Add your first project
 
-In the desktop app, choose **Add project**, select an existing source
-folder, check its preset and document root, choose the runtime and services,
-then select **Add to LocalWeb**. The source files are kept where they are.
+In the desktop app, open **Add project**, select an existing source folder,
+check its preset and document root, choose the runtime and services, then
+confirm with **Add project**. The source files are kept where they are.
 Select **Start** to run the project and **Open** to visit it.
 
 For a terminal workflow:

@@ -23,15 +23,17 @@ use std::{
     time::{Duration, Instant},
 };
 use theme::{
-    ACCENT, ACCENT_SOFT, ACCENT_SOFT_PRESSED, ACCENT_TEXT, BORDER, BORDER_STRONG, CANVAS, DANGER,
-    DANGER_SOFT, FOCUS, INK, INK_MUTED, NAV, NAV_MUTED, RADIUS_CARD, RADIUS_CONTROL, RAIL_WIDTH,
-    STATUS_OFF, SUCCESS, SUCCESS_SOFT, SURFACE, SURFACE_HOVER, SURFACE_MUTED, WARNING,
-    configure_style, medium_family, strong_family,
+    ACCENT, ACCENT_SOFT, ACCENT_SOFT_PRESSED, ACCENT_TEXT, BANNER_TITLE_SIZE, BODY_SIZE, BORDER,
+    BORDER_STRONG, CANVAS, DANGER, DANGER_SOFT, FOCUS, INK, INK_MUTED, LABEL_SIZE, MONO_SIZE, NAV,
+    NAV_MUTED, RADIUS_CARD, RADIUS_CONTROL, RAIL_WIDTH, SECTION_TITLE_SIZE, SMALL_SIZE, STATUS_OFF,
+    SUCCESS, SUCCESS_SOFT, SURFACE, SURFACE_HOVER, SURFACE_MUTED, WARNING, configure_style,
+    medium_family, strong_family,
 };
 use widgets::{
-    Pill, PillKind, callout, card_frame, check_row, empty_card, focus_ring, form_label,
-    icon_button, icon_tile, medium, page_header, rail_item, raised_frame, section_heading,
-    service_chip, state_chip, status_mark, strong, truncate_middle,
+    CalloutKind, Pill, PillKind, callout, card_frame, check_row, empty_card, focus_ring,
+    form_label, icon_button, icon_tile, medium, multi_line_field, page_header, rail_item,
+    raised_frame, section_heading, service_chip, single_line_field, state_chip,
+    state_chip_with_note, status_mark, strong, truncate_middle,
 };
 
 #[global_allocator]
@@ -67,7 +69,7 @@ fn main() -> eframe::Result {
     )
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum View {
     Dashboard,
     Projects,
@@ -530,7 +532,7 @@ impl LocalWebApp {
                     ui.add_space(6.0);
                     ui.label(
                         RichText::new("LocalWeb")
-                            .size(21.0)
+                            .size(BANNER_TITLE_SIZE)
                             .family(strong_family())
                             .color(Color32::WHITE),
                     );
@@ -632,7 +634,7 @@ impl LocalWebApp {
                                     STATUS_OFF
                                 },
                             );
-                            ui.label(medium(status_label).size(12.5).color(
+                            ui.label(medium(status_label).size(SMALL_SIZE).color(
                                 if self.daemon_online {
                                     Color32::WHITE
                                 } else {
@@ -644,7 +646,7 @@ impl LocalWebApp {
                         ui.add(
                             egui::Label::new(
                                 RichText::new(lang.nav_close_note())
-                                    .size(12.0)
+                                    .size(SMALL_SIZE)
                                     .color(NAV_MUTED),
                             )
                             .wrap(),
@@ -667,7 +669,7 @@ impl LocalWebApp {
             )
             .icon(Icon::Stop)
             .min_width(158.0)
-            .height(40.0)
+            .height(theme::COMMAND_HEIGHT)
             .enabled(self.pending == 0 && !stopping)
             .show(ui)
             .on_hover_text(lang.stop_hint());
@@ -680,17 +682,17 @@ impl LocalWebApp {
                 }
             }
         } else {
-            let label = match self.daemon_transition {
-                Some(DaemonTransition::Setup) => lang.op_setup(),
-                Some(DaemonTransition::Starting) => lang.op_starting(),
-                Some(DaemonTransition::Stopping) => lang.op_stopping(),
-                None if self.setup_complete() => lang.start_localweb(),
-                None => lang.configure_localweb(),
+            let (label, icon) = match self.daemon_transition {
+                Some(DaemonTransition::Setup) => (lang.op_setup(), Icon::Settings),
+                Some(DaemonTransition::Starting) => (lang.op_starting(), Icon::Play),
+                Some(DaemonTransition::Stopping) => (lang.op_stopping(), Icon::Stop),
+                None if self.setup_complete() => (lang.start_localweb(), Icon::Play),
+                None => (lang.configure_localweb(), Icon::Settings),
             };
             let response = Pill::new(label, PillKind::Primary)
-                .icon(Icon::Play)
+                .icon(icon)
                 .min_width(158.0)
-                .height(40.0)
+                .height(theme::COMMAND_HEIGHT)
                 .enabled(
                     self.connection != Connection::Checking
                         && self.pending == 0
@@ -780,7 +782,11 @@ impl LocalWebApp {
         self.environment_overview(ui);
 
         ui.add_space(26.0);
-        ui.label(strong(lang.nav_projects()).size(19.0).color(INK));
+        ui.label(
+            strong(lang.nav_projects())
+                .size(SECTION_TITLE_SIZE)
+                .color(INK),
+        );
         ui.add_space(12.0);
         if !self.projects_loaded {
             ui.label(if self.daemon_online {
@@ -819,7 +825,7 @@ impl LocalWebApp {
         if self.daemon_online
             && let Some(error) = &self.ca_error
         {
-            ui.label(lang.ca_load_failed());
+            ui.colored_label(DANGER, lang.ca_load_failed());
             ui.collapsing(lang.technical_details(), |ui| {
                 ui.label(error);
             });
@@ -872,10 +878,12 @@ impl LocalWebApp {
                     ui.allocate_ui(Vec2::new(text_width, 0.0), |ui| {
                         ui.set_min_width(text_width);
                         ui.vertical(|ui| {
-                            ui.label(strong(title).size(22.0).color(INK));
+                            ui.label(strong(title).size(BANNER_TITLE_SIZE).color(INK));
                             ui.add(
-                                egui::Label::new(RichText::new(body).size(13.5).color(INK_MUTED))
-                                    .wrap(),
+                                egui::Label::new(
+                                    RichText::new(body).size(BODY_SIZE).color(INK_MUTED),
+                                )
+                                .wrap(),
                             );
                         });
                     });
@@ -886,7 +894,7 @@ impl LocalWebApp {
                     } else if ca_installable {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if Pill::new(lang.install_ca(), PillKind::Primary)
-                                .icon(Icon::Check)
+                                .icon(Icon::Download)
                                 .height(36.0)
                                 .show(ui)
                                 .clicked()
@@ -913,7 +921,7 @@ impl LocalWebApp {
         );
         ui.add_space(22.0);
         if !self.daemon_online {
-            callout(ui, Icon::Warning, |ui| {
+            callout(ui, CalloutKind::Warning, Icon::Warning, |ui| {
                 ui.vertical(|ui| {
                     ui.label(strong(if self.connection == Connection::Checking {
                         lang.checking_status()
@@ -930,7 +938,7 @@ impl LocalWebApp {
         if !self.projects_loaded {
             if self.daemon_online {
                 if let Some(error) = &self.projects_error {
-                    ui.label(lang.projects_load_failed());
+                    ui.colored_label(DANGER, lang.projects_load_failed());
                     ui.collapsing(lang.technical_details(), |ui| {
                         ui.label(error);
                     });
@@ -941,7 +949,7 @@ impl LocalWebApp {
             return;
         }
         if let Some(error) = &self.projects_error {
-            ui.label(lang.projects_load_failed());
+            ui.colored_label(DANGER, lang.projects_load_failed());
             ui.collapsing(lang.technical_details(), |ui| {
                 ui.label(error);
             });
@@ -953,7 +961,7 @@ impl LocalWebApp {
                 .show(ui, |ui| {
                     let label = ui.label(
                         RichText::new(lang.search_projects())
-                            .size(12.0)
+                            .size(SMALL_SIZE)
                             .color(INK_MUTED),
                     );
                     ui.horizontal(|ui| {
@@ -1032,7 +1040,7 @@ impl LocalWebApp {
 
     fn settings(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang;
-        self.page_toolbar(ui, lang.nav_settings(), false, false);
+        self.page_toolbar(ui, lang.nav_settings(), false, self.daemon_online);
         ui.add_space(22.0);
         self.settings_mcp(ui);
         ui.add_space(24.0);
@@ -1042,7 +1050,7 @@ impl LocalWebApp {
         ui.add_space(20.0);
         ui.label(
             RichText::new(format!("LocalWeb {}", env!("CARGO_PKG_VERSION")))
-                .size(11.5)
+                .size(SMALL_SIZE)
                 .color(INK_MUTED),
         );
     }
@@ -1062,21 +1070,24 @@ impl LocalWebApp {
                     }
                     ui.add_space(4.0);
                     ui.vertical(|ui| {
-                        ui.label(strong("localweb-mcp").size(15.0).color(INK));
+                        ui.label(strong("localweb-mcp").size(BODY_SIZE).color(INK));
                         if let Some(path) = &self.mcp_path {
                             let path = path.display().to_string();
-                            ui.label(
-                                RichText::new(truncate_middle(&path, 58))
-                                    .monospace()
-                                    .size(11.5)
-                                    .color(INK_MUTED),
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(truncate_middle(&path, 58))
+                                        .monospace()
+                                        .size(MONO_SIZE)
+                                        .color(INK_MUTED),
+                                )
+                                .truncate(),
                             )
                             .on_hover_text(&path);
                         } else {
                             ui.add(
                                 egui::Label::new(
                                     RichText::new(lang.settings_mcp_missing())
-                                        .size(12.5)
+                                        .size(SMALL_SIZE)
                                         .color(DANGER),
                                 )
                                 .wrap(),
@@ -1095,7 +1106,7 @@ impl LocalWebApp {
                         ui.label(
                             RichText::new(mcp_configuration())
                                 .monospace()
-                                .size(12.0)
+                                .size(MONO_SIZE)
                                 .color(INK),
                         );
                     });
@@ -1154,7 +1165,7 @@ impl LocalWebApp {
                             } else {
                                 format!(".{suffix}")
                             })
-                            .size(13.5)
+                            .size(LABEL_SIZE)
                             .color(INK),
                         );
                         ui.end_row();
@@ -1163,27 +1174,30 @@ impl LocalWebApp {
                         ui.label(
                             RichText::new(example)
                                 .monospace()
-                                .size(12.5)
+                                .size(MONO_SIZE)
                                 .color(ACCENT_TEXT),
                         );
                         ui.end_row();
 
                         settings_label(ui, lang.settings_defaults());
-                        ui.label(RichText::new(defaults).size(13.0).color(INK));
+                        ui.label(RichText::new(defaults).size(LABEL_SIZE).color(INK));
                         ui.end_row();
 
                         settings_label(ui, lang.settings_config_folder());
                         if let Some(paths) = &self.paths {
                             let path = paths.config.display().to_string();
-                            ui.label(
-                                RichText::new(truncate_middle(&path, 54))
-                                    .monospace()
-                                    .size(11.5)
-                                    .color(INK_MUTED),
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(truncate_middle(&path, 54))
+                                        .monospace()
+                                        .size(MONO_SIZE)
+                                        .color(INK_MUTED),
+                                )
+                                .truncate(),
                             )
                             .on_hover_text(path);
                         } else {
-                            ui.label(RichText::new("—").size(13.0).color(INK_MUTED));
+                            ui.label(RichText::new("—").size(LABEL_SIZE).color(INK_MUTED));
                         }
                         ui.end_row();
                     });
@@ -1192,7 +1206,7 @@ impl LocalWebApp {
 
     fn settings_maintenance(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang;
-        ui.label(strong(lang.advanced()).size(18.0).color(INK));
+        section_heading(ui, lang.maintenance_title(), lang.maintenance_body());
         ui.add_space(10.0);
         card_frame()
             .inner_margin(egui::Margin::symmetric(20, 18))
@@ -1218,6 +1232,7 @@ impl LocalWebApp {
                         self.sync_hosts();
                     }
                     if Pill::new(lang.repair_setup(), PillKind::Secondary)
+                        .icon(Icon::Settings)
                         .height(36.0)
                         .enabled(self.pending == 0)
                         .show(ui)
@@ -1229,6 +1244,10 @@ impl LocalWebApp {
             });
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "wide and stacked ledger share one row implementation"
+    )]
     fn project_ledger(&mut self, ui: &mut egui::Ui, items: &[ProjectStatus]) {
         let lang = self.lang;
         if ui.available_width() >= 940.0 {
@@ -1269,13 +1288,20 @@ impl LocalWebApp {
                 let previous: bool = ui.data(|data| data.get_temp(hover_id).unwrap_or(false));
                 let tint = ui.ctx().animate_bool_with_time(hover_id, previous, 0.15);
                 let fill = SURFACE.lerp_to_gamma(SURFACE_HOVER, tint);
+                let transition = self
+                    .project_transition
+                    .as_ref()
+                    .filter(|(name, _)| name == &item.project.name)
+                    .map(|(_, transition)| *transition);
                 let inner = card_frame()
                     .fill(fill)
                     .inner_margin(egui::Margin::symmetric(18, 16))
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
-                            ui.label(strong(&item.project.name).size(15.0).color(INK));
-                            if self.daemon_online {
+                            ui.label(strong(&item.project.name).size(BODY_SIZE).color(INK));
+                            if let Some(transition) = transition {
+                                transition_status(ui, lang, transition);
+                            } else if self.daemon_online {
                                 state_chip(
                                     ui,
                                     item.running,
@@ -1283,19 +1309,26 @@ impl LocalWebApp {
                                     lang.badge_stopped(),
                                 );
                             } else {
-                                ui.label(
-                                    RichText::new(lang.last_known_state())
-                                        .size(12.0)
-                                        .color(INK_MUTED),
+                                state_chip_with_note(
+                                    ui,
+                                    item.running,
+                                    lang.badge_active(),
+                                    lang.badge_stopped(),
+                                    lang.last_known_state(),
                                 );
                             }
                         });
                         ui.add_space(2.0);
-                        ui.label(
-                            medium(item.public_url.as_deref().unwrap_or(&item.project.hostname))
-                                .size(13.0)
-                                .color(ACCENT_TEXT),
-                        );
+                        let domain = item.public_url.as_deref().unwrap_or(&item.project.hostname);
+                        ui.add(
+                            egui::Label::new(
+                                medium(truncate_middle(domain, 56))
+                                    .size(LABEL_SIZE)
+                                    .color(ACCENT_TEXT),
+                            )
+                            .truncate(),
+                        )
+                        .on_hover_text(domain);
                         ui.label(
                             RichText::new(format!(
                                 "PHP {} · {} · {}",
@@ -1303,13 +1336,13 @@ impl LocalWebApp {
                                 web_label(item.project.web_server),
                                 lang.database_name(item.project.database)
                             ))
-                            .size(12.5)
+                            .size(SMALL_SIZE)
                             .color(INK_MUTED),
                         );
                         let path = item.project.path.display().to_string();
                         ui.label(
                             RichText::new(truncate_middle(&path, 56))
-                                .size(12.0)
+                                .size(MONO_SIZE)
                                 .color(INK_MUTED)
                                 .monospace(),
                         )
@@ -1360,7 +1393,7 @@ impl LocalWebApp {
                                     item.project.php,
                                     web_label(item.project.web_server)
                                 ))
-                                .size(12.0)
+                                .size(SMALL_SIZE)
                                 .color(INK_MUTED),
                             );
                         },
@@ -1370,17 +1403,21 @@ impl LocalWebApp {
                         egui::Layout::top_down(egui::Align::Min),
                         |ui| {
                             ui.set_min_width(150.0);
-                            ui.label(
-                                medium(
-                                    item.public_url.as_deref().unwrap_or(&item.project.hostname),
+                            let domain =
+                                item.public_url.as_deref().unwrap_or(&item.project.hostname);
+                            ui.add(
+                                egui::Label::new(
+                                    medium(truncate_middle(domain, 24))
+                                        .size(LABEL_SIZE)
+                                        .color(ACCENT_TEXT),
                                 )
-                                .size(13.0)
-                                .color(ACCENT_TEXT),
-                            );
+                                .truncate(),
+                            )
+                            .on_hover_text(domain);
                             let path = item.project.path.display().to_string();
                             ui.label(
                                 RichText::new(truncate_middle(&path, 20))
-                                    .size(12.0)
+                                    .size(MONO_SIZE)
                                     .color(INK_MUTED)
                                     .monospace(),
                             )
@@ -1392,8 +1429,10 @@ impl LocalWebApp {
                         egui::Layout::top_down(egui::Align::Min),
                         |ui| {
                             ui.set_min_width(108.0);
-                            ui.label(medium(lang.database_name(item.project.database)).size(13.0));
-                            ui.label(RichText::new(cache).size(12.0).color(INK_MUTED));
+                            ui.label(
+                                medium(lang.database_name(item.project.database)).size(LABEL_SIZE),
+                            );
+                            ui.label(RichText::new(cache).size(SMALL_SIZE).color(INK_MUTED));
                         },
                     );
                     ui.allocate_ui_with_layout(
@@ -1407,24 +1446,7 @@ impl LocalWebApp {
                                 .filter(|(name, _)| name == &item.project.name)
                                 .map(|(_, transition)| *transition);
                             if let Some(transition) = transition {
-                                ui.horizontal(|ui| {
-                                    ui.spinner();
-                                    ui.label(
-                                        RichText::new(match transition {
-                                            ProjectTransition::Starting => {
-                                                lang.transition_starting()
-                                            }
-                                            ProjectTransition::Stopping => {
-                                                lang.transition_stopping()
-                                            }
-                                            ProjectTransition::Restarting => {
-                                                lang.transition_restarting()
-                                            }
-                                        })
-                                        .size(12.0)
-                                        .color(INK_MUTED),
-                                    );
-                                });
+                                transition_status(ui, lang, transition);
                             } else if self.daemon_online {
                                 state_chip(
                                     ui,
@@ -1433,11 +1455,13 @@ impl LocalWebApp {
                                     lang.badge_stopped(),
                                 );
                             } else {
-                                ui.label(
-                                    RichText::new(lang.last_known_state())
-                                        .size(12.0)
-                                        .color(INK_MUTED),
-                                );
+                                state_chip(
+                                    ui,
+                                    item.running,
+                                    lang.badge_active(),
+                                    lang.badge_stopped(),
+                                )
+                                .on_hover_text(lang.last_known_state());
                             }
                         },
                     );
@@ -1456,16 +1480,22 @@ impl LocalWebApp {
     )]
     fn project_actions(&mut self, ui: &mut egui::Ui, item: &ProjectStatus, wide: bool) {
         let lang = self.lang;
+        let expanded = self.details.as_deref() == Some(&item.project.name);
+        let chevron = if expanded {
+            Icon::ChevronUp
+        } else {
+            Icon::ChevronDown
+        };
         let details = if wide {
             Pill::new("", PillKind::Ghost)
-                .icon(Icon::ChevronDown)
+                .icon(chevron)
                 .accessible_label(lang.project_details())
                 .height(36.0)
                 .show(ui)
                 .on_hover_text(lang.project_details())
         } else {
             Pill::new(lang.project_details(), PillKind::Ghost)
-                .icon(Icon::ChevronDown)
+                .icon(chevron)
                 .height(36.0)
                 .show(ui)
         };
@@ -1481,19 +1511,9 @@ impl LocalWebApp {
         if !self.daemon_online {
             return;
         }
-        if let Some((name, transition)) = &self.project_transition
+        if let Some((name, _)) = &self.project_transition
             && name == &item.project.name
         {
-            ui.spinner();
-            ui.label(
-                RichText::new(match transition {
-                    ProjectTransition::Starting => lang.transition_starting(),
-                    ProjectTransition::Stopping => lang.transition_stopping(),
-                    ProjectTransition::Restarting => lang.transition_restarting(),
-                })
-                .size(12.0)
-                .color(INK_MUTED),
-            );
             return;
         }
         if item.running {
@@ -1593,7 +1613,7 @@ impl LocalWebApp {
                 lang.profile_name(project.profile),
                 project.document_root.display()
             ))
-            .size(12.5)
+            .size(SMALL_SIZE)
             .color(INK_MUTED),
         );
         ui.label(
@@ -1601,7 +1621,7 @@ impl LocalWebApp {
                 "Node.js {} · Composer {}",
                 project.node, project.composer
             ))
-            .size(12.5)
+            .size(SMALL_SIZE)
             .color(INK_MUTED),
         );
         ui.label(
@@ -1611,7 +1631,7 @@ impl LocalWebApp {
                 project.mail,
                 project.autostart,
             ))
-            .size(12.5)
+            .size(SMALL_SIZE)
             .color(INK_MUTED),
         );
         ui.label(
@@ -1624,7 +1644,7 @@ impl LocalWebApp {
                     .database_port
                     .map_or_else(|| "-".to_owned(), |port| port.to_string()),
             ))
-            .size(12.5)
+            .size(SMALL_SIZE)
             .color(INK_MUTED),
         );
         ui.add_space(8.0);
@@ -1645,7 +1665,7 @@ impl LocalWebApp {
         } else if let Some(values) = &self.environment {
             ui.label(
                 RichText::new(lang.environment_help())
-                    .size(12.5)
+                    .size(SMALL_SIZE)
                     .color(INK_MUTED),
             );
             let mut dotenv = String::new();
@@ -1679,7 +1699,7 @@ impl LocalWebApp {
         } else if let Some(error) = &self.environment_error {
             ui.label(
                 RichText::new(lang.environment_failed())
-                    .size(12.5)
+                    .size(SMALL_SIZE)
                     .color(DANGER),
             );
             ui.collapsing(lang.technical_details(), |ui| {
@@ -1710,10 +1730,10 @@ impl LocalWebApp {
 
     fn add_project(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang;
-        self.page_toolbar(ui, lang.add_title(), false, false);
+        self.page_toolbar(ui, lang.add_title(), false, self.daemon_online);
         ui.add_space(22.0);
         if !self.daemon_online {
-            callout(ui, Icon::Warning, |ui| {
+            callout(ui, CalloutKind::Warning, Icon::Warning, |ui| {
                 ui.vertical(|ui| {
                     ui.label(strong(if self.connection == Connection::Checking {
                         lang.checking_status()
@@ -1734,7 +1754,7 @@ impl LocalWebApp {
         ui.add_space(16.0);
         ui.horizontal(|ui| {
             if Pill::new(lang.cancel(), PillKind::Ghost)
-                .height(40.0)
+                .height(theme::COMMAND_HEIGHT)
                 .show(ui)
                 .clicked()
             {
@@ -1743,7 +1763,7 @@ impl LocalWebApp {
             }
             submit = Pill::new(lang.create_project(), PillKind::Primary)
                 .icon(Icon::Check)
-                .height(40.0)
+                .height(theme::COMMAND_HEIGHT)
                 .min_width(150.0)
                 .enabled(self.pending == 0)
                 .show(ui)
@@ -1763,7 +1783,7 @@ impl LocalWebApp {
             let anchored = error == lang.error_no_path() || error == lang.error_no_executable();
             if !anchored {
                 ui.add_space(10.0);
-                callout(ui, Icon::Warning, |ui| {
+                callout(ui, CalloutKind::Danger, Icon::Warning, |ui| {
                     ui.label(strong(format!("{}: {error}", lang.check_form())).color(DANGER));
                 });
             }
@@ -1785,14 +1805,9 @@ impl LocalWebApp {
                 .show(ui, |ui| {
                     let label = form_label(ui, lang.path_label());
                     ui.horizontal(|ui| {
-                        let response = ui
-                            .add(
-                                egui::TextEdit::singleline(&mut self.form.path)
-                                    .margin(egui::Margin::symmetric(10, 8))
-                                    .desired_width(field_width)
-                                    .hint_text("~/Code/acme"),
-                            )
-                            .labelled_by(label.id);
+                        let response =
+                            single_line_field(ui, &mut self.form.path, field_width, "~/Code/acme")
+                                .labelled_by(label.id);
                         if response.lost_focus() {
                             let path = self.form.source_path();
                             if path.is_dir() {
@@ -1813,35 +1828,27 @@ impl LocalWebApp {
                     ui.end_row();
                     if self.form.error.as_deref() == Some(lang.error_no_path()) {
                         ui.label("");
-                        ui.label(RichText::new(lang.error_no_path()).size(12.0).color(DANGER));
+                        ui.label(
+                            RichText::new(lang.error_no_path())
+                                .size(SMALL_SIZE)
+                                .color(DANGER),
+                        );
                         ui.end_row();
                     }
 
                     let label = form_label(ui, lang.name_label());
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.form.name)
-                            .margin(egui::Margin::symmetric(10, 8))
-                            .desired_width(field_width),
-                    )
-                    .labelled_by(label.id);
+                    single_line_field(ui, &mut self.form.name, field_width, "")
+                        .labelled_by(label.id);
                     ui.end_row();
 
                     let label = form_label(ui, lang.host_label());
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.form.hostname)
-                            .margin(egui::Margin::symmetric(10, 8))
-                            .desired_width(field_width),
-                    )
-                    .labelled_by(label.id);
+                    single_line_field(ui, &mut self.form.hostname, field_width, "")
+                        .labelled_by(label.id);
                     ui.end_row();
 
-                    let label = form_label(ui, Lang::docroot_label());
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.form.document_root)
-                            .margin(egui::Margin::symmetric(10, 8))
-                            .desired_width(field_width),
-                    )
-                    .labelled_by(label.id);
+                    let label = form_label(ui, lang.docroot_label());
+                    single_line_field(ui, &mut self.form.document_root, field_width, "")
+                        .labelled_by(label.id);
                     ui.end_row();
 
                     let label = form_label(ui, lang.profile_label());
@@ -1946,7 +1953,7 @@ impl LocalWebApp {
             .labelled_by(label.id);
         ui.end_row();
 
-        let label = form_label(ui, "Database");
+        let label = form_label(ui, lang.database_label());
         egui::ComboBox::from_id_salt("database")
             .width(field_width)
             .selected_text(lang.database_name(self.form.database))
@@ -1961,7 +1968,7 @@ impl LocalWebApp {
             .labelled_by(label.id);
         ui.end_row();
 
-        let label = form_label(ui, "Cache");
+        let label = form_label(ui, lang.cache_label());
         egui::ComboBox::from_id_salt("cache")
             .width(field_width)
             .selected_text(lang.cache_name(self.form.cache))
@@ -2017,13 +2024,13 @@ impl LocalWebApp {
     fn custom_supervisor_fields(&mut self, ui: &mut egui::Ui, field_width: f32) {
         let lang = self.lang;
         let label = form_label(ui, lang.supervisor_executable());
-        let response = ui
-            .add(
-                egui::TextEdit::singleline(&mut self.form.supervisor_command)
-                    .desired_width(field_width)
-                    .hint_text(lang.supervisor_executable_hint()),
-            )
-            .labelled_by(label.id);
+        let response = single_line_field(
+            ui,
+            &mut self.form.supervisor_command,
+            field_width,
+            lang.supervisor_executable_hint(),
+        )
+        .labelled_by(label.id);
         if response.changed() {
             self.form.error = None;
         }
@@ -2032,7 +2039,7 @@ impl LocalWebApp {
             ui.label("");
             ui.label(
                 RichText::new(lang.error_no_executable())
-                    .size(12.0)
+                    .size(SMALL_SIZE)
                     .color(DANGER),
             );
             ui.end_row();
@@ -2040,16 +2047,17 @@ impl LocalWebApp {
 
         let label = form_label(ui, lang.supervisor_args());
         ui.vertical(|ui| {
-            ui.add(
-                egui::TextEdit::multiline(&mut self.form.supervisor_args)
-                    .desired_width(field_width)
-                    .desired_rows(4)
-                    .hint_text(lang.supervisor_args_hint()),
+            multi_line_field(
+                ui,
+                &mut self.form.supervisor_args,
+                field_width,
+                4,
+                lang.supervisor_args_hint(),
             )
             .labelled_by(label.id);
             ui.label(
                 RichText::new(lang.supervisor_args_note())
-                    .size(11.0)
+                    .size(SMALL_SIZE)
                     .color(INK_MUTED),
             );
         });
@@ -2066,16 +2074,21 @@ impl LocalWebApp {
         }
         let label = form_label(ui, lang.cron_lines());
         ui.vertical(|ui| {
-            ui.add(
-                egui::TextEdit::multiline(&mut self.form.cron_lines)
-                    .desired_width(field_width)
-                    .desired_rows(3)
-                    .hint_text("*/5 * * * * @php artisan schedule:run"),
+            multi_line_field(
+                ui,
+                &mut self.form.cron_lines,
+                field_width,
+                3,
+                "*/5 * * * * @php artisan schedule:run",
             )
             .labelled_by(label.id);
             ui.add(
-                egui::Label::new(RichText::new(lang.cron_note()).size(11.0).color(INK_MUTED))
-                    .wrap(),
+                egui::Label::new(
+                    RichText::new(lang.cron_note())
+                        .size(SMALL_SIZE)
+                        .color(INK_MUTED),
+                )
+                .wrap(),
             );
         });
         ui.end_row();
@@ -2106,7 +2119,7 @@ impl LocalWebApp {
             return;
         };
         let modal = egui::Modal::new(egui::Id::new("remove_project")).show(context, |ui| {
-            ui.label(strong(lang.remove_title()).size(18.0));
+            ui.label(strong(lang.remove_title()).size(SECTION_TITLE_SIZE));
             ui.add_space(4.0);
             ui.label(RichText::new(lang.remove_body(&name)).color(INK_MUTED));
             ui.add_space(14.0);
@@ -2143,7 +2156,7 @@ impl LocalWebApp {
         }
         let lang = self.lang;
         let modal = egui::Modal::new(egui::Id::new("stop_localweb")).show(context, |ui| {
-            ui.label(strong(lang.stop_localweb()).size(18.0));
+            ui.label(strong(lang.stop_localweb()).size(SECTION_TITLE_SIZE));
             ui.add_space(4.0);
             ui.label(RichText::new(lang.stop_hint()).color(INK_MUTED));
             ui.add_space(14.0);
@@ -2482,7 +2495,7 @@ impl DirectoryPicker {
         let mut accept = false;
         let modal = egui::Modal::new(egui::Id::new("source_folder_picker")).show(context, |ui| {
             ui.set_width(context.viewport_rect().width().min(760.0) - 40.0);
-            ui.label(strong(lang.picker_title()).size(18.0));
+            ui.label(strong(lang.picker_title()).size(SECTION_TITLE_SIZE));
             ui.add_space(10.0);
             ui.horizontal_top(|ui| {
                 if let Some(path) = self.places_sidebar(ui, lang) {
@@ -2588,21 +2601,18 @@ impl DirectoryPicker {
             let count = segments.len();
             for (index, (path, label)) in segments.into_iter().enumerate() {
                 if index > 0 {
-                    ui.label(RichText::new("/").size(13.0).color(BORDER));
+                    ui.label(RichText::new("/").size(LABEL_SIZE).color(BORDER));
                 }
                 if index + 1 == count {
                     ui.label(
                         RichText::new(label)
-                            .size(13.5)
+                            .size(LABEL_SIZE)
                             .color(INK)
                             .family(strong_family()),
                     );
-                } else if ui
-                    .add(
-                        egui::Label::new(RichText::new(label).size(13.5).color(INK_MUTED))
-                            .sense(egui::Sense::click()),
-                    )
-                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                } else if Pill::new(&label, PillKind::Ghost)
+                    .height(36.0)
+                    .show(ui)
                     .on_hover_text(path.display().to_string())
                     .clicked()
                 {
@@ -2699,8 +2709,10 @@ fn picker_row(
     selected: bool,
     icon: Option<Icon>,
 ) -> egui::Response {
-    let (rect, response) =
-        ui.allocate_exact_size(Vec2::new(ui.available_width(), 32.0), egui::Sense::click());
+    let (rect, response) = ui.allocate_exact_size(
+        Vec2::new(ui.available_width(), theme::COMPACT_CONTROL_HEIGHT),
+        egui::Sense::click(),
+    );
     let pressed = response.is_pointer_button_down_on();
     let t = ui.ctx().animate_bool_with_time(
         response.id.with("hover"),
@@ -2738,13 +2750,16 @@ fn picker_row(
             egui::pos2(label_left, rect.center().y),
             egui::Align2::LEFT_CENTER,
             picker_ellipsize(label, 52),
-            egui::FontId::new(13.5, medium_family()),
+            egui::FontId::new(LABEL_SIZE, medium_family()),
             if selected { ACCENT_TEXT } else { INK },
         );
         if response.has_focus() {
             focus_ring(ui, rect, FOCUS);
         }
     }
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Button, true, selected, label.to_owned())
+    });
     response
 }
 
@@ -2803,22 +2818,24 @@ impl Notice {
                     ui.vertical(|ui| {
                         ui.set_max_width(280.0);
                         if self.error {
-                            ui.label(strong(lang.operation_failed()).size(13.5).color(INK));
+                            ui.label(strong(lang.operation_failed()).size(LABEL_SIZE).color(INK));
                             ui.add(
                                 egui::Label::new(
-                                    RichText::new(&self.text).size(12.5).color(INK_MUTED),
+                                    RichText::new(&self.text).size(SMALL_SIZE).color(INK_MUTED),
                                 )
                                 .wrap(),
                             );
                         } else {
                             ui.add(
-                                egui::Label::new(RichText::new(&self.text).size(13.0).color(INK))
-                                    .wrap(),
+                                egui::Label::new(
+                                    RichText::new(&self.text).size(LABEL_SIZE).color(INK),
+                                )
+                                .wrap(),
                             );
                         }
                     });
                     ui.add_space(4.0);
-                    if icon_button(ui, Icon::Close, 36.0, lang.cancel()).clicked() {
+                    if icon_button(ui, Icon::Close, 36.0, lang.dismiss()).clicked() {
                         dismissed = true;
                     }
                 });
@@ -2829,7 +2846,7 @@ impl Notice {
 
 fn settings_label(ui: &mut egui::Ui, label: &str) {
     ui.allocate_ui(Vec2::new(170.0, 20.0), |ui| {
-        ui.label(RichText::new(label).size(12.5).color(INK_MUTED));
+        ui.label(RichText::new(label).size(SMALL_SIZE).color(INK_MUTED));
     });
 }
 
@@ -2848,7 +2865,7 @@ fn ledger_header(ui: &mut egui::Ui, lang: Lang) {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(
                         RichText::new(lang.col_actions())
-                            .size(12.0)
+                            .size(SMALL_SIZE)
                             .family(strong_family())
                             .color(INK_MUTED),
                     );
@@ -2862,7 +2879,7 @@ fn header_cell(ui: &mut egui::Ui, label: &str, width: f32) {
         ui.set_min_width(width);
         ui.label(
             RichText::new(label)
-                .size(12.0)
+                .size(SMALL_SIZE)
                 .family(strong_family())
                 .color(INK_MUTED),
         );
@@ -2961,6 +2978,25 @@ fn mcp_configuration() -> &'static str {
 fn nonempty(value: &str) -> Option<String> {
     let value = value.trim();
     (!value.is_empty()).then(|| value.to_owned())
+}
+
+fn transition_label(lang: Lang, transition: ProjectTransition) -> &'static str {
+    match transition {
+        ProjectTransition::Starting => lang.transition_starting(),
+        ProjectTransition::Stopping => lang.transition_stopping(),
+        ProjectTransition::Restarting => lang.transition_restarting(),
+    }
+}
+
+fn transition_status(ui: &mut egui::Ui, lang: Lang, transition: ProjectTransition) {
+    ui.horizontal(|ui| {
+        ui.spinner();
+        ui.label(
+            RichText::new(transition_label(lang, transition))
+                .size(SMALL_SIZE)
+                .color(INK_MUTED),
+        );
+    });
 }
 
 fn web_label(server: WebServer) -> &'static str {
@@ -3090,8 +3126,83 @@ mod tests {
         fs::remove_dir_all(base).unwrap();
     }
 
+    fn render_minimum_view(
+        app: &mut LocalWebApp,
+        view: View,
+        height: f32,
+    ) -> (egui::Rect, egui::FullOutput) {
+        let ctx = egui::Context::default();
+        configure_style(&ctx);
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(840.0, height));
+        let output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            },
+            |ui| {
+                app.sidebar(ui);
+                egui::CentralPanel::default().show(ui, |ui| {
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| match view {
+                            View::Dashboard => app.dashboard(ui),
+                            View::Projects => app.projects(ui),
+                            View::AddProject => app.add_project(ui),
+                            View::Settings => app.settings(ui),
+                        });
+                });
+            },
+        );
+        (screen, output)
+    }
+
+    fn assert_view_fits(app: &mut LocalWebApp, view: View, height: f32, required: &[&str]) {
+        let (screen, output) = render_minimum_view(app, view, height);
+        for label in required {
+            let matches = output
+                .shapes
+                .iter()
+                .filter_map(|shape| match &shape.shape {
+                    egui::Shape::Text(text) if text.galley.job.text == *label => {
+                        Some(egui::Rect::from_min_size(text.pos, text.galley.size()))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                !matches.is_empty(),
+                "required action {label:?} must be rendered in {view:?}; rendered: {:?}",
+                output
+                    .shapes
+                    .iter()
+                    .filter_map(|shape| match &shape.shape {
+                        egui::Shape::Text(text) => Some(text.galley.job.text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            );
+            assert!(
+                matches
+                    .iter()
+                    .all(|rect| rect.left() >= screen.left() && rect.right() <= screen.right()),
+                "required action {label:?} must fit without horizontal scrolling in {view:?}"
+            );
+        }
+        for shape in &output.shapes {
+            let egui::Shape::Text(text) = &shape.shape else {
+                continue;
+            };
+            let rect = egui::Rect::from_min_size(text.pos, text.galley.size());
+            assert!(
+                rect.left() >= screen.left() && rect.right() <= screen.right(),
+                "text {:?} overflows the minimum window horizontally in {view:?}",
+                text.galley.job.text
+            );
+        }
+    }
+
     #[test]
-    fn primary_project_actions_fit_the_minimum_window_in_all_languages() {
+    fn primary_actions_fit_the_minimum_window_in_all_languages() {
         let path = test_source("layout");
         let form = AddProjectForm {
             path: path.display().to_string(),
@@ -3103,8 +3214,6 @@ mod tests {
         )
         .unwrap();
         for lang in Lang::ALL {
-            let ctx = egui::Context::default();
-            configure_style(&ctx);
             let mut app = LocalWebApp::state(None, lang, None);
             app.connection = Connection::Connected;
             app.daemon_online = true;
@@ -3115,33 +3224,37 @@ mod tests {
                 mail_web_url: None,
                 public_url: None,
             });
-            let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(840.0, 560.0));
-            let output = ctx.run_ui(
-                egui::RawInput {
-                    screen_rect: Some(screen),
-                    ..Default::default()
-                },
-                |ui| {
-                    app.sidebar(ui);
-                    egui::CentralPanel::default().show(ui, |ui| {
-                        app.projects(ui);
-                    });
-                },
+            let stop = lang.stop_localweb();
+            assert_view_fits(
+                &mut app,
+                View::Dashboard,
+                560.0,
+                &[lang.action_start(), stop],
             );
-            let action = output
-                .shapes
-                .iter()
-                .find_map(|shape| {
-                    if let egui::Shape::Text(text) = &shape.shape {
-                        (text.galley.job.text == lang.action_start()).then_some(text)
-                    } else {
-                        None
-                    }
-                })
-                .expect("Start action must be rendered");
-            assert!(
-                screen.contains_rect(egui::Rect::from_min_size(action.pos, action.galley.size())),
-                "Start action must fit without horizontal scrolling"
+            assert_view_fits(
+                &mut app,
+                View::Projects,
+                560.0,
+                &[lang.action_start(), stop],
+            );
+            assert_view_fits(&mut app, View::AddProject, 560.0, &[stop]);
+            assert_view_fits(
+                &mut app,
+                View::AddProject,
+                4000.0,
+                &[lang.create_project(), lang.cancel()],
+            );
+            assert_view_fits(&mut app, View::Settings, 560.0, &[stop]);
+            assert_view_fits(
+                &mut app,
+                View::Settings,
+                4000.0,
+                &[
+                    lang.maintenance_title(),
+                    lang.refresh(),
+                    lang.sync_domains(),
+                    lang.repair_setup(),
+                ],
             );
         }
         fs::remove_dir_all(path).unwrap();

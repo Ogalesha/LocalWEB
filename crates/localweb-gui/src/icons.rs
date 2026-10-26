@@ -35,6 +35,8 @@ pub enum Icon {
     Close,
     /// Successful state.
     Check,
+    /// Install or download.
+    Download,
     /// Inactive or stopped state.
     Minus,
     /// Expand or collapse.
@@ -199,6 +201,14 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32, width: f
                 vec![at(3.4, 8.6), at(6.8, 11.7), at(12.7, 4.9)],
                 stroke,
             ));
+        }
+        Icon::Download => {
+            painter.line_segment([at(8.0, 2.8), at(8.0, 10.4)], stroke);
+            painter.add(Shape::line(
+                vec![at(4.6, 7.2), at(8.0, 10.6), at(11.4, 7.2)],
+                stroke,
+            ));
+            painter.line_segment([at(3.2, 13.2), at(12.8, 13.2)], stroke);
         }
         Icon::Minus => {
             painter.line_segment([at(4.6, 8.0), at(11.4, 8.0)], stroke);

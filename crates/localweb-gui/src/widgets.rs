@@ -51,7 +51,7 @@ impl<'a> Pill<'a> {
             kind,
             enabled: true,
             min_width: 0.0,
-            height: 44.0,
+            height: theme::CONTROL_HEIGHT,
         }
     }
 
@@ -82,7 +82,7 @@ impl<'a> Pill<'a> {
 
     #[must_use]
     pub fn height(mut self, height: f32) -> Self {
-        self.height = height.max(44.0);
+        self.height = height.clamp(theme::COMPACT_CONTROL_HEIGHT, theme::PILL_TARGET_HEIGHT);
         self
     }
 
@@ -92,7 +92,7 @@ impl<'a> Pill<'a> {
     )]
     pub fn show(self, ui: &mut Ui) -> Response {
         let enabled = self.enabled && ui.is_enabled();
-        let font = FontId::new(13.5, theme::medium_family());
+        let font = FontId::new(theme::LABEL_SIZE, theme::medium_family());
         let base_text = match self.kind {
             PillKind::Danger => Color32::WHITE,
             PillKind::Primary | PillKind::Secondary | PillKind::Ghost => theme::INK,
@@ -123,7 +123,11 @@ impl<'a> Pill<'a> {
         } else {
             Sense::hover()
         };
-        let (rect, response) = ui.allocate_exact_size(Vec2::new(width, self.height), sense);
+        let target_height = self.height.max(theme::PILL_TARGET_HEIGHT);
+        let (target_rect, response) =
+            ui.allocate_exact_size(Vec2::new(width, target_height), sense);
+        let rect =
+            egui::Rect::from_center_size(target_rect.center(), Vec2::new(width, self.height));
         if ui.is_rect_visible(rect) {
             let hovered = enabled && response.hovered();
             let pressed = enabled && response.is_pointer_button_down_on();
@@ -314,7 +318,7 @@ pub fn focus_ring(ui: &Ui, rect: egui::Rect, color: Color32) {
 }
 
 /// Small filled chip used for observed project state.
-pub fn state_chip(ui: &mut Ui, running: bool, active_text: &str, idle_text: &str) {
+pub fn state_chip(ui: &mut Ui, running: bool, active_text: &str, idle_text: &str) -> Response {
     let (fill, color, label) = if running {
         (theme::ACCENT_SOFT, theme::ACCENT_TEXT, active_text)
     } else {
@@ -334,9 +338,29 @@ pub fn state_chip(ui: &mut Ui, running: bool, active_text: &str, idle_text: &str
                         theme::STATUS_OFF
                     },
                 );
-                ui.label(medium(label).size(12.0).color(color));
+                ui.label(medium(label).size(theme::SMALL_SIZE).color(color));
             });
-        });
+        })
+        .response
+}
+
+/// State chip with a short note underneath, used when the value is last known.
+pub fn state_chip_with_note(
+    ui: &mut Ui,
+    running: bool,
+    active_text: &str,
+    idle_text: &str,
+    note: &str,
+) {
+    ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing.y = 2.0;
+        state_chip(ui, running, active_text, idle_text);
+        ui.label(
+            RichText::new(note)
+                .size(theme::SMALL_SIZE)
+                .color(theme::INK_MUTED),
+        );
+    });
 }
 
 /// Compact labelled state used for read-only presets.
@@ -350,8 +374,12 @@ pub fn service_chip(ui: &mut Ui, title: &str, value: &str, color: Color32) {
             ui.horizontal(|ui| {
                 status_mark(ui, color);
                 ui.vertical(|ui| {
-                    ui.label(medium(title).size(12.0).color(theme::INK));
-                    ui.label(RichText::new(value).size(12.0).color(theme::INK_MUTED));
+                    ui.label(medium(title).size(theme::SMALL_SIZE).color(theme::INK));
+                    ui.label(
+                        RichText::new(value)
+                            .size(theme::SMALL_SIZE)
+                            .color(theme::INK_MUTED),
+                    );
                 });
             });
         });
@@ -359,27 +387,71 @@ pub fn service_chip(ui: &mut Ui, title: &str, value: &str, color: Color32) {
 
 /// Page title block.
 pub fn page_header(ui: &mut Ui, title: &str) {
-    ui.label(strong(title).size(30.0).color(theme::INK));
+    ui.label(strong(title).size(theme::PAGE_TITLE_SIZE).color(theme::INK));
 }
 
 /// Section heading inside a page.
 pub fn section_heading(ui: &mut Ui, title: &str, description: &str) {
-    ui.label(strong(title).size(18.0).color(theme::INK));
+    ui.label(
+        strong(title)
+            .size(theme::SECTION_TITLE_SIZE)
+            .color(theme::INK),
+    );
     ui.label(
         RichText::new(description)
-            .size(13.0)
+            .size(theme::LABEL_SIZE)
             .color(theme::INK_MUTED),
     );
 }
 
 /// Visible form label.
 pub fn form_label(ui: &mut Ui, label: &str) -> Response {
-    ui.label(medium(label).size(13.0).color(theme::INK))
+    ui.label(medium(label).size(theme::LABEL_SIZE).color(theme::INK))
+}
+
+/// Single-line form field with the shared height and inner padding.
+pub fn single_line_field(ui: &mut Ui, text: &mut String, width: f32, hint: &str) -> Response {
+    ui.add(
+        egui::TextEdit::singleline(text)
+            .margin(Margin::symmetric(10, 10))
+            .min_size(Vec2::new(width, theme::FIELD_HEIGHT))
+            .desired_width(width)
+            .hint_text(hint),
+    )
+}
+
+/// Multi-line form field with the shared horizontal padding.
+pub fn multi_line_field(
+    ui: &mut Ui,
+    text: &mut String,
+    width: f32,
+    rows: usize,
+    hint: &str,
+) -> Response {
+    ui.add(
+        egui::TextEdit::multiline(text)
+            .margin(Margin::symmetric(10, 8))
+            .desired_width(width)
+            .desired_rows(rows)
+            .hint_text(hint),
+    )
+}
+
+/// Severity of a persistent inline condition.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum CalloutKind {
+    /// Blocking but recoverable condition.
+    Warning,
+    /// Failed operation or invalid state.
+    Danger,
 }
 
 /// Tinted inline plane with a leading icon for persistent conditions.
-pub fn callout(ui: &mut Ui, icon: Icon, content: impl FnOnce(&mut Ui)) {
-    let (fill, color) = (theme::DANGER_SOFT, theme::DANGER);
+pub fn callout(ui: &mut Ui, kind: CalloutKind, icon: Icon, content: impl FnOnce(&mut Ui)) {
+    let (fill, color) = match kind {
+        CalloutKind::Warning => (theme::WARNING_SOFT, theme::WARNING),
+        CalloutKind::Danger => (theme::DANGER_SOFT, theme::DANGER),
+    };
     egui::Frame::NONE
         .fill(fill)
         .corner_radius(theme::RADIUS_CARD)
@@ -396,7 +468,7 @@ pub fn callout(ui: &mut Ui, icon: Icon, content: impl FnOnce(&mut Ui)) {
 
 /// Small square icon button used for dismiss and similar affordances.
 pub fn icon_button(ui: &mut Ui, icon: Icon, size: f32, accessible_label: &str) -> Response {
-    let target_size = size.max(44.0);
+    let target_size = size.max(theme::COMPACT_CONTROL_HEIGHT);
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(target_size), Sense::click());
     let pressed = response.is_pointer_button_down_on();
     let t = ui
@@ -441,7 +513,7 @@ pub fn check_row(ui: &mut Ui, checked: &mut bool, label: &str) -> Response {
     let width = ui.available_width();
     let galley = ui.painter().layout(
         label.to_owned(),
-        FontId::new(13.0, theme::medium_family()),
+        FontId::new(theme::LABEL_SIZE, theme::medium_family()),
         theme::INK,
         (width - 32.0).max(80.0),
     );
@@ -531,8 +603,16 @@ pub fn empty_card(
                     2.2,
                 );
                 ui.add_space(10.0);
-                ui.label(strong(title).size(17.0).color(theme::INK));
-                ui.label(RichText::new(body).size(13.5).color(theme::INK_MUTED));
+                ui.label(
+                    strong(title)
+                        .size(theme::SECTION_TITLE_SIZE)
+                        .color(theme::INK),
+                );
+                ui.label(
+                    RichText::new(body)
+                        .size(theme::LABEL_SIZE)
+                        .color(theme::INK_MUTED),
+                );
                 if let Some((label, action_icon)) = action {
                     ui.add_space(14.0);
                     clicked = Pill::new(label, PillKind::Primary)
@@ -613,14 +693,59 @@ pub fn rail_item(ui: &mut Ui, label: &str, icon: Icon, selected: bool) -> Respon
     response
 }
 
-/// Keeps the tail of a value and elides the middle for fixed-width cells.
+/// Keeps the head and tail of a value and elides the middle for fixed-width cells.
 #[must_use]
 pub fn truncate_middle(text: &str, max_chars: usize) -> String {
     let count = text.chars().count();
     if count <= max_chars || max_chars == 0 {
         return text.to_owned();
     }
-    let mut out = String::from("…");
-    out.extend(text.chars().skip(count - (max_chars - 1)));
+    if max_chars == 1 {
+        return "…".to_owned();
+    }
+    let keep = max_chars - 1;
+    let front = keep.div_ceil(2);
+    let back = keep - front;
+    let mut out: String = text.chars().take(front).collect();
+    out.push('…');
+    out.extend(text.chars().skip(count - back));
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn middle_truncation_preserves_head_tail_and_length() {
+        assert_eq!(truncate_middle("short", 8), "short");
+        assert_eq!(truncate_middle("abcdefghij", 7), "abc…hij");
+        assert_eq!(truncate_middle("abcdefghij", 1), "…");
+        assert_eq!(truncate_middle("café-übung", 5), "ca…ng");
+        assert_eq!(truncate_middle("abcdefghij", 7).chars().count(), 7);
+    }
+
+    #[test]
+    fn pill_keeps_a_compact_visual_with_a_larger_pointer_target() {
+        let ctx = egui::Context::default();
+        theme::configure_style(&ctx);
+        let mut height = 0.0;
+        let _ = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    Vec2::new(200.0, 100.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                height = Pill::new("Test", PillKind::Primary)
+                    .height(theme::COMPACT_CONTROL_HEIGHT)
+                    .show(ui)
+                    .rect
+                    .height();
+            },
+        );
+        assert!((height - theme::PILL_TARGET_HEIGHT).abs() < f32::EPSILON);
+    }
 }

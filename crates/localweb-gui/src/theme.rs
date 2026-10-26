@@ -61,6 +61,8 @@ pub const SUCCESS: Color32 = Color32::from_rgb(31, 97, 57);
 pub const SUCCESS_SOFT: Color32 = Color32::from_rgb(226, 239, 227);
 /// Warning state color.
 pub const WARNING: Color32 = Color32::from_rgb(128, 75, 6);
+/// Tinted warning plane.
+pub const WARNING_SOFT: Color32 = Color32::from_rgb(250, 242, 226);
 /// Danger state color.
 pub const DANGER: Color32 = Color32::from_rgb(168, 28, 41);
 /// Danger hover.
@@ -83,6 +85,32 @@ pub const RADIUS_CARD: u8 = 0;
 pub const RADIUS_CONTROL: u8 = 0;
 /// Width of the navigation rail.
 pub const RAIL_WIDTH: f32 = 236.0;
+
+/// Standard visual height for controls.
+pub const CONTROL_HEIGHT: f32 = 38.0;
+/// Compact visual height for dense rows.
+pub const COMPACT_CONTROL_HEIGHT: f32 = 36.0;
+/// Visual height for page-level primary commands.
+pub const COMMAND_HEIGHT: f32 = 40.0;
+/// Minimum pointer target for a pill control.
+pub const PILL_TARGET_HEIGHT: f32 = 44.0;
+/// Height shared by form fields and combo boxes.
+pub const FIELD_HEIGHT: f32 = 38.0;
+
+/// Page title size.
+pub const PAGE_TITLE_SIZE: f32 = 26.0;
+/// Section title size.
+pub const SECTION_TITLE_SIZE: f32 = 18.0;
+/// Banner title size.
+pub const BANNER_TITLE_SIZE: f32 = 20.0;
+/// Body text size.
+pub const BODY_SIZE: f32 = 14.0;
+/// Button and label size.
+pub const LABEL_SIZE: f32 = 13.5;
+/// Small metadata size.
+pub const SMALL_SIZE: f32 = 12.0;
+/// Monospace metadata size.
+pub const MONO_SIZE: f32 = 12.5;
 
 /// Semibold family used for titles and strong labels.
 #[must_use]
@@ -136,24 +164,26 @@ pub fn configure_style(context: &egui::Context) {
     context.style_mut_of(egui::Theme::Light, |style| {
         style.spacing.item_spacing = egui::vec2(10.0, 8.0);
         style.spacing.button_padding = egui::vec2(14.0, 8.0);
-        style.spacing.interact_size.y = 44.0;
+        style.spacing.interact_size.y = CONTROL_HEIGHT;
         style.visuals.override_text_color = Some(INK);
+        style.text_styles.insert(
+            TextStyle::Heading,
+            FontId::new(PAGE_TITLE_SIZE, strong_family()),
+        );
+        style.text_styles.insert(
+            TextStyle::Body,
+            FontId::new(BODY_SIZE, FontFamily::Proportional),
+        );
         style
             .text_styles
-            .insert(TextStyle::Heading, FontId::new(26.0, strong_family()));
-        style
-            .text_styles
-            .insert(TextStyle::Body, FontId::new(14.0, FontFamily::Proportional));
-        style
-            .text_styles
-            .insert(TextStyle::Button, FontId::new(13.5, medium_family()));
+            .insert(TextStyle::Button, FontId::new(LABEL_SIZE, medium_family()));
         style.text_styles.insert(
             TextStyle::Small,
-            FontId::new(12.0, FontFamily::Proportional),
+            FontId::new(SMALL_SIZE, FontFamily::Proportional),
         );
         style.text_styles.insert(
             TextStyle::Monospace,
-            FontId::new(12.5, FontFamily::Monospace),
+            FontId::new(MONO_SIZE, FontFamily::Monospace),
         );
     });
 }
@@ -198,6 +228,7 @@ mod tests {
             (Color32::WHITE, DANGER),
             (ACCENT_TEXT, ACCENT_SOFT),
             (DANGER, DANGER_SOFT),
+            (WARNING, WARNING_SOFT),
             (FOCUS, CANVAS),
         ] {
             assert!(

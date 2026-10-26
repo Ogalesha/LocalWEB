@@ -229,20 +229,20 @@ impl Lang {
 
     pub fn nav_running(self) -> &'static str {
         match self {
-            Self::English => "Daemon connected",
-            Self::Italiano => "Daemon connesso",
-            Self::Shqip => "Daemon-i i lidhur",
-            Self::Spanish => "Daemon conectado",
-            Self::French => "Daemon connecté",
-            Self::Portuguese => "Daemon ligado",
-            Self::Russian => "Daemon подключён",
-            Self::Polish => "Daemon połączony",
-            Self::Ukrainian => "Daemon під'єднано",
-            Self::Turkish => "Daemon bağlı",
-            Self::Greek => "Daemon συνδεδεμένος",
-            Self::Hindi => "Daemon जुड़ा है",
-            Self::Chinese => "Daemon 已连接",
-            Self::Swedish => "Daemon ansluten",
+            Self::English => "LocalWeb connected",
+            Self::Italiano => "LocalWeb connesso",
+            Self::Shqip => "LocalWeb i lidhur",
+            Self::Spanish => "LocalWeb conectado",
+            Self::French => "LocalWeb connecté",
+            Self::Portuguese => "LocalWeb ligado",
+            Self::Russian => "LocalWeb подключён",
+            Self::Polish => "LocalWeb połączony",
+            Self::Ukrainian => "LocalWeb під'єднано",
+            Self::Turkish => "LocalWeb bağlı",
+            Self::Greek => "LocalWeb συνδεδεμένο",
+            Self::Hindi => "LocalWeb जुड़ा है",
+            Self::Chinese => "LocalWeb 已连接",
+            Self::Swedish => "LocalWeb ansluten",
         }
     }
 
@@ -289,7 +289,7 @@ impl Lang {
     pub fn op_stopping(self) -> &'static str {
         match self {
             Self::English => "Stopping…",
-            Self::Italiano => "Arresto in corso",
+            Self::Italiano => "Arresto in corso…",
             Self::Shqip => "Duke u ndaluar…",
             Self::Spanish => "Deteniendo…",
             Self::French => "Arrêt en cours…",
@@ -308,7 +308,7 @@ impl Lang {
     pub fn op_setup(self) -> &'static str {
         match self {
             Self::English => "Setting up…",
-            Self::Italiano => "Configurazione in corso",
+            Self::Italiano => "Configurazione in corso…",
             Self::Shqip => "Duke u konfiguruar…",
             Self::Spanish => "Configurando…",
             Self::French => "Configuration…",
@@ -327,7 +327,7 @@ impl Lang {
     pub fn op_starting(self) -> &'static str {
         match self {
             Self::English => "Starting…",
-            Self::Italiano => "Avvio in corso",
+            Self::Italiano => "Avvio in corso…",
             Self::Shqip => "Duke u nisur…",
             Self::Spanish => "Iniciando…",
             Self::French => "Démarrage…",
@@ -510,46 +510,46 @@ impl Lang {
     pub fn env_on_body(self) -> &'static str {
         match self {
             Self::English => {
-                "Daemon connected; direct HTTP ports are ready. HTTPS is available when the gateway holds port 443."
+                "LocalWeb is connected; direct HTTP ports are ready. HTTPS is available when the gateway holds port 443."
             }
             Self::Italiano => {
-                "Daemon connesso; le porte HTTP dirette sono pronte. HTTPS è disponibile quando il gateway occupa la porta 443."
+                "LocalWeb è connesso; le porte HTTP dirette sono pronte. HTTPS è disponibile quando il gateway occupa la porta 443."
             }
             Self::Shqip => {
-                "Daemon-i i lidhur; portat e drejtpërdrejta HTTP janë gati. HTTPS është i disponueshëm kur gateway zë portën 443."
+                "LocalWeb është i lidhur; portat e drejtpërdrejta HTTP janë gati. HTTPS është i disponueshëm kur gateway zë portën 443."
             }
             Self::Spanish => {
-                "Daemon conectado; los puertos HTTP directos están listos. HTTPS está disponible cuando el gateway ocupa el puerto 443."
+                "LocalWeb está conectado; los puertos HTTP directos están listos. HTTPS está disponible cuando el gateway ocupa el puerto 443."
             }
             Self::French => {
-                "Daemon connecté ; les ports HTTP directs sont prêts. HTTPS est disponible lorsque le gateway occupe le port 443."
+                "LocalWeb est connecté ; les ports HTTP directs sont prêts. HTTPS est disponible lorsque le gateway occupe le port 443."
             }
             Self::Portuguese => {
-                "Daemon ligado; as portas HTTP diretas estão prontas. HTTPS está disponível quando o gateway ocupa a porta 443."
+                "O LocalWeb está ligado; as portas HTTP diretas estão prontas. HTTPS está disponível quando o gateway ocupa a porta 443."
             }
             Self::Russian => {
-                "Daemon подключён; прямые порты HTTP готовы. HTTPS доступен, когда gateway занимает порт 443."
+                "LocalWeb подключён; прямые порты HTTP готовы. HTTPS доступен, когда gateway занимает порт 443."
             }
             Self::Polish => {
-                "Daemon połączony; bezpośrednie porty HTTP są gotowe. HTTPS działa, gdy gateway zajmuje port 443."
+                "LocalWeb jest połączony; bezpośrednie porty HTTP są gotowe. HTTPS działa, gdy gateway zajmuje port 443."
             }
             Self::Ukrainian => {
-                "Daemon під'єднано; прямі порти HTTP готові. HTTPS доступний, коли gateway займає порт 443."
+                "LocalWeb під'єднано; прямі порти HTTP готові. HTTPS доступний, коли gateway займає порт 443."
             }
             Self::Turkish => {
-                "Daemon bağlı; doğrudan HTTP portları hazır. Gateway 443 portunu kullandığında HTTPS kullanılabilir."
+                "LocalWeb bağlı; doğrudan HTTP portları hazır. Gateway 443 portunu kullandığında HTTPS kullanılabilir."
             }
             Self::Greek => {
-                "Daemon συνδεδεμένο· οι απευθείας θύρες HTTP είναι έτοιμες. Το HTTPS είναι διαθέσιμο όταν το gateway καταλαμβάνει τη θύρα 443."
+                "Το LocalWeb είναι συνδεδεμένο· οι απευθείας θύρες HTTP είναι έτοιμες. Το HTTPS είναι διαθέσιμο όταν το gateway καταλαμβάνει τη θύρα 443."
             }
             Self::Hindi => {
-                "Daemon जुड़ा है; सीधे HTTP पोर्ट तैयार हैं। जब gateway पोर्ट 443 पर होता है तब HTTPS उपलब्ध होता है।"
+                "LocalWeb जुड़ा है; सीधे HTTP पोर्ट तैयार हैं। जब gateway पोर्ट 443 पर होता है तब HTTPS उपलब्ध होता है।"
             }
             Self::Chinese => {
-                "Daemon 已连接；直接 HTTP 端口已就绪。当 gateway 占用 443 端口时可用 HTTPS。"
+                "LocalWeb 已连接；直接 HTTP 端口已就绪。当 gateway 占用 443 端口时可用 HTTPS。"
             }
             Self::Swedish => {
-                "Daemon ansluten; direkta HTTP-portar är redo. HTTPS är tillgängligt när gatewayen använder port 443."
+                "LocalWeb är anslutet; direkta HTTP-portar är redo. HTTPS är tillgängligt när gatewayen använder port 443."
             }
         }
     }
@@ -662,20 +662,20 @@ impl Lang {
 
     pub fn stopped_add_body(self) -> &'static str {
         match self {
-            Self::English => "Start the daemon before adding a project.",
-            Self::Italiano => "Avvia il daemon prima di aggiungere un progetto.",
-            Self::Shqip => "Nis daemon-in para se të shtosh projektin.",
-            Self::Spanish => "Inicia el daemon antes de añadir un proyecto.",
-            Self::French => "Démarrez le daemon avant d'ajouter un projet.",
-            Self::Portuguese => "Inicie o daemon antes de adicionar um projeto.",
-            Self::Russian => "Запустите daemon, прежде чем добавлять проект.",
-            Self::Polish => "Uruchom daemon przed dodaniem projektu.",
-            Self::Ukrainian => "Запустіть daemon, перш ніж додавати проєкт.",
-            Self::Turkish => "Proje eklemeden önce daemon'ı başlatın.",
-            Self::Greek => "Εκκινήστε το daemon πριν προσθέσετε έργο.",
-            Self::Hindi => "प्रोजेक्ट जोड़ने से पहले daemon शुरू करें।",
-            Self::Chinese => "请先启动 daemon，再添加项目。",
-            Self::Swedish => "Starta daemon innan du lägger till ett projekt.",
+            Self::English => "Start LocalWeb before adding a project.",
+            Self::Italiano => "Avvia LocalWeb prima di aggiungere un progetto.",
+            Self::Shqip => "Nis LocalWeb para se të shtosh projektin.",
+            Self::Spanish => "Inicia LocalWeb antes de añadir un proyecto.",
+            Self::French => "Démarrez LocalWeb avant d'ajouter un projet.",
+            Self::Portuguese => "Inicie o LocalWeb antes de adicionar um projeto.",
+            Self::Russian => "Запустите LocalWeb, прежде чем добавлять проект.",
+            Self::Polish => "Uruchom LocalWeb przed dodaniem projektu.",
+            Self::Ukrainian => "Запустіть LocalWeb, перш ніж додавати проєкт.",
+            Self::Turkish => "Proje eklemeden önce LocalWeb'i başlatın.",
+            Self::Greek => "Εκκινήστε το LocalWeb πριν προσθέσετε έργο.",
+            Self::Hindi => "प्रोजेक्ट जोड़ने से पहले LocalWeb शुरू करें।",
+            Self::Chinese => "请先启动 LocalWeb，再添加项目。",
+            Self::Swedish => "Starta LocalWeb innan du lägger till ett projekt.",
         }
     }
 
@@ -1059,6 +1059,25 @@ impl Lang {
         }
     }
 
+    pub fn dismiss(self) -> &'static str {
+        match self {
+            Self::English => "Dismiss",
+            Self::Italiano => "Chiudi",
+            Self::Shqip => "Mbyll",
+            Self::Spanish => "Cerrar",
+            Self::French => "Fermer",
+            Self::Portuguese => "Fechar",
+            Self::Russian => "Закрыть",
+            Self::Polish => "Zamknij",
+            Self::Ukrainian => "Закрити",
+            Self::Turkish => "Kapat",
+            Self::Greek => "Κλείσιμο",
+            Self::Hindi => "बंद करें",
+            Self::Chinese => "关闭",
+            Self::Swedish => "Stäng",
+        }
+    }
+
     pub fn create_project(self) -> &'static str {
         match self {
             Self::English => "Add project",
@@ -1081,7 +1100,7 @@ impl Lang {
     pub fn operation_busy(self) -> &'static str {
         match self {
             Self::English => "Working…",
-            Self::Italiano => "Operazione in corso",
+            Self::Italiano => "Operazione in corso…",
             Self::Shqip => "Duke punuar…",
             Self::Spanish => "Procesando…",
             Self::French => "En cours…",
@@ -1212,8 +1231,22 @@ impl Lang {
         }
     }
 
-    pub fn docroot_label() -> &'static str {
-        "Document root"
+    pub fn docroot_label(self) -> &'static str {
+        match self {
+            Self::English | Self::Italiano => "Document root",
+            Self::Shqip => "Rrënja e dokumenteve",
+            Self::Spanish => "Raíz del documento",
+            Self::French => "Racine du document",
+            Self::Portuguese => "Raiz do documento",
+            Self::Russian => "Корень документов",
+            Self::Polish => "Katalog główny",
+            Self::Ukrainian => "Корінь документів",
+            Self::Turkish => "Belge kökü",
+            Self::Greek => "Ρίζα εγγράφων",
+            Self::Hindi => "दस्तावेज़ रूट",
+            Self::Chinese => "文档根目录",
+            Self::Swedish => "Dokumentrot",
+        }
     }
 
     pub fn profile_label(self) -> &'static str {
@@ -1376,20 +1409,20 @@ impl Lang {
 
     pub fn supervisor_title(self) -> &'static str {
         match self {
-            Self::English => "Background worker",
-            Self::Italiano => "Worker in background",
-            Self::Shqip => "Worker në sfond",
-            Self::Spanish => "Worker en segundo plano",
-            Self::French => "Worker en arrière-plan",
-            Self::Portuguese => "Worker em segundo plano",
-            Self::Russian => "Фоновый воркер",
-            Self::Polish => "Worker w tle",
-            Self::Ukrainian => "Фоновий воркер",
-            Self::Turkish => "Arka plan worker",
-            Self::Greek => "Worker παρασκηνίου",
-            Self::Hindi => "पृष्ठभूमि वर्कर",
-            Self::Chinese => "后台 worker",
-            Self::Swedish => "Bakgrundsworker",
+            Self::English
+            | Self::Italiano
+            | Self::Shqip
+            | Self::Spanish
+            | Self::French
+            | Self::Portuguese
+            | Self::Russian
+            | Self::Polish
+            | Self::Ukrainian
+            | Self::Turkish
+            | Self::Greek
+            | Self::Hindi
+            | Self::Chinese
+            | Self::Swedish => "Supervisor",
         }
     }
 
@@ -1414,8 +1447,7 @@ impl Lang {
 
     pub fn supervisor_preset_label(self) -> &'static str {
         match self {
-            Self::English => "Preset",
-            Self::Italiano => "Configurazione",
+            Self::English | Self::Italiano => "Preset",
             Self::Shqip => "Paracaktimi",
             Self::Spanish => "Preajuste",
             Self::French => "Préréglage",
@@ -2031,22 +2063,7 @@ impl Lang {
     }
 
     pub fn remove_confirm(self) -> &'static str {
-        match self {
-            Self::English => "Remove configuration",
-            Self::Italiano => "Rimuovi configurazione",
-            Self::Shqip => "Hiq konfigurimin",
-            Self::Spanish => "Eliminar configuración",
-            Self::French => "Supprimer la configuration",
-            Self::Portuguese => "Remover configuração",
-            Self::Russian => "Удалить конфигурацию",
-            Self::Polish => "Usuń konfigurację",
-            Self::Ukrainian => "Видалити конфігурацію",
-            Self::Turkish => "Yapılandırmayı kaldır",
-            Self::Greek => "Αφαίρεση ρύθμισης",
-            Self::Hindi => "कॉन्फ़िगरेशन हटाएँ",
-            Self::Chinese => "移除配置",
-            Self::Swedish => "Ta bort konfiguration",
-        }
+        self.remove_title()
     }
 
     // Notices.
@@ -2167,20 +2184,20 @@ impl Lang {
 
     pub fn notice_unexpected(self, detail: &str) -> String {
         match self {
-            Self::English => format!("Unexpected daemon response: {detail}"),
-            Self::Italiano => format!("Risposta inattesa dal daemon: {detail}"),
-            Self::Shqip => format!("Përgjigje e papritur nga daemon-i: {detail}"),
-            Self::Spanish => format!("Respuesta inesperada del daemon: {detail}"),
-            Self::French => format!("Réponse inattendue du daemon : {detail}"),
-            Self::Portuguese => format!("Resposta inesperada do daemon: {detail}"),
-            Self::Russian => format!("Неожиданный ответ daemon: {detail}"),
-            Self::Polish => format!("Nieoczekiwana odpowiedź daemon: {detail}"),
-            Self::Ukrainian => format!("Неочікувана відповідь daemon: {detail}"),
-            Self::Turkish => format!("Daemon'dan beklenmeyen yanıt: {detail}"),
-            Self::Greek => format!("Απροσδόκητη απάντηση από το daemon: {detail}"),
-            Self::Hindi => format!("daemon से अप्रत्याशित प्रतिक्रिया: {detail}"),
-            Self::Chinese => format!("daemon 返回了意外响应：{detail}"),
-            Self::Swedish => format!("Oväntat svar från daemon: {detail}"),
+            Self::English => format!("Unexpected LocalWeb response: {detail}"),
+            Self::Italiano => format!("Risposta inattesa da LocalWeb: {detail}"),
+            Self::Shqip => format!("Përgjigje e papritur nga LocalWeb: {detail}"),
+            Self::Spanish => format!("Respuesta inesperada de LocalWeb: {detail}"),
+            Self::French => format!("Réponse inattendue de LocalWeb : {detail}"),
+            Self::Portuguese => format!("Resposta inesperada do LocalWeb: {detail}"),
+            Self::Russian => format!("Неожиданный ответ LocalWeb: {detail}"),
+            Self::Polish => format!("Nieoczekiwana odpowiedź LocalWeb: {detail}"),
+            Self::Ukrainian => format!("Неочікувана відповідь LocalWeb: {detail}"),
+            Self::Turkish => format!("LocalWeb'den beklenmeyen yanıt: {detail}"),
+            Self::Greek => format!("Απροσδόκητη απάντηση από το LocalWeb: {detail}"),
+            Self::Hindi => format!("LocalWeb से अप्रत्याशित प्रतिक्रिया: {detail}"),
+            Self::Chinese => format!("LocalWeb 返回了意外响应：{detail}"),
+            Self::Swedish => format!("Oväntat svar från LocalWeb: {detail}"),
         }
     }
 
@@ -2315,20 +2332,20 @@ impl Lang {
     }
     pub fn daemon_unavailable(self) -> &'static str {
         match self {
-            Self::English => "Daemon unavailable",
-            Self::Italiano => "Daemon non raggiungibile",
-            Self::Shqip => "Daemon-i i padisponueshëm",
-            Self::Spanish => "Daemon no disponible",
-            Self::French => "Daemon indisponible",
-            Self::Portuguese => "Daemon indisponível",
-            Self::Russian => "Daemon недоступен",
-            Self::Polish => "Daemon niedostępny",
-            Self::Ukrainian => "Daemon недоступний",
-            Self::Turkish => "Daemon kullanılamıyor",
-            Self::Greek => "Το Daemon δεν είναι διαθέσιμο",
-            Self::Hindi => "Daemon उपलब्ध नहीं",
-            Self::Chinese => "Daemon 不可用",
-            Self::Swedish => "Daemon inte tillgänglig",
+            Self::English => "LocalWeb unavailable",
+            Self::Italiano => "LocalWeb non disponibile",
+            Self::Shqip => "LocalWeb i padisponueshëm",
+            Self::Spanish => "LocalWeb no disponible",
+            Self::French => "LocalWeb indisponible",
+            Self::Portuguese => "LocalWeb indisponível",
+            Self::Russian => "LocalWeb недоступен",
+            Self::Polish => "LocalWeb niedostępny",
+            Self::Ukrainian => "LocalWeb недоступний",
+            Self::Turkish => "LocalWeb kullanılamıyor",
+            Self::Greek => "Το LocalWeb δεν είναι διαθέσιμο",
+            Self::Hindi => "LocalWeb उपलब्ध नहीं",
+            Self::Chinese => "LocalWeb 不可用",
+            Self::Swedish => "LocalWeb inte tillgängligt",
         }
     }
     pub fn loading_projects(self) -> &'static str {
@@ -2439,22 +2456,64 @@ impl Lang {
             Self::Swedish => "Tekniska detaljer",
         }
     }
-    pub fn advanced(self) -> &'static str {
+    pub fn maintenance_title(self) -> &'static str {
         match self {
-            Self::English => "Advanced",
-            Self::Italiano => "Avanzate",
-            Self::Shqip => "Të avancuara",
-            Self::Spanish => "Avanzado",
-            Self::French => "Avancé",
-            Self::Portuguese => "Avançado",
-            Self::Russian => "Дополнительно",
-            Self::Polish => "Zaawansowane",
-            Self::Ukrainian => "Додатково",
-            Self::Turkish => "Gelişmiş",
-            Self::Greek => "Για προχωρημένους",
-            Self::Hindi => "उन्नत",
-            Self::Chinese => "高级",
-            Self::Swedish => "Avancerat",
+            Self::English | Self::French => "Maintenance",
+            Self::Italiano => "Manutenzione",
+            Self::Shqip => "Mirëmbajtja",
+            Self::Spanish => "Mantenimiento",
+            Self::Portuguese => "Manutenção",
+            Self::Russian => "Обслуживание",
+            Self::Polish => "Konserwacja",
+            Self::Ukrainian => "Обслуговування",
+            Self::Turkish => "Bakım",
+            Self::Greek => "Συντήρηση",
+            Self::Hindi => "रखरखाव",
+            Self::Chinese => "维护",
+            Self::Swedish => "Underhåll",
+        }
+    }
+
+    pub fn maintenance_body(self) -> &'static str {
+        match self {
+            Self::English => {
+                "Refresh project data, synchronize local domains, or repair the LocalWeb setup."
+            }
+            Self::Italiano => {
+                "Aggiorna i dati dei progetti, sincronizza i domini locali o ripara la configurazione di LocalWeb."
+            }
+            Self::Shqip => {
+                "Rifresko të dhënat e projekteve, sinkronizo domenët lokale ose riparo konfigurimin e LocalWeb."
+            }
+            Self::Spanish => {
+                "Actualiza los datos de los proyectos, sincroniza los dominios locales o repara la configuración de LocalWeb."
+            }
+            Self::French => {
+                "Actualisez les données des projets, synchronisez les domaines locaux ou réparez la configuration de LocalWeb."
+            }
+            Self::Portuguese => {
+                "Atualize os dados dos projetos, sincronize os domínios locais ou repare a configuração do LocalWeb."
+            }
+            Self::Russian => {
+                "Обновите данные проектов, синхронизируйте локальные домены или восстановите настройку LocalWeb."
+            }
+            Self::Polish => {
+                "Odśwież dane projektów, zsynchronizuj domeny lokalne lub napraw konfigurację LocalWeb."
+            }
+            Self::Ukrainian => {
+                "Оновіть дані проєктів, синхронізуйте локальні домени або відновіть налаштування LocalWeb."
+            }
+            Self::Turkish => {
+                "Proje verilerini yenileyin, yerel alan adlarını eşitleyin veya LocalWeb kurulumunu onarın."
+            }
+            Self::Greek => {
+                "Ανανεώστε τα δεδομένα των έργων, συγχρονίστε τους τοπικούς τομείς ή επιδιορθώστε τη ρύθμιση του LocalWeb."
+            }
+            Self::Hindi => "प्रोजेक्ट डेटा रीफ़्रेश करें, स्थानीय डोमेन सिंक करें या LocalWeb सेटअप ठीक करें।",
+            Self::Chinese => "刷新项目数据、同步本地域名或修复 LocalWeb 设置。",
+            Self::Swedish => {
+                "Uppdatera projektdata, synkronisera lokala domäner eller reparera LocalWeb-konfigurationen."
+            }
         }
     }
 
@@ -3120,20 +3179,54 @@ impl Lang {
     }
     pub fn web_server_label(self) -> &'static str {
         match self {
+            Self::English | Self::Shqip => "Web server",
+            Self::Italiano => "Server web",
+            Self::Spanish | Self::Portuguese => "Servidor web",
+            Self::French => "Serveur web",
+            Self::Russian | Self::Ukrainian => "Веб-сервер",
+            Self::Polish => "Serwer WWW",
+            Self::Turkish => "Web sunucusu",
+            Self::Greek => "Διακομιστής web",
+            Self::Hindi => "वेब सर्वर",
+            Self::Chinese => "Web 服务器",
+            Self::Swedish => "Webbserver",
+        }
+    }
+
+    pub fn database_label(self) -> &'static str {
+        match self {
+            Self::English | Self::Italiano => "Database",
+            Self::Shqip => "Baza e të dhënave",
+            Self::Spanish => "Base de datos",
+            Self::French => "Base de données",
+            Self::Portuguese => "Base de dados",
+            Self::Russian => "База данных",
+            Self::Polish => "Baza danych",
+            Self::Ukrainian => "База даних",
+            Self::Turkish => "Veritabanı",
+            Self::Greek => "Βάση δεδομένων",
+            Self::Hindi => "डेटाबेस",
+            Self::Chinese => "数据库",
+            Self::Swedish => "Databas",
+        }
+    }
+
+    pub fn cache_label(self) -> &'static str {
+        match self {
             Self::English
-            | Self::Italiano
             | Self::Shqip
-            | Self::Spanish
+            | Self::Italiano
             | Self::French
             | Self::Portuguese
-            | Self::Russian
-            | Self::Polish
-            | Self::Ukrainian
-            | Self::Turkish
             | Self::Greek
-            | Self::Hindi
-            | Self::Chinese
-            | Self::Swedish => "Web server",
+            | Self::Swedish => "Cache",
+            Self::Spanish => "Caché",
+            Self::Russian => "Кэш",
+            Self::Polish => "Pamięć podręczna",
+            Self::Ukrainian => "Кеш",
+            Self::Turkish => "Önbellek",
+            Self::Hindi => "कैश",
+            Self::Chinese => "缓存",
         }
     }
     pub fn runtime_availability(self, bundled: bool) -> &'static str {
@@ -3175,20 +3268,19 @@ impl Lang {
     pub fn php_version_availability(self, version: &str, bundled: bool) -> &'static str {
         if matches!(version, "8.0" | "8.1") {
             match self {
-                Self::Shqip => "EOL · për përputhshmëri",
-                Self::English
-                | Self::Italiano
-                | Self::Spanish
-                | Self::French
-                | Self::Portuguese
-                | Self::Russian
-                | Self::Polish
-                | Self::Ukrainian
-                | Self::Turkish
-                | Self::Greek
-                | Self::Hindi
-                | Self::Chinese
-                | Self::Swedish => "EOL · legacy",
+                Self::English | Self::Italiano => "EOL · legacy",
+                Self::Shqip => "EOL · i vjetëruar",
+                Self::Spanish => "EOL · heredado",
+                Self::French => "EOL · hérité",
+                Self::Portuguese => "EOL · legado",
+                Self::Russian => "EOL · устаревшая",
+                Self::Polish => "EOL · przestarzała",
+                Self::Ukrainian => "EOL · застаріла",
+                Self::Turkish => "EOL · eski",
+                Self::Greek => "EOL · παλαιότερη",
+                Self::Hindi => "EOL · पुराना",
+                Self::Chinese => "EOL · 旧版",
+                Self::Swedish => "EOL · äldre",
             }
         } else {
             self.runtime_availability(bundled)
