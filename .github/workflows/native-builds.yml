@@ -44,7 +44,7 @@ jobs:
           docker exec lw-ci test -S /run/user/1000/bus
           docker exec lw-ci runuser -u builder -- env XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus bash /workspace/scripts/ci-native-linux.sh
           docker cp lw-ci:/workspace/dist ./dist
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: localweb-${{ matrix.artifact }}
           path: dist/
@@ -56,7 +56,7 @@ jobs:
           cp native-build.log native-diagnostics/ 2>/dev/null || true
           docker cp lw-ci:/workspace/packaging/php-builds/logs native-diagnostics/php-build-logs 2>/dev/null || true
           docker cp lw-ci:/workspace/packaging/runtime-root native-diagnostics/runtime-root 2>/dev/null || true
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         if: always()
         with:
           name: localweb-native-diagnostics-${{ matrix.artifact }}
@@ -92,7 +92,7 @@ jobs:
         run: bash scripts/windows-wine-smoke.sh
       - name: Package the Windows binaries
         run: bash scripts/build-windows-zip.sh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: localweb-windows-amd64
           path: dist/*.zip
@@ -130,7 +130,7 @@ jobs:
             brew install librsvg || true
           fi
           sh packaging/macos/build-pkg.sh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: localweb-macos-universal
           path: dist/*.pkg

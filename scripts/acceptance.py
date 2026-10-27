@@ -24,6 +24,19 @@ runtime_parent = base / "runtime" if mac else Path(os.environ["XDG_RUNTIME_DIR"]
 env = os.environ | {"XDG_CONFIG_HOME": str(base / "config"), "XDG_DATA_HOME": str(base / "data"), "XDG_STATE_HOME": str(base / "state"), "XDG_RUNTIME_DIR": str(runtime_parent)}
 sock = runtime_parent / "localweb/localweb.sock"
 uid = subprocess.check_output(["id", "-u"], text=True).strip()
+if not mac:
+    shim_dir = base / "bin"
+    shim_dir.mkdir()
+    pkexec = shim_dir / "pkexec"
+    pkexec.write_text(
+        "#!/bin/sh\n"
+        'PKEXEC_UID="${PKEXEC_UID:-$(id -u)}"\n'
+        "export PKEXEC_UID\n"
+        'exec sudo -n env PKEXEC_UID="$PKEXEC_UID" "$@"\n'
+    )
+    pkexec.chmod(0o755)
+    env["PATH"] = f"{shim_dir}:{env['PATH']}"
+    env["PKEXEC_UID"] = uid
 
 
 def request(kind, data=None):
@@ -88,26 +101,58 @@ try:
     mcp.wait(timeout=10)
     mcp = None
     domains = [f"php8-{minor}-{web}-{db}.test" for minor in range(6) for web in ("nginx", "apache") for db in ("mariadb", "mysql", "postgres", "sqlite")]
+    domains.append("php-update.test")
     helper("sync-hosts", json.dumps({"address": gateway_address, "domains": domains}).encode())
     ca = request("ca_status")
-    certificate = Path(ca["certificate"]).read_bytes()
-    try:
-        helper("install-ca", certificate)
-    except subprocess.CalledProcessError:
-        trusted = [
-            Path("/usr/local/share/ca-certificates/localweb-development-ca.crt"),
-            Path("/etc/ca-certificates/trust-source/anchors/localweb-development-ca.crt"),
-            Path("/etc/pki/ca-trust/source/anchors/localweb-development-ca.crt"),
-        ]
-        previous = next((path for path in trusted if path.is_file()), None)
-        assert previous is not None, "install-ca refused and no trusted LocalWeb CA was found"
-        helper("remove-ca", previous.read_bytes())
-        helper("install-ca", certificate)
+    if mac:
+        helper("install-ca", Path(ca["certificate"]).read_bytes())
+    else:
+        subprocess.run(
+            [str(binary_dir / "localweb"), "ca", "install"],
+            env=env,
+            check=True,
+        )
     registration = {name: str(base / name / "localweb") for name in ("config", "data", "state")}
     registration["runtime"] = str(runtime_parent / "localweb")
     helper("register-paths", json.dumps(registration).encode())
-    assert request("ca_status")["trusted"]
+    ca = request("ca_status")
+    assert ca["system_trusted"], ca
+    assert ca["browser_trusted"], ca
+    assert ca["trusted"], ca
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    update_name = "php-update"
+    update_path = base / update_name
+    update_path.mkdir()
+    (update_path / "index.php").write_text("<?php echo PHP_MAJOR_VERSION.'.'.PHP_MINOR_VERSION;", encoding="utf-8")
+    update_spec = {"path": str(update_path), "name": update_name, "hostname": f"{update_name}.test", "document_root": ".", "profile": "genericphp", "web_server": "nginx", "php": "8.5", "composer": "2", "node": "24", "database": "none", "cache": "none", "supervisor": {"enabled": False, "command": []}, "cron": [], "cron_preset": False, "mail": False, "autostart": False}
+    added = request("project_add", update_spec)
+    request("project_start", {"name": update_name})
+    web_port = added["project"]["web_port"]
+    with opener.open(f"https://{update_name}.test", timeout=20) as response:
+        assert response.read().decode() == "8.5"
+    changed = update_spec | {"web_server": "apache", "php": "8.4", "database": "mariadb", "cache": "redis", "mail": True, "autostart": True}
+    updated = request("project_update", {"name": update_name, "input": changed})
+    project = updated["project"]
+    assert updated["running"], "an active project must restart after an update"
+    assert project["id"] == added["project"]["id"]
+    assert project["name"] == update_name and project["hostname"] == f"{update_name}.test"
+    assert project["path"] == added["project"]["path"]
+    assert project["web_port"] == web_port, "the direct web port must survive an update"
+    assert project["php"] == "8.4" and project["web_server"] == "apache"
+    assert project["database"] == "mariadb" and project["cache"] == "redis"
+    assert project["database_port"] and project["database_port"] != project["web_port"]
+    with opener.open(f"https://{update_name}.test", timeout=20) as response:
+        assert response.read().decode() == "8.4"
+    with opener.open(f"http://127.0.0.1:{web_port}/", timeout=20) as response:
+        assert response.read().decode() == "8.4"
+    request("project_stop", {"name": update_name})
+    stopped = request("project_update", {"name": update_name, "input": changed | {"database": "sqlite", "cache": "none", "mail": False}})
+    assert not stopped["running"]
+    assert stopped["project"]["database"] == "sqlite"
+    assert stopped["project"]["database_port"] is None
+    request("project_remove", {"name": update_name})
+    assert (update_path / "index.php").is_file(), "Update or removal touched source files"
+    print("PASS php-update: live settings update, restart, database switch", flush=True)
     for minor in range(6):
         for web in ("nginx", "apache"):
             for db in ("mariadb", "mysql", "postgres", "sqlite"):
