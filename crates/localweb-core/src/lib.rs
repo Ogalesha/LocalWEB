@@ -647,6 +647,65 @@ impl Project {
         })
     }
 
+    /// Builds a validated update that keeps the project identity and ownership
+    /// metadata while applying new runtime settings.
+    ///
+    /// The source path, name, hostname, identifier, environment, resource
+    /// limits, enabled flag, and creation timestamp always come from
+    /// `existing`; `input` only contributes editable settings. A database port
+    /// is preserved when both the old and new engines need one, and dropped
+    /// when the new engine does not expose a network port.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid paths, document roots, PHP/Node versions,
+    /// worker commands, or cron schedules.
+    pub fn from_update(existing: &Self, input: NewProject, global: &GlobalConfig) -> Result<Self> {
+        let database = input.database.unwrap_or(global.defaults.database);
+        let database_port = if matches!(
+            database,
+            Database::Mariadb | Database::Mysql | Database::Postgres
+        ) {
+            existing.database_port
+        } else {
+            None
+        };
+        let mut updated = Self::from_new(
+            NewProject {
+                path: existing.path.clone(),
+                name: Some(existing.name.clone()),
+                hostname: Some(existing.hostname.clone()),
+                web_port: existing.web_port,
+                database_port,
+                document_root: input.document_root,
+                profile: input.profile,
+                web_server: input.web_server,
+                php: input.php,
+                composer: input.composer,
+                node: input.node,
+                database: Some(database),
+                cache: input.cache,
+                supervisor: input.supervisor,
+                cron: input.cron,
+                cron_preset: input.cron_preset,
+                mail: input.mail,
+                autostart: input.autostart,
+            },
+            global,
+        )?;
+        updated.id = existing.id;
+        updated.enabled = existing.enabled;
+        updated.environment = existing.environment.clone();
+        updated.resources = existing.resources.clone();
+        updated.created_at = existing.created_at;
+        // The edit form cannot represent per-entry enabled flags, so disabled
+        // tasks survive an edit instead of being silently discarded.
+        updated
+            .cron
+            .extend(existing.cron.iter().filter(|entry| !entry.enabled).cloned());
+        Ok(updated)
+    }
+
     /// Resolves the validated absolute document root.
     ///
     /// # Errors
@@ -1139,10 +1198,6 @@ pub fn atomic_write(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
 /// One versioned request sent to the daemon.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
-#[expect(
-    clippy::large_enum_variant,
-    reason = "creation carries the full project configuration by design"
-)]
 pub enum Request {
     /// Reports daemon and environment status.
     Status,
@@ -1157,6 +1212,13 @@ pub enum Request {
     },
     /// Validates and persists a new project.
     ProjectAdd(NewProject),
+    /// Updates an existing project's editable runtime settings.
+    ProjectUpdate {
+        /// Project name.
+        name: String,
+        /// New runtime settings.
+        input: NewProject,
+    },
     /// Deletes a project and its managed services.
     ProjectRemove {
         /// Project name.
@@ -1481,6 +1543,107 @@ mod tests {
                 "--timeout=90"
             ]
         );
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn project_update_preserves_identity_and_port_rules() {
+        let path = std::env::temp_dir().join(format!(
+            "localweb-update-{}-{}",
+            std::process::id(),
+            Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(path.join("public")).unwrap();
+        let mut existing = Project::from_new(
+            NewProject {
+                path: path.clone(),
+                name: Some("update-test".into()),
+                hostname: Some("update-test.dev".into()),
+                web_port: Some(9_011),
+                database_port: Some(33_081),
+                document_root: Some(PathBuf::from(".")),
+                profile: Some(Profile::GenericPhp),
+                web_server: Some(WebServer::Nginx),
+                php: Some("8.5".into()),
+                composer: Some("2".into()),
+                node: Some("24".into()),
+                database: Some(Database::Mariadb),
+                cache: Some(Cache::None),
+                supervisor: SupervisorConfig::default(),
+                cron: Vec::new(),
+                cron_preset: false,
+                mail: false,
+                autostart: false,
+            },
+            &GlobalConfig::default(),
+        )
+        .unwrap();
+        existing.enabled = false;
+        existing
+            .environment
+            .insert("APP_ENV".into(), "local".into());
+        existing.resources.fpm_max_children = 7;
+        existing.cron.push(CronEntry {
+            enabled: false,
+            schedule: "0 3 * * *".into(),
+            command: vec!["@php".into(), "artisan".into()],
+        });
+
+        let request = |database: Database, php: &str| NewProject {
+            path: PathBuf::from("/ignored"),
+            name: Some("ignored".into()),
+            hostname: Some("ignored.dev".into()),
+            web_port: None,
+            database_port: None,
+            document_root: Some(PathBuf::from("public")),
+            profile: Some(Profile::Laravel),
+            web_server: Some(WebServer::Apache),
+            php: Some(php.into()),
+            composer: Some("2".into()),
+            node: Some("22".into()),
+            database: Some(database),
+            cache: Some(Cache::Redis),
+            supervisor: SupervisorConfig::default(),
+            cron: vec![CronEntry {
+                enabled: true,
+                schedule: "* * * * *".into(),
+                command: vec!["@php".into(), "artisan".into(), "schedule:run".into()],
+            }],
+            cron_preset: false,
+            mail: false,
+            autostart: true,
+        };
+
+        let updated = Project::from_update(
+            &existing,
+            request(Database::Sqlite, "8.4"),
+            &GlobalConfig::default(),
+        )
+        .unwrap();
+        assert_eq!(updated.id, existing.id);
+        assert_eq!(updated.name, existing.name);
+        assert_eq!(updated.path, existing.path);
+        assert_eq!(updated.hostname, existing.hostname);
+        assert_eq!(updated.web_port, Some(9_011));
+        assert_eq!(updated.database, Database::Sqlite);
+        assert_eq!(updated.database_port, None);
+        assert_eq!(updated.php, "8.4");
+        assert_eq!(updated.web_server, WebServer::Apache);
+        assert!(!updated.enabled);
+        assert_eq!(updated.environment, existing.environment);
+        assert_eq!(updated.resources.fpm_max_children, 7);
+        assert_eq!(updated.created_at, existing.created_at);
+        assert_eq!(updated.cron.len(), 2);
+        assert!(updated.cron.iter().any(|entry| !entry.enabled));
+
+        let mysql = Project::from_update(
+            &existing,
+            request(Database::Mysql, "8.5"),
+            &GlobalConfig::default(),
+        )
+        .unwrap();
+        assert_eq!(mysql.database, Database::Mysql);
+        assert_eq!(mysql.database_port, Some(33_081));
         std::fs::remove_dir_all(path).unwrap();
     }
 

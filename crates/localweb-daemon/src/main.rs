@@ -294,6 +294,77 @@ async fn execute(request: Request, state: &Arc<State>) -> localweb_core::Result<
                 mail_web_url: None,
             }))
         }
+        Request::ProjectUpdate { name, input } => {
+            let _operations = state.operations.lock().await;
+            let existing = find_project(&state.paths, &name)?;
+            let mut updated = Project::from_update(&existing, input, &state.config)?;
+            let projects = load_projects(&state.paths)?;
+            let mut used: BTreeSet<u16> = projects
+                .iter()
+                .filter(|project| project.id != existing.id)
+                .flat_map(|project| [project.web_port, project.database_port])
+                .flatten()
+                .collect();
+            if let Some(port) = updated.web_port {
+                used.insert(port);
+            }
+            if services::database_service_port(updated.database).is_some()
+                && updated.database_port.is_none()
+            {
+                updated.database_port = Some(allocate_port(
+                    DATABASE_PORT_START,
+                    DATABASE_PORT_END,
+                    &used,
+                )?);
+            }
+            let services = Services {
+                paths: &state.paths,
+            };
+            services.check_project(&updated)?;
+            let was_running = state.running.lock().await.contains(&name);
+            if was_running {
+                stop_project_locked(state, &name).await?;
+            }
+            if let Err(error) = save_project(&state.paths, &updated) {
+                if was_running {
+                    let _ = start_project_locked(state, &name, false, true).await;
+                }
+                return Err(error);
+            }
+            let running = if was_running {
+                match start_project_locked(state, &name, false, true).await {
+                    Ok(()) => true,
+                    Err(error) => {
+                        let restore = save_project(&state.paths, &existing);
+                        let recovery = match restore {
+                            Ok(()) => start_project_locked(state, &name, false, true).await.err(),
+                            Err(restore) => Some(restore),
+                        };
+                        let mut message =
+                            format!("could not start {name} with the updated settings: {error}");
+                        match recovery {
+                            Some(recovery) => {
+                                message.push_str(
+                                    "; the previous settings were restored but the project could not be restarted: ",
+                                );
+                                message.push_str(&recovery.to_string());
+                            }
+                            None => message.push_str("; the previous settings were restored"),
+                        }
+                        return Err(LocalWebError::Service(message));
+                    }
+                }
+            } else {
+                false
+            };
+            Ok(Response::Project(ProjectStatus {
+                public_url: active_gateway_endpoint(&state.paths)
+                    .map(|endpoint| gateway_url(&updated.hostname, endpoint)),
+                mail_web_url: mail_web_url(&state.paths, &updated),
+                project: updated,
+                running,
+            }))
+        }
         Request::ProjectRemove { name } => {
             let _operations = state.operations.lock().await;
             let project = find_project(&state.paths, &name)?;

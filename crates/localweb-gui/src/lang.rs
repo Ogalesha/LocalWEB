@@ -1097,6 +1097,123 @@ impl Lang {
         }
     }
 
+    pub fn edit_title(self) -> &'static str {
+        match self {
+            Self::English => "Edit project",
+            Self::Italiano => "Modifica progetto",
+            Self::Shqip => "Ndrysho projektin",
+            Self::Spanish => "Editar proyecto",
+            Self::French => "Modifier le projet",
+            Self::Portuguese => "Editar projeto",
+            Self::Russian => "Изменить проект",
+            Self::Polish => "Edytuj projekt",
+            Self::Ukrainian => "Змінити проєкт",
+            Self::Turkish => "Projeyi düzenle",
+            Self::Greek => "Επεξεργασία έργου",
+            Self::Hindi => "प्रोजेक्ट संपादित करें",
+            Self::Chinese => "编辑项目",
+            Self::Swedish => "Redigera projekt",
+        }
+    }
+
+    pub fn edit_settings(self) -> &'static str {
+        match self {
+            Self::English => "Edit settings",
+            Self::Italiano => "Modifica impostazioni",
+            Self::Shqip => "Ndrysho cilësimet",
+            Self::Spanish => "Editar ajustes",
+            Self::French => "Modifier les réglages",
+            Self::Portuguese => "Editar definições",
+            Self::Russian => "Изменить настройки",
+            Self::Polish => "Edytuj ustawienia",
+            Self::Ukrainian => "Змінити налаштування",
+            Self::Turkish => "Ayarları düzenle",
+            Self::Greek => "Επεξεργασία ρυθμίσεων",
+            Self::Hindi => "सेटिंग्स संपादित करें",
+            Self::Chinese => "编辑设置",
+            Self::Swedish => "Redigera inställningar",
+        }
+    }
+
+    pub fn save_changes(self) -> &'static str {
+        match self {
+            Self::English => "Save changes",
+            Self::Italiano => "Salva modifiche",
+            Self::Shqip => "Ruaj ndryshimet",
+            Self::Spanish => "Guardar cambios",
+            Self::French => "Enregistrer",
+            Self::Portuguese => "Guardar alterações",
+            Self::Russian => "Сохранить изменения",
+            Self::Polish => "Zapisz zmiany",
+            Self::Ukrainian => "Зберегти зміни",
+            Self::Turkish => "Değişiklikleri kaydet",
+            Self::Greek => "Αποθήκευση αλλαγών",
+            Self::Hindi => "परिवर्तन सहेजें",
+            Self::Chinese => "保存更改",
+            Self::Swedish => "Spara ändringar",
+        }
+    }
+
+    pub fn edit_identity_note(self) -> &'static str {
+        match self {
+            Self::English => {
+                "Path, name and domain stay fixed. Change the runtime and services here."
+            }
+            Self::Italiano => {
+                "Percorso, nome e dominio restano fissi. Qui puoi cambiare runtime e servizi."
+            }
+            Self::Shqip => {
+                "Rruga, emri dhe domain-i mbeten fiks. Ndrysho runtime-in dhe shërbimet këtu."
+            }
+            Self::Spanish => {
+                "La ruta, el nombre y el dominio no cambian. Aquí puedes cambiar el runtime y los servicios."
+            }
+            Self::French => {
+                "Le chemin, le nom et le domaine restent fixes. Modifiez ici le runtime et les services."
+            }
+            Self::Portuguese => {
+                "O caminho, o nome e o domínio permanecem fixos. Altere aqui o runtime e os serviços."
+            }
+            Self::Russian => {
+                "Путь, имя и домен остаются неизменными. Здесь можно изменить runtime и сервисы."
+            }
+            Self::Polish => {
+                "Ścieżka, nazwa i domena pozostają stałe. Tutaj zmienisz runtime i usługi."
+            }
+            Self::Ukrainian => {
+                "Шлях, назва й домен залишаються незмінними. Тут можна змінити runtime і сервіси."
+            }
+            Self::Turkish => {
+                "Yol, ad ve alan adı sabit kalır. Runtime ve hizmetleri burada değiştirin."
+            }
+            Self::Greek => {
+                "Η διαδρομή, το όνομα και ο τομέας μένουν σταθερά. Αλλάξτε εδώ το runtime και τις υπηρεσίες."
+            }
+            Self::Hindi => "पथ, नाम और डोमेन स्थिर रहते हैं। यहाँ runtime और सेवाएँ बदलें।",
+            Self::Chinese => "路径、名称和域名保持不变。在此更改运行时和服务。",
+            Self::Swedish => "Sökväg, namn och domän är låsta. Ändra runtime och tjänster här.",
+        }
+    }
+
+    pub fn edit_restart_note(self) -> &'static str {
+        match self {
+            Self::English => "Saving restarts the project if it is running.",
+            Self::Italiano => "Il salvataggio riavvia il progetto se è in esecuzione.",
+            Self::Shqip => "Ruajtja e rinis projektin nëse është duke u ekzekutuar.",
+            Self::Spanish => "Guardar reinicia el proyecto si está en ejecución.",
+            Self::French => "L'enregistrement redémarre le projet s'il est en cours d'exécution.",
+            Self::Portuguese => "Guardar reinicia o projeto se estiver em execução.",
+            Self::Russian => "Сохранение перезапустит проект, если он запущен.",
+            Self::Polish => "Zapisanie ponownie uruchomi projekt, jeśli działa.",
+            Self::Ukrainian => "Збереження перезапустить проєкт, якщо він запущений.",
+            Self::Turkish => "Kaydetmek, proje çalışıyorsa yeniden başlatır.",
+            Self::Greek => "Η αποθήκευση επανεκκινεί το έργο αν εκτελείται.",
+            Self::Hindi => "सहेजने पर प्रोजेक्ट चल रहा हो तो पुनः आरंभ होगा।",
+            Self::Chinese => "保存后，运行中的项目将重新启动。",
+            Self::Swedish => "Sparandet startar om projektet om det körs.",
+        }
+    }
+
     pub fn operation_busy(self) -> &'static str {
         match self {
             Self::English => "Working…",
@@ -2179,6 +2296,25 @@ impl Lang {
             Self::Swedish => {
                 format!("Projektet {name} har lagts till. Synkroniserar den lokala domänen…")
             }
+        }
+    }
+
+    pub fn notice_project_updated(self, name: &str) -> String {
+        match self {
+            Self::English => format!("Settings updated for {name}."),
+            Self::Italiano => format!("Impostazioni aggiornate per {name}."),
+            Self::Shqip => format!("Cilësimet u përditësuan për {name}."),
+            Self::Spanish => format!("Ajustes actualizados para {name}."),
+            Self::French => format!("Réglages mis à jour pour {name}."),
+            Self::Portuguese => format!("Definições atualizadas para {name}."),
+            Self::Russian => format!("Настройки обновлены для {name}."),
+            Self::Polish => format!("Zaktualizowano ustawienia dla {name}."),
+            Self::Ukrainian => format!("Налаштування оновлено для {name}."),
+            Self::Turkish => format!("{name} için ayarlar güncellendi."),
+            Self::Greek => format!("Οι ρυθμίσεις ενημερώθηκαν για {name}."),
+            Self::Hindi => format!("{name} की सेटिंग्स अपडेट हुईं।"),
+            Self::Chinese => format!("{name} 的设置已更新。"),
+            Self::Swedish => format!("Inställningarna för {name} har uppdaterats."),
         }
     }
 

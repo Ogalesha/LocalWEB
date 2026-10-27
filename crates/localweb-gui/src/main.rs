@@ -8,9 +8,9 @@ use eframe::egui::{self, Color32, RichText, Stroke, Vec2};
 use icons::Icon;
 use lang::Lang;
 use localweb_core::{
-    CaStatus, Cache, Database, GlobalConfig, NewProject, Paths, Profile, ProjectStatus, Request,
-    Response, Status, SupervisorConfig, WebServer, default_supervisor_command, detect_profile,
-    sanitize_name, send_request,
+    CaStatus, Cache, Database, GlobalConfig, NewProject, Paths, Profile, Project, ProjectStatus,
+    Request, Response, Status, SupervisorConfig, WebServer, default_supervisor_command,
+    detect_profile, sanitize_name, send_request,
 };
 use std::{
     collections::BTreeMap,
@@ -74,6 +74,7 @@ enum View {
     Dashboard,
     Projects,
     AddProject,
+    EditProject,
     Settings,
 }
 
@@ -117,6 +118,7 @@ enum Action {
     StartDaemon,
     Shutdown,
     AddProject,
+    UpdateProject(String),
     SyncHosts,
     StartProject,
     StopProject,
@@ -162,6 +164,7 @@ struct LocalWebApp {
     mcp_path: Option<PathBuf>,
     project_search: String,
     form: AddProjectForm,
+    edit_project: Option<Project>,
     picker: Option<DirectoryPicker>,
     remove_confirmation: Option<String>,
     stop_confirmation: bool,
@@ -212,6 +215,7 @@ impl LocalWebApp {
             mcp_path: find_program("localweb-mcp"),
             project_search: String::new(),
             form: AddProjectForm::default(),
+            edit_project: None,
             picker: None,
             remove_confirmation: None,
             stop_confirmation: false,
@@ -343,6 +347,9 @@ impl LocalWebApp {
                     Action::LoadEnvironment(name) if self.details.as_ref() == Some(&name) => {
                         self.environment_error = Some(error);
                     }
+                    Action::UpdateProject(_) if self.view == View::EditProject => {
+                        self.form.error = Some(error);
+                    }
                     _ => self.notice = Some(Notice::error(error)),
                 }
                 return;
@@ -356,6 +363,9 @@ impl LocalWebApp {
                 Action::LoadCa => self.ca_error = Some(error),
                 Action::LoadEnvironment(name) if self.details.as_ref() == Some(&name) => {
                     self.environment_error = Some(error);
+                }
+                Action::UpdateProject(_) if self.view == View::EditProject => {
+                    self.form.error = Some(error);
                 }
                 _ => self.notice = Some(Notice::error(error)),
             }
@@ -403,6 +413,16 @@ impl LocalWebApp {
                 self.view = View::Projects;
                 self.request(Action::LoadProjects, Request::ProjectList);
                 self.sync_hosts();
+            }
+            (Action::UpdateProject(name), Response::Project(project)) => {
+                debug_assert_eq!(project.project.name, name);
+                self.notice = Some(Notice::success(self.lang.notice_project_updated(&name)));
+                self.form = AddProjectForm::default();
+                self.edit_project = None;
+                self.details = Some(name);
+                self.view = View::Projects;
+                self.request(Action::LoadProjects, Request::ProjectList);
+                self.request(Action::RefreshStatus, Request::Status);
             }
             (
                 action @ (Action::StartProject | Action::StopProject | Action::RestartProject),
@@ -456,6 +476,30 @@ impl LocalWebApp {
             }
             (_, Err(error)) => self.notice = Some(Notice::error(error)),
             (_, Ok(message)) => self.notice = Some(Notice::success(message)),
+        }
+    }
+
+    fn open_add_project(&mut self) {
+        if self.edit_project.is_some() {
+            self.edit_project = None;
+            self.form = AddProjectForm::default();
+        }
+        self.view = View::AddProject;
+    }
+
+    fn edit_project_settings(&mut self, project: &Project) {
+        self.form = AddProjectForm::from_project(project);
+        self.edit_project = Some(project.clone());
+        self.details = None;
+        self.environment = None;
+        self.environment_error = None;
+        self.view = View::EditProject;
+    }
+
+    fn leave_project_form(&mut self) {
+        if self.edit_project.is_some() {
+            self.edit_project = None;
+            self.form = AddProjectForm::default();
         }
     }
 
@@ -546,6 +590,7 @@ impl LocalWebApp {
                 )
                 .clicked()
                 {
+                    self.leave_project_form();
                     self.view = View::Dashboard;
                 }
                 ui.add_space(4.0);
@@ -553,10 +598,14 @@ impl LocalWebApp {
                     ui,
                     lang.nav_projects(),
                     Icon::Folder,
-                    matches!(self.view, View::Projects | View::AddProject),
+                    matches!(
+                        self.view,
+                        View::Projects | View::AddProject | View::EditProject
+                    ),
                 )
                 .clicked()
                 {
+                    self.leave_project_form();
                     self.view = View::Projects;
                 }
                 ui.add_space(4.0);
@@ -568,6 +617,7 @@ impl LocalWebApp {
                 )
                 .clicked()
                 {
+                    self.leave_project_form();
                     self.view = View::Settings;
                 }
                 egui::Panel::bottom("rail_footer")
@@ -771,7 +821,7 @@ impl LocalWebApp {
             });
         }
         if open_add {
-            self.view = View::AddProject;
+            self.open_add_project();
         }
     }
 
@@ -807,7 +857,7 @@ impl LocalWebApp {
                 },
                 self.daemon_online.then_some((lang.nav_add(), Icon::Plus)),
             ) {
-                self.view = View::AddProject;
+                self.open_add_project();
             }
         } else {
             let preview = self.projects.iter().take(5).cloned().collect::<Vec<_>>();
@@ -1000,7 +1050,7 @@ impl LocalWebApp {
                 },
                 self.daemon_online.then_some((lang.nav_add(), Icon::Plus)),
             ) {
-                self.view = View::AddProject;
+                self.open_add_project();
             }
             return;
         }
@@ -1353,6 +1403,18 @@ impl LocalWebApp {
                     });
                 let hovered = ui.rect_contains_pointer(inner.response.rect);
                 ui.data_mut(|data| data.insert_temp(hover_id, hovered));
+                if self.details.as_deref() == Some(&item.project.name) {
+                    egui::Frame::NONE
+                        .inner_margin(egui::Margin {
+                            left: 18,
+                            right: 18,
+                            top: 0,
+                            bottom: 10,
+                        })
+                        .show(ui, |ui| {
+                            self.project_details(ui, item);
+                        });
+                }
             }
         }
     }
@@ -1652,6 +1714,18 @@ impl LocalWebApp {
             .color(INK_MUTED),
         );
         ui.add_space(8.0);
+        if self.daemon_online {
+            if Pill::new(lang.edit_settings(), PillKind::Secondary)
+                .icon(Icon::Settings)
+                .height(36.0)
+                .enabled(self.pending == 0)
+                .show(ui)
+                .clicked()
+            {
+                self.edit_project_settings(project);
+            }
+            ui.add_space(8.0);
+        }
         if self.environment.is_none() && self.environment_error.is_none() {
             if Pill::new(lang.reveal_environment(), PillKind::Secondary)
                 .height(36.0)
@@ -1732,9 +1806,23 @@ impl LocalWebApp {
         ui.add_space(6.0);
     }
 
-    fn add_project(&mut self, ui: &mut egui::Ui) {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "adding and editing share one validated submission path"
+    )]
+    fn project_form(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang;
-        self.page_toolbar(ui, lang.add_title(), false, self.daemon_online);
+        let editing = self.edit_project.is_some();
+        self.page_toolbar(
+            ui,
+            if editing {
+                lang.edit_title()
+            } else {
+                lang.add_title()
+            },
+            false,
+            self.daemon_online,
+        );
         ui.add_space(22.0);
         if !self.daemon_online {
             callout(ui, CalloutKind::Warning, Icon::Warning, |ui| {
@@ -1756,6 +1844,17 @@ impl LocalWebApp {
         ui.add_space(14.0);
         self.project_services_form(ui);
         ui.add_space(16.0);
+        if editing {
+            ui.add(
+                egui::Label::new(
+                    RichText::new(lang.edit_restart_note())
+                        .size(SMALL_SIZE)
+                        .color(INK_MUTED),
+                )
+                .wrap(),
+            );
+            ui.add_space(8.0);
+        }
         ui.horizontal(|ui| {
             if Pill::new(lang.cancel(), PillKind::Ghost)
                 .height(theme::COMMAND_HEIGHT)
@@ -1763,15 +1862,23 @@ impl LocalWebApp {
                 .clicked()
             {
                 self.form = AddProjectForm::default();
+                self.edit_project = None;
                 self.view = View::Projects;
             }
-            submit = Pill::new(lang.create_project(), PillKind::Primary)
-                .icon(Icon::Check)
-                .height(theme::COMMAND_HEIGHT)
-                .min_width(150.0)
-                .enabled(self.pending == 0)
-                .show(ui)
-                .clicked();
+            submit = Pill::new(
+                if editing {
+                    lang.save_changes()
+                } else {
+                    lang.create_project()
+                },
+                PillKind::Primary,
+            )
+            .icon(Icon::Check)
+            .height(theme::COMMAND_HEIGHT)
+            .min_width(150.0)
+            .enabled(self.pending == 0)
+            .show(ui)
+            .clicked();
             if self.pending > 0 {
                 ui.spinner();
                 ui.label(RichText::new(lang.operation_busy()).color(INK_MUTED));
@@ -1779,7 +1886,20 @@ impl LocalWebApp {
         });
         if submit {
             match self.form.to_request(lang) {
-                Ok(request) => self.request(Action::AddProject, Request::ProjectAdd(request)),
+                Ok(request) => {
+                    self.form.error = None;
+                    if let Some(project) = self.edit_project.clone() {
+                        self.request(
+                            Action::UpdateProject(project.name.clone()),
+                            Request::ProjectUpdate {
+                                name: project.name,
+                                input: request,
+                            },
+                        );
+                    } else {
+                        self.request(Action::AddProject, Request::ProjectAdd(request));
+                    }
+                }
                 Err(error) => self.form.error = Some(error),
             }
         }
@@ -1794,61 +1914,114 @@ impl LocalWebApp {
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "locked identity rows and editable source settings share one grid"
+    )]
     fn project_source_form(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang;
+        let editing = self.edit_project.is_some();
         let card_width = (ui.available_width() - 40.0).max(300.0);
         card_frame().show(ui, |ui| {
             ui.set_min_width(card_width);
             let field_width = (ui.available_width() - 290.0).clamp(180.0, 380.0);
             section_heading(ui, lang.source_title(), lang.source_body());
+            if editing {
+                ui.add_space(6.0);
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(lang.edit_identity_note())
+                            .size(SMALL_SIZE)
+                            .color(INK_MUTED),
+                    )
+                    .wrap(),
+                );
+            }
             ui.add_space(12.0);
             egui::Grid::new("add_project_form")
                 .num_columns(2)
                 .spacing([22.0, 13.0])
                 .min_col_width(138.0)
                 .show(ui, |ui| {
-                    let label = form_label(ui, lang.path_label());
-                    ui.horizontal(|ui| {
-                        let response =
-                            single_line_field(ui, &mut self.form.path, field_width, "~/Code/acme")
-                                .labelled_by(label.id);
-                        if response.lost_focus() {
-                            let path = self.form.source_path();
-                            if path.is_dir() {
-                                self.form.detect_path(&path, &self.domain_suffix());
+                    if editing {
+                        let label = form_label(ui, lang.path_label());
+                        let path = self.form.path.clone();
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(truncate_middle(&path, 58))
+                                    .size(MONO_SIZE)
+                                    .color(INK_MUTED)
+                                    .monospace(),
+                            )
+                            .truncate(),
+                        )
+                        .labelled_by(label.id)
+                        .on_hover_text(path);
+                        ui.end_row();
+
+                        let label = form_label(ui, lang.name_label());
+                        ui.add(egui::Label::new(
+                            medium(&self.form.name).size(LABEL_SIZE).color(INK),
+                        ))
+                        .labelled_by(label.id);
+                        ui.end_row();
+
+                        let label = form_label(ui, lang.host_label());
+                        ui.add(egui::Label::new(
+                            medium(&self.form.hostname)
+                                .size(LABEL_SIZE)
+                                .color(ACCENT_TEXT),
+                        ))
+                        .labelled_by(label.id);
+                        ui.end_row();
+                    } else {
+                        let label = form_label(ui, lang.path_label());
+                        ui.horizontal(|ui| {
+                            let response = single_line_field(
+                                ui,
+                                &mut self.form.path,
+                                field_width,
+                                "~/Code/acme",
+                            )
+                            .labelled_by(label.id);
+                            if response.lost_focus() {
+                                let path = self.form.source_path();
+                                if path.is_dir() {
+                                    self.form.detect_path(&path, &self.domain_suffix());
+                                }
                             }
+                            if response.changed() {
+                                self.form.error = None;
+                            }
+                            if Pill::new(lang.browse(), PillKind::Secondary)
+                                .height(36.0)
+                                .show(ui)
+                                .clicked()
+                            {
+                                self.picker = Some(DirectoryPicker::new(&self.form.path));
+                            }
+                        });
+                        ui.end_row();
+                        if self.form.error.as_deref() == Some(lang.error_no_path()) {
+                            ui.label("");
+                            ui.label(
+                                RichText::new(lang.error_no_path())
+                                    .size(SMALL_SIZE)
+                                    .color(DANGER),
+                            );
+                            ui.end_row();
                         }
-                        if response.changed() {
-                            self.form.error = None;
-                        }
-                        if Pill::new(lang.browse(), PillKind::Secondary)
-                            .height(36.0)
-                            .show(ui)
-                            .clicked()
-                        {
-                            self.picker = Some(DirectoryPicker::new(&self.form.path));
-                        }
-                    });
-                    ui.end_row();
-                    if self.form.error.as_deref() == Some(lang.error_no_path()) {
-                        ui.label("");
-                        ui.label(
-                            RichText::new(lang.error_no_path())
-                                .size(SMALL_SIZE)
-                                .color(DANGER),
-                        );
+
+                        let label = form_label(ui, lang.name_label());
+                        single_line_field(ui, &mut self.form.name, field_width, "")
+                            .labelled_by(label.id);
+                        ui.end_row();
+
+                        let label = form_label(ui, lang.host_label());
+                        single_line_field(ui, &mut self.form.hostname, field_width, "")
+                            .labelled_by(label.id);
                         ui.end_row();
                     }
-
-                    let label = form_label(ui, lang.name_label());
-                    single_line_field(ui, &mut self.form.name, field_width, "")
-                        .labelled_by(label.id);
-                    ui.end_row();
-
-                    let label = form_label(ui, lang.host_label());
-                    single_line_field(ui, &mut self.form.hostname, field_width, "")
-                        .labelled_by(label.id);
-                    ui.end_row();
 
                     let label = form_label(ui, lang.docroot_label());
                     single_line_field(ui, &mut self.form.document_root, field_width, "")
@@ -2248,7 +2421,7 @@ impl eframe::App for LocalWebApp {
                             match self.view {
                                 View::Dashboard => self.dashboard(ui),
                                 View::Projects => self.projects(ui),
-                                View::AddProject => self.add_project(ui),
+                                View::AddProject | View::EditProject => self.project_form(ui),
                                 View::Settings => self.settings(ui),
                             }
                         });
@@ -2332,6 +2505,55 @@ impl Default for AddProjectForm {
 }
 
 impl AddProjectForm {
+    fn from_project(project: &Project) -> Self {
+        let preset = default_supervisor_command(project.profile);
+        let supervisor_custom =
+            project.supervisor.command != preset && !project.supervisor.command.is_empty();
+        let (supervisor_command, supervisor_args) = if supervisor_custom {
+            let mut command = project.supervisor.command.iter();
+            (
+                command.next().cloned().unwrap_or_default(),
+                command.cloned().collect::<Vec<_>>().join("\n"),
+            )
+        } else {
+            (String::new(), String::new())
+        };
+        let cron_entries = project
+            .cron
+            .iter()
+            .filter(|entry| entry.enabled)
+            .map(|entry| {
+                std::iter::once(entry.schedule.as_str())
+                    .chain(entry.command.iter().map(String::as_str))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .collect::<Vec<_>>();
+        Self {
+            error: None,
+            detected_path: None,
+            detected_suffix: "dev".into(),
+            path: project.path.display().to_string(),
+            name: project.name.clone(),
+            hostname: project.hostname.clone(),
+            document_root: project.document_root.display().to_string(),
+            profile: project.profile,
+            php: project.php.clone(),
+            database: project.database,
+            cache: project.cache,
+            supervisor: project.supervisor.enabled,
+            supervisor_custom,
+            supervisor_command,
+            supervisor_args,
+            cron: !cron_entries.is_empty(),
+            cron_lines: cron_entries.join("\n"),
+            mail: project.mail,
+            web_server: project.web_server,
+            node: project.node.clone(),
+            autostart: project.autostart,
+        }
+    }
+
     fn detect_path(&mut self, path: &Path, suffix: &str) {
         self.path = path.display().to_string();
         if self.detected_path.as_deref() == Some(path) {
@@ -3038,6 +3260,79 @@ mod tests {
     }
 
     #[test]
+    fn edit_form_round_trips_editable_settings() {
+        let path = test_source("edit-roundtrip");
+        fs::create_dir_all(path.join("public")).unwrap();
+        let project = Project::from_new(
+            NewProject {
+                path: path.clone(),
+                name: Some("edit-roundtrip".into()),
+                hostname: Some("edit-roundtrip.test".into()),
+                web_port: Some(9_201),
+                database_port: Some(33_201),
+                document_root: Some(PathBuf::from("public")),
+                profile: Some(Profile::Laravel),
+                web_server: Some(WebServer::Apache),
+                php: Some("8.4".into()),
+                composer: Some("2".into()),
+                node: Some("22".into()),
+                database: Some(Database::Postgres),
+                cache: Some(Cache::Redis),
+                supervisor: SupervisorConfig {
+                    enabled: true,
+                    command: vec![
+                        "@php".into(),
+                        "artisan".into(),
+                        "queue:work".into(),
+                        "--queue=high".into(),
+                    ],
+                },
+                cron: vec![
+                    localweb_core::CronEntry {
+                        enabled: true,
+                        schedule: "0 3 * * *".into(),
+                        command: vec!["@php".into(), "artisan".into(), "schedule:run".into()],
+                    },
+                    localweb_core::CronEntry {
+                        enabled: false,
+                        schedule: "0 4 * * *".into(),
+                        command: vec!["@php".into(), "artisan".into(), "queue:prune".into()],
+                    },
+                ],
+                cron_preset: false,
+                mail: true,
+                autostart: true,
+            },
+            &GlobalConfig::default(),
+        )
+        .unwrap();
+        let form = AddProjectForm::from_project(&project);
+        assert_eq!(form.path, path.display().to_string());
+        assert_eq!(form.name, "edit-roundtrip");
+        assert_eq!(form.hostname, "edit-roundtrip.test");
+        assert_eq!(form.php, "8.4");
+        assert_eq!(form.database, Database::Postgres);
+        assert_eq!(form.web_server, WebServer::Apache);
+        assert_eq!(form.node, "22");
+        assert!(form.supervisor && form.supervisor_custom);
+        assert_eq!(form.supervisor_command, "@php");
+        assert_eq!(form.supervisor_args, "artisan\nqueue:work\n--queue=high");
+        assert!(form.cron);
+        assert_eq!(form.cron_lines, "0 3 * * * @php artisan schedule:run");
+
+        let request = form.to_request(Lang::English).unwrap();
+        let updated = Project::from_update(&project, request, &GlobalConfig::default()).unwrap();
+        assert_eq!(updated.id, project.id);
+        assert_eq!(updated.php, project.php);
+        assert_eq!(updated.database, project.database);
+        assert_eq!(updated.web_server, project.web_server);
+        assert_eq!(updated.supervisor.command, project.supervisor.command);
+        assert_eq!(updated.cron.iter().filter(|entry| entry.enabled).count(), 1);
+        assert!(updated.cron.iter().any(|entry| !entry.enabled));
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
     fn disabling_cron_omits_hidden_commands() {
         let path = test_source("cron");
         let form = AddProjectForm {
@@ -3151,7 +3446,7 @@ mod tests {
                         .show(ui, |ui| match view {
                             View::Dashboard => app.dashboard(ui),
                             View::Projects => app.projects(ui),
-                            View::AddProject => app.add_project(ui),
+                            View::AddProject | View::EditProject => app.project_form(ui),
                             View::Settings => app.settings(ui),
                         });
                 });
@@ -3241,6 +3536,8 @@ mod tests {
                 560.0,
                 &[lang.action_start(), stop],
             );
+            app.details = Some(project.name.clone());
+            assert_view_fits(&mut app, View::Projects, 4000.0, &[lang.edit_settings()]);
             assert_view_fits(&mut app, View::AddProject, 560.0, &[stop]);
             assert_view_fits(
                 &mut app,
@@ -3248,6 +3545,18 @@ mod tests {
                 4000.0,
                 &[lang.create_project(), lang.cancel()],
             );
+            app.edit_project = Some(project.clone());
+            app.form = AddProjectForm::from_project(&project);
+            assert_view_fits(&mut app, View::EditProject, 560.0, &[stop]);
+            assert_view_fits(
+                &mut app,
+                View::EditProject,
+                4000.0,
+                &[lang.save_changes(), lang.cancel()],
+            );
+            app.edit_project = None;
+            app.form = AddProjectForm::default();
+            app.details = None;
             assert_view_fits(&mut app, View::Settings, 560.0, &[stop]);
             assert_view_fits(
                 &mut app,
