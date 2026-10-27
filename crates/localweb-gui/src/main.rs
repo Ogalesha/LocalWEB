@@ -3306,8 +3306,9 @@ mod tests {
             &GlobalConfig::default(),
         )
         .unwrap();
+        assert_eq!(project.path, path.canonicalize().unwrap());
         let form = AddProjectForm::from_project(&project);
-        assert_eq!(form.path, path.display().to_string());
+        assert_eq!(form.path, project.path.display().to_string());
         assert_eq!(form.name, "edit-roundtrip");
         assert_eq!(form.hostname, "edit-roundtrip.test");
         assert_eq!(form.php, "8.4");
