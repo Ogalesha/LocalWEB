@@ -143,7 +143,7 @@ enum ProjectCommand {
         #[arg(long)]
         json: bool,
     },
-    #[command(alias = "create")]
+    #[command(visible_alias = "create")]
     Add {
         path: PathBuf,
         #[arg(long)]
@@ -199,13 +199,13 @@ enum ProjectCommand {
         #[arg(long)]
         autostart: bool,
     },
-    #[command(alias = "show")]
+    #[command(visible_alias = "show")]
     Info {
         name: String,
         #[arg(long)]
         json: bool,
     },
-    #[command(alias = "edit")]
+    #[command(visible_alias = "edit")]
     Update {
         name: String,
         #[arg(long = "document-root")]
@@ -276,7 +276,7 @@ enum ProjectCommand {
     Restart {
         name: String,
     },
-    #[command(alias = "delete")]
+    #[command(visible_alias = "delete")]
     Remove {
         name: String,
     },
