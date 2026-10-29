@@ -150,9 +150,24 @@ try:
     assert not stopped["running"]
     assert stopped["project"]["database"] == "sqlite"
     assert stopped["project"]["database_port"] is None
+    redis_config = base / "config/localweb/generated/redis" / f"{update_name}.conf"
+    assert redis_config.is_file(), "the Redis configuration was not generated"
+    subprocess.check_call([str(binary_dir / "localweb"), "php", update_name, "--", "-r", "exit(0);"], env=env)
+    shim_dir = Path(env["XDG_RUNTIME_DIR"]) / "localweb/services/shims" / update_name
+    assert shim_dir.is_dir(), "the project command shims were not generated"
+    request("project_start", {"name": update_name})
+    assert request("project_get", {"name": update_name})["running"]
     request("project_remove", {"name": update_name})
+    try:
+        request("project_get", {"name": update_name})
+    except AssertionError as error:
+        assert "not found" in str(error).lower(), error
+    else:
+        raise AssertionError("removed project is still configured")
+    assert not redis_config.exists(), "removal left the generated Redis configuration behind"
+    assert not shim_dir.exists(), "removal left the project command shims behind"
     assert (update_path / "index.php").is_file(), "Update or removal touched source files"
-    print("PASS php-update: live settings update, restart, database switch", flush=True)
+    print("PASS php-update: live settings update, restart, database switch, active delete", flush=True)
     for minor in range(6):
         for web in ("nginx", "apache"):
             for db in ("mariadb", "mysql", "postgres", "sqlite"):

@@ -1,8 +1,8 @@
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use localweb_core::{
-    Cache, Database, ExecutionSpec, NewProject, Paths, Request, Response, SupervisorConfig,
-    WebServer, certificate::CaPaths, hosts::HostsSync, send_request,
+    Cache, Database, ExecutionSpec, NewProject, Paths, Profile, Project, Request, Response,
+    SupervisorConfig, WebServer, certificate::CaPaths, hosts::HostsSync, send_request,
 };
 use std::{
     ffi::OsString,
@@ -138,15 +138,12 @@ enum RuntimeCommand {
 }
 
 #[derive(Subcommand)]
-#[expect(
-    clippy::large_enum_variant,
-    reason = "project creation carries every option by design"
-)]
 enum ProjectCommand {
     List {
         #[arg(long)]
         json: bool,
     },
+    #[command(alias = "create")]
     Add {
         path: PathBuf,
         #[arg(long)]
@@ -202,8 +199,71 @@ enum ProjectCommand {
         #[arg(long)]
         autostart: bool,
     },
+    #[command(alias = "show")]
     Info {
         name: String,
+        #[arg(long)]
+        json: bool,
+    },
+    #[command(alias = "edit")]
+    Update {
+        name: String,
+        #[arg(long = "document-root")]
+        document_root: Option<PathBuf>,
+        #[arg(long)]
+        profile: Option<ProfileArg>,
+        #[arg(long = "web")]
+        web_server: Option<WebArg>,
+        /// PHP version for both CLI and FPM.
+        #[arg(long, value_parser = localweb_core::PHP_VERSIONS)]
+        php: Option<String>,
+        /// Node.js version; 24 is included, 20/22 need a matching installation.
+        #[arg(long, value_parser = ["20", "22", "24"])]
+        node: Option<String>,
+        #[arg(long = "db")]
+        database: Option<DbArg>,
+        #[arg(long)]
+        cache: Option<CacheArg>,
+        /// Composer major version (currently 2 only).
+        #[arg(long, value_parser = ["2"])]
+        composer: Option<String>,
+        /// Enable the detected Laravel or Symfony worker preset.
+        #[arg(long, conflicts_with = "no_supervisor")]
+        supervisor: bool,
+        /// Disable the project worker.
+        #[arg(long = "no-supervisor", conflicts_with = "supervisor")]
+        no_supervisor: bool,
+        /// Replace the worker executable; implies --supervisor.
+        #[arg(long = "supervisor-command", conflicts_with = "no_supervisor")]
+        supervisor_command: Option<String>,
+        /// One literal worker argument; repeat for multiple arguments.
+        #[arg(
+            long = "supervisor-arg",
+            allow_hyphen_values = true,
+            requires = "supervisor_command"
+        )]
+        supervisor_args: Vec<String>,
+        /// Replace the enabled scheduled tasks; repeat for multiple tasks.
+        #[arg(long = "cron", conflicts_with = "clear_cron")]
+        cron: Vec<String>,
+        /// Use the framework's conventional schedule when no --cron is given.
+        #[arg(long = "cron-preset", conflicts_with = "clear_cron")]
+        cron_preset: bool,
+        /// Remove every scheduled task, including disabled ones.
+        #[arg(long = "clear-cron", conflicts_with_all = ["cron", "cron_preset"])]
+        clear_cron: bool,
+        /// Run a private Mailpit instance for this project.
+        #[arg(long, conflicts_with = "no_mail")]
+        mail: bool,
+        /// Disable Mailpit for this project.
+        #[arg(long = "no-mail", conflicts_with = "mail")]
+        no_mail: bool,
+        /// Start the project on login.
+        #[arg(long, conflicts_with = "no_autostart")]
+        autostart: bool,
+        /// Do not start the project on login.
+        #[arg(long = "no-autostart", conflicts_with = "autostart")]
+        no_autostart: bool,
         #[arg(long)]
         json: bool,
     },
@@ -216,9 +276,130 @@ enum ProjectCommand {
     Restart {
         name: String,
     },
+    #[command(alias = "delete")]
     Remove {
         name: String,
     },
+}
+
+#[derive(Clone, Debug, Default)]
+enum SupervisorUpdate {
+    #[default]
+    Keep,
+    Enable,
+    Disable,
+    Command(Vec<String>),
+}
+
+#[derive(Default)]
+struct UpdateOptions {
+    document_root: Option<PathBuf>,
+    profile: Option<Profile>,
+    web_server: Option<WebServer>,
+    php: Option<String>,
+    node: Option<String>,
+    database: Option<Database>,
+    cache: Option<Cache>,
+    composer: Option<String>,
+    supervisor: SupervisorUpdate,
+    cron: Option<Vec<localweb_core::CronEntry>>,
+    cron_preset: bool,
+    clear_cron: bool,
+    mail: Option<bool>,
+    autostart: Option<bool>,
+}
+
+/// Merges the flags supplied to `project update` with the existing project.
+///
+/// `Project::from_update` receives a complete input so unset flags keep their
+/// current values instead of falling back to global defaults.
+fn update_input(existing: &Project, options: UpdateOptions) -> NewProject {
+    let supervisor = match options.supervisor {
+        SupervisorUpdate::Keep => existing.supervisor.clone(),
+        SupervisorUpdate::Enable => SupervisorConfig {
+            enabled: true,
+            command: existing.supervisor.command.clone(),
+        },
+        SupervisorUpdate::Disable => SupervisorConfig {
+            enabled: false,
+            command: Vec::new(),
+        },
+        SupervisorUpdate::Command(command) => SupervisorConfig {
+            enabled: true,
+            command,
+        },
+    };
+    let cron = options.cron.unwrap_or_else(|| {
+        existing
+            .cron
+            .iter()
+            .filter(|entry| entry.enabled)
+            .cloned()
+            .collect()
+    });
+    NewProject {
+        path: existing.path.clone(),
+        name: Some(existing.name.clone()),
+        hostname: Some(existing.hostname.clone()),
+        web_port: existing.web_port,
+        database_port: existing.database_port,
+        document_root: options
+            .document_root
+            .or_else(|| Some(existing.document_root.clone())),
+        profile: options.profile.or(Some(existing.profile)),
+        web_server: options.web_server.or(Some(existing.web_server)),
+        php: options.php.or_else(|| Some(existing.php.clone())),
+        composer: options.composer.or_else(|| Some(existing.composer.clone())),
+        node: options.node.or_else(|| Some(existing.node.clone())),
+        database: options.database.or(Some(existing.database)),
+        cache: options.cache.or(Some(existing.cache)),
+        supervisor,
+        cron,
+        cron_preset: options.cron_preset,
+        clear_cron: options.clear_cron,
+        mail: options.mail.unwrap_or(existing.mail),
+        autostart: options.autostart.unwrap_or(existing.autostart),
+    }
+}
+
+async fn project_status(paths: &Paths, name: &str) -> Result<localweb_core::ProjectStatus> {
+    let response = send_request(
+        paths,
+        Request::ProjectGet {
+            name: name.to_owned(),
+        },
+    )
+    .await
+    .context("cannot reach localwebd; run `localweb start` first")?;
+    match response {
+        Response::Project(status) => Ok(status),
+        Response::Error { code, message } => bail!("{code}: {message}"),
+        _ => bail!("unexpected daemon response"),
+    }
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum ProfileArg {
+    #[value(name = "genericphp", alias = "generic-php")]
+    GenericPhp,
+    Laravel,
+    Symfony,
+    Drupal,
+    Wordpress,
+    #[value(name = "processwire", alias = "process-wire")]
+    ProcessWire,
+}
+impl From<ProfileArg> for Profile {
+    fn from(value: ProfileArg) -> Self {
+        match value {
+            ProfileArg::GenericPhp => Self::GenericPhp,
+            ProfileArg::Laravel => Self::Laravel,
+            ProfileArg::Symfony => Self::Symfony,
+            ProfileArg::Drupal => Self::Drupal,
+            ProfileArg::Wordpress => Self::Wordpress,
+            ProfileArg::ProcessWire => Self::ProcessWire,
+        }
+    }
 }
 
 #[derive(Clone, ValueEnum)]
@@ -432,6 +613,7 @@ async fn main() -> Result<()> {
                     },
                     cron: cron_entries,
                     cron_preset,
+                    clear_cron: false,
                     mail,
                     web_port,
                     database_port,
@@ -444,6 +626,87 @@ async fn main() -> Result<()> {
             } => {
                 json = enabled;
                 Request::ProjectGet { name }
+            }
+            ProjectCommand::Update {
+                name,
+                document_root,
+                profile,
+                web_server,
+                php,
+                node,
+                database,
+                cache,
+                composer,
+                supervisor,
+                no_supervisor,
+                supervisor_command,
+                supervisor_args,
+                cron,
+                cron_preset,
+                clear_cron,
+                mail,
+                no_mail,
+                autostart,
+                no_autostart,
+                json: enabled,
+            } => {
+                json = enabled;
+                sync_after = true;
+                let existing = project_status(&paths, &name).await?;
+                let cron = if clear_cron || (cron_preset && cron.is_empty()) {
+                    Some(Vec::new())
+                } else if cron.is_empty() {
+                    None
+                } else {
+                    let mut entries = Vec::new();
+                    for line in &cron {
+                        entries.push(localweb_core::parse_cron_line(line)?);
+                    }
+                    Some(entries)
+                };
+                let supervisor = if let Some(command) = supervisor_command {
+                    let mut command = vec![command];
+                    command.extend(supervisor_args);
+                    SupervisorUpdate::Command(command)
+                } else if no_supervisor {
+                    SupervisorUpdate::Disable
+                } else if supervisor {
+                    SupervisorUpdate::Enable
+                } else {
+                    SupervisorUpdate::Keep
+                };
+                let options = UpdateOptions {
+                    document_root,
+                    profile: profile.map(Into::into),
+                    web_server: web_server.map(Into::into),
+                    php,
+                    node,
+                    database: database.map(Into::into),
+                    cache: cache.map(Into::into),
+                    composer,
+                    supervisor,
+                    cron,
+                    cron_preset,
+                    clear_cron,
+                    mail: if mail {
+                        Some(true)
+                    } else if no_mail {
+                        Some(false)
+                    } else {
+                        None
+                    },
+                    autostart: if autostart {
+                        Some(true)
+                    } else if no_autostart {
+                        Some(false)
+                    } else {
+                        None
+                    },
+                };
+                Request::ProjectUpdate {
+                    name,
+                    input: update_input(&existing.project, options),
+                }
             }
             ProjectCommand::Start { name } => Request::ProjectStart { name },
             ProjectCommand::Stop { name } => Request::ProjectStop { name },
@@ -925,6 +1188,209 @@ mod tests {
         assert_eq!(human_size(1024), "1.0 KiB");
         assert_eq!(human_size(1536), "1.5 KiB");
         assert_eq!(human_size(1024 * 1024), "1.0 MiB");
+    }
+
+    fn sample_project() -> (Project, PathBuf) {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "localweb-cli-update-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(path.join("public")).unwrap();
+        let project = Project::from_new(
+            NewProject {
+                path: path.clone(),
+                name: Some("cli-update".into()),
+                hostname: Some("cli-update.test".into()),
+                web_port: Some(9_123),
+                database_port: Some(33_123),
+                document_root: Some(PathBuf::from("public")),
+                profile: Some(Profile::Laravel),
+                web_server: Some(WebServer::Apache),
+                php: Some("8.4".into()),
+                composer: Some("2".into()),
+                node: Some("22".into()),
+                database: Some(Database::Mariadb),
+                cache: Some(Cache::Redis),
+                supervisor: SupervisorConfig {
+                    enabled: true,
+                    command: vec!["@php".into(), "artisan".into(), "queue:work".into()],
+                },
+                cron: vec![localweb_core::CronEntry {
+                    enabled: true,
+                    schedule: "*/5 * * * *".into(),
+                    command: vec!["@php".into(), "artisan".into(), "schedule:run".into()],
+                }],
+                cron_preset: false,
+                clear_cron: false,
+                mail: true,
+                autostart: true,
+            },
+            &localweb_core::GlobalConfig::default(),
+        )
+        .unwrap();
+        (project, path)
+    }
+
+    #[test]
+    fn update_merges_unset_flags_with_existing_project() {
+        let (mut existing, path) = sample_project();
+        existing.enabled = false;
+        existing
+            .environment
+            .insert("APP_ENV".into(), "local".into());
+        existing.cron.push(localweb_core::CronEntry {
+            enabled: false,
+            schedule: "0 3 * * *".into(),
+            command: vec!["@php".into(), "artisan".into(), "queue:prune".into()],
+        });
+        let input = update_input(
+            &existing,
+            UpdateOptions {
+                php: Some("8.3".into()),
+                ..Default::default()
+            },
+        );
+        let updated =
+            Project::from_update(&existing, input, &localweb_core::GlobalConfig::default())
+                .unwrap();
+        assert_eq!(updated.id, existing.id);
+        assert_eq!(updated.name, existing.name);
+        assert_eq!(updated.path, existing.path);
+        assert_eq!(updated.hostname, existing.hostname);
+        assert_eq!(updated.web_port, existing.web_port);
+        assert_eq!(updated.database_port, existing.database_port);
+        assert_eq!(updated.document_root, existing.document_root);
+        assert_eq!(updated.profile, existing.profile);
+        assert_eq!(updated.web_server, existing.web_server);
+        assert_eq!(updated.composer, existing.composer);
+        assert_eq!(updated.node, existing.node);
+        assert_eq!(updated.database, existing.database);
+        assert_eq!(updated.cache, existing.cache);
+        assert_eq!(updated.supervisor, existing.supervisor);
+        assert_eq!(updated.mail, existing.mail);
+        assert_eq!(updated.autostart, existing.autostart);
+        assert_eq!(updated.enabled, existing.enabled);
+        assert_eq!(updated.environment, existing.environment);
+        assert_eq!(updated.created_at, existing.created_at);
+        assert_eq!(updated.php, "8.3");
+        assert_eq!(updated.cron.len(), 2);
+        assert_eq!(
+            updated.cron.iter().filter(|entry| !entry.enabled).count(),
+            1
+        );
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn update_can_disable_services_and_clear_cron() {
+        let (existing, path) = sample_project();
+        let input = update_input(
+            &existing,
+            UpdateOptions {
+                supervisor: SupervisorUpdate::Disable,
+                cron: Some(Vec::new()),
+                clear_cron: true,
+                mail: Some(false),
+                autostart: Some(false),
+                ..Default::default()
+            },
+        );
+        let updated =
+            Project::from_update(&existing, input, &localweb_core::GlobalConfig::default())
+                .unwrap();
+        assert!(!updated.supervisor.enabled);
+        assert!(updated.cron.is_empty());
+        assert!(!updated.mail);
+        assert!(!updated.autostart);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn update_enables_the_profile_worker_preset() {
+        let (mut existing, path) = sample_project();
+        existing.supervisor = SupervisorConfig::default();
+        let input = update_input(
+            &existing,
+            UpdateOptions {
+                supervisor: SupervisorUpdate::Enable,
+                ..Default::default()
+            },
+        );
+        let updated =
+            Project::from_update(&existing, input, &localweb_core::GlobalConfig::default())
+                .unwrap();
+        assert!(updated.supervisor.enabled);
+        assert_eq!(
+            updated.supervisor.command,
+            [
+                "@php",
+                "artisan",
+                "queue:work",
+                "--sleep=3",
+                "--tries=3",
+                "--timeout=90"
+            ]
+        );
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn update_flags_are_tri_state() {
+        let cli = Cli::try_parse_from([
+            "localweb",
+            "project",
+            "update",
+            "app",
+            "--no-mail",
+            "--no-autostart",
+            "--no-supervisor",
+            "--clear-cron",
+        ])
+        .unwrap();
+        match cli.command {
+            CommandKind::Project {
+                command:
+                    ProjectCommand::Update {
+                        no_mail,
+                        no_autostart,
+                        no_supervisor,
+                        clear_cron,
+                        ..
+                    },
+            } => {
+                assert!(no_mail);
+                assert!(no_autostart);
+                assert!(no_supervisor);
+                assert!(clear_cron);
+            }
+            _ => panic!("expected project update"),
+        }
+        assert!(
+            Cli::try_parse_from([
+                "localweb",
+                "project",
+                "update",
+                "app",
+                "--mail",
+                "--no-mail"
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "localweb",
+                "project",
+                "update",
+                "app",
+                "--cron-preset",
+                "--clear-cron"
+            ])
+            .is_err()
+        );
     }
 
     #[test]

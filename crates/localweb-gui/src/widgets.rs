@@ -61,10 +61,12 @@ impl<'a> Pill<'a> {
         self
     }
 
-    /// Supplies the assistive-technology name for an icon-only control.
+    /// Configures an icon-only control with a 44 px square pointer target.
     #[must_use]
-    pub fn accessible_label(mut self, label: &'a str) -> Self {
+    pub fn icon_only(mut self, icon: Icon, label: &'a str) -> Self {
+        self.icon = Some(icon);
         self.accessible_label = Some(label);
+        self.min_width = theme::PILL_TARGET_HEIGHT;
         self
     }
 
@@ -747,5 +749,30 @@ mod tests {
             },
         );
         assert!((height - theme::PILL_TARGET_HEIGHT).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn icon_only_pill_keeps_a_square_pointer_target() {
+        let ctx = egui::Context::default();
+        theme::configure_style(&ctx);
+        let mut rect = egui::Rect::NOTHING;
+        let _ = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    Vec2::new(200.0, 100.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                rect = Pill::new("", PillKind::Ghost)
+                    .icon_only(Icon::Trash, "Delete")
+                    .height(theme::COMPACT_CONTROL_HEIGHT)
+                    .show(ui)
+                    .rect;
+            },
+        );
+        assert!(rect.width() >= theme::PILL_TARGET_HEIGHT);
+        assert!(rect.height() >= theme::PILL_TARGET_HEIGHT);
     }
 }

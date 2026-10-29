@@ -30,7 +30,7 @@ requirements still determine which PHP and database versions it can use.
 | **Scheduled tasks** | Five-field cron schedules, framework presets, logs and overlap protection while the project is active. |
 | **Local domains** | Exact project entries in `/etc/hosts`, with `.dev` as the default suffix. |
 | **Direct ports and HTTPS domains** | Every project gets a fixed loopback HTTP port (18000–18999) and, for network databases, a fixed loopback database port (19000–19999) forwarded to the shared engine. On Linux the TLS gateway owns a dedicated loopback identity such as `127.0.0.2:443`, so other local stacks can keep `127.0.0.1:443`. |
-| **Desktop app** | Project search, runtime/service selection, start/stop/restart, browser and Mailpit opening, details and connection settings. |
+| **Desktop app** | Explicit project details, edit and delete actions, runtime/service selection, start/stop/restart, browser and Mailpit opening, connection settings, and a system tray that keeps LocalWeb available after closing the window. |
 | **CLI** | Project management, PHP/Composer/Node commands, shell access, environment values and diagnostics. |
 | **AI assistants (MCP)** | A Model Context Protocol server (`localweb-mcp`) that lets AI assistants create, start, inspect and test projects through the same daemon as the desktop app. |
 | **Autostart** | Optional login startup and per-project startup preferences. |
@@ -117,6 +117,41 @@ check its preset and document root, choose the runtime and services, then
 confirm with **Add project**. The source files are kept where they are.
 Select **Start** to run the project and **Open** to visit it.
 
+## Project CRUD
+
+Every project exposes the same four operations in the desktop app and in the
+CLI:
+
+| Operation | Desktop | CLI |
+| --- | --- | --- |
+| Create | **Add project** | `localweb project add <path>` |
+| Read | **Details** on the project row, or `localweb project list` | `localweb project info <name>` |
+| Update | **Edit** on the project row | `localweb project update <name>` |
+| Delete | **Delete** on the project row | `localweb project remove <name>` |
+
+The row actions are always visible, including in the narrow stacked layout.
+**Edit** opens the full settings form; **Delete** asks for confirmation.
+Deleting an active project stops it first, then removes its LocalWeb
+configuration, local domain and project-owned runtime artifacts. The source
+folder and database data are always retained.
+
+`localweb project update` changes only the flags you pass. Name, path,
+hostname, project identifier, environment variables, resource limits and
+creation time are preserved. The same applies to the desktop edit form.
+For example:
+
+```bash
+localweb project update acme --php 8.4 --web apache
+localweb project update acme --db postgres --cache redis --mail
+localweb project update acme --no-mail --no-autostart
+localweb project update acme --clear-cron
+localweb project update acme --cron '*/10 * * * * @php artisan schedule:run'
+```
+
+`--supervisor` enables the profile worker preset, `--no-supervisor` disables
+the worker, and `--supervisor-command` replaces it. Without one of these
+flags the current worker configuration is kept.
+
 For a terminal workflow:
 
 ```bash
@@ -182,8 +217,10 @@ localweb doctor
 localweb runtime list
 localweb project list
 localweb project info acme
+localweb project update acme --php 8.4
 localweb project restart acme
 localweb project stop acme
+localweb project remove acme
 localweb node acme -- --version
 localweb npm acme -- run build
 localweb npx acme -- --version
@@ -193,8 +230,13 @@ localweb autostart enable
 localweb shutdown
 ```
 
-Closing the desktop window leaves projects running. **Stop LocalWeb** stops
-the managed environment; **Stop** on a project affects that project.
+Closing the desktop window keeps LocalWeb running in the system tray on
+Linux, macOS and Windows. Clicking the tray icon shows **Open** and **Quit**:
+**Open** restores the window, while **Quit** closes the desktop app only.
+The daemon and running projects keep working, so **Stop LocalWeb** remains
+the way to stop the managed environment; **Stop** on a project affects that
+project. On a Linux desktop without a StatusNotifier watcher, closing the
+window exits normally instead of hiding an unreachable app.
 The displayed project state is the daemon's active-project state, not a
 continuous health check of every service. When a project starts or restarts,
 the daemon reads a bounded HTTP/1.x status line from its direct loopback port:

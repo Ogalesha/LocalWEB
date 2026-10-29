@@ -6,6 +6,16 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Explicit **Details**, **Edit** and **Delete** actions on every desktop project row, with 44 px targets, tooltips, accessible names and labeled controls in the stacked layout.
+- `localweb project update <name>` changes only the supplied settings and preserves the project identity, path, hostname, environment, resources and creation time; `create`, `show`, `edit` and `delete` are accepted as CRUD aliases.
+- A Linux, macOS and Windows system tray with localized **Open** and **Quit** actions; closing the window keeps LocalWeb available in the tray.
+
+### Changed
+
+- Deleting a running project stops it first, then removes its configuration, local domain and project-owned runtime artifacts while retaining source files and database data.
+
 ## [0.1.3] - 2026-10-26
 
 ### Added

@@ -2,6 +2,7 @@ mod brand;
 mod icons;
 mod lang;
 mod theme;
+mod tray;
 mod widgets;
 
 use eframe::egui::{self, Color32, RichText, Stroke, Vec2};
@@ -29,6 +30,7 @@ use theme::{
     SUCCESS, SUCCESS_SOFT, SURFACE, SURFACE_HOVER, SURFACE_MUTED, WARNING, configure_style,
     medium_family, strong_family,
 };
+use tray::{Tray, TrayCommand};
 use widgets::{
     CalloutKind, Pill, PillKind, callout, card_frame, check_row, empty_card, focus_ring,
     form_label, icon_button, icon_tile, medium, multi_line_field, page_header, rail_item,
@@ -147,6 +149,10 @@ enum GuiEvent {
     },
 }
 
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent connection, confirmation and window-state flags"
+)]
 struct LocalWebApp {
     paths: Option<Paths>,
     sender: Sender<GuiEvent>,
@@ -179,6 +185,11 @@ struct LocalWebApp {
     last_refresh: Instant,
     last_view: View,
     view_changed_at: Option<Instant>,
+    tray: Option<Tray>,
+    tray_checked: bool,
+    tray_sender: Sender<TrayCommand>,
+    tray_receiver: Receiver<TrayCommand>,
+    quit_requested: bool,
 }
 
 impl LocalWebApp {
@@ -198,6 +209,7 @@ impl LocalWebApp {
 
     fn state(paths: Option<Paths>, lang: Lang, notice: Option<Notice>) -> Self {
         let (sender, receiver) = mpsc::channel();
+        let (tray_sender, tray_receiver) = mpsc::channel();
         Self {
             paths,
             lang,
@@ -230,6 +242,11 @@ impl LocalWebApp {
             last_refresh: Instant::now(),
             last_view: View::Dashboard,
             view_changed_at: None,
+            tray: None,
+            tray_checked: false,
+            tray_sender,
+            tray_receiver,
+            quit_requested: false,
         }
     }
 
@@ -671,6 +688,9 @@ impl LocalWebApp {
                         });
                         if next_lang != self.lang {
                             self.lang = next_lang;
+                            if let Some(tray) = &self.tray {
+                                tray.set_lang(self.lang);
+                            }
                             if let Some(paths) = &self.paths {
                                 self.lang.save(&paths.config);
                             }
@@ -1399,7 +1419,7 @@ impl LocalWebApp {
                         )
                         .on_hover_text(&path);
                         ui.add_space(10.0);
-                        ui.horizontal_wrapped(|ui| self.project_actions(ui, item, false));
+                        self.project_actions(ui, item, false);
                     });
                 let hovered = ui.rect_contains_pointer(inner.response.rect);
                 ui.data_mut(|data| data.insert_temp(hover_id, hovered));
@@ -1531,20 +1551,42 @@ impl LocalWebApp {
                             }
                         },
                     );
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        self.project_actions(ui, item, true);
-                    });
+                    self.project_actions(ui, item, true);
                 });
             });
         let hovered = ui.rect_contains_pointer(inner.response.rect);
         ui.data_mut(|data| data.insert_temp(hover_id, hovered));
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "wide and stacked rows share one action implementation"
-    )]
     fn project_actions(&mut self, ui: &mut egui::Ui, item: &ProjectStatus, wide: bool) {
+        if wide {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                self.project_crud_actions(ui, item, true);
+                self.project_lifecycle_actions(ui, item, true);
+            });
+        } else {
+            ui.horizontal_wrapped(|ui| {
+                self.project_lifecycle_actions(ui, item, false);
+                self.project_crud_actions(ui, item, false);
+            });
+        }
+    }
+
+    fn project_crud_actions(&mut self, ui: &mut egui::Ui, item: &ProjectStatus, wide: bool) {
+        if wide {
+            self.project_delete_action(ui, item, true);
+            ui.add_space(6.0);
+            self.project_edit_action(ui, item, true);
+            self.project_details_action(ui, item, true);
+        } else {
+            self.project_details_action(ui, item, false);
+            self.project_edit_action(ui, item, false);
+            ui.add_space(6.0);
+            self.project_delete_action(ui, item, false);
+        }
+    }
+
+    fn project_details_action(&mut self, ui: &mut egui::Ui, item: &ProjectStatus, wide: bool) {
         let lang = self.lang;
         let expanded = self.details.as_deref() == Some(&item.project.name);
         let chevron = if expanded {
@@ -1554,8 +1596,7 @@ impl LocalWebApp {
         };
         let details = if wide {
             Pill::new("", PillKind::Ghost)
-                .icon(chevron)
-                .accessible_label(lang.project_details())
+                .icon_only(chevron, lang.project_details())
                 .height(36.0)
                 .show(ui)
                 .on_hover_text(lang.project_details())
@@ -1566,7 +1607,7 @@ impl LocalWebApp {
                 .show(ui)
         };
         if details.clicked() {
-            if self.details.as_deref() == Some(&item.project.name) {
+            if expanded {
                 self.details = None;
             } else {
                 self.details = Some(item.project.name.clone());
@@ -1574,6 +1615,54 @@ impl LocalWebApp {
                 self.environment_error = None;
             }
         }
+    }
+
+    fn project_edit_action(&mut self, ui: &mut egui::Ui, item: &ProjectStatus, wide: bool) {
+        let lang = self.lang;
+        let enabled = self.daemon_online && self.pending == 0;
+        let edit = if wide {
+            Pill::new("", PillKind::Ghost)
+                .icon_only(Icon::Pencil, lang.action_edit())
+                .height(36.0)
+                .enabled(enabled)
+                .show(ui)
+                .on_hover_text(lang.action_edit())
+        } else {
+            Pill::new(lang.action_edit(), PillKind::Secondary)
+                .icon(Icon::Pencil)
+                .height(36.0)
+                .enabled(enabled)
+                .show(ui)
+        };
+        if edit.clicked() {
+            self.edit_project_settings(&item.project);
+        }
+    }
+
+    fn project_delete_action(&mut self, ui: &mut egui::Ui, item: &ProjectStatus, wide: bool) {
+        let lang = self.lang;
+        let enabled = self.daemon_online && self.pending == 0;
+        let delete = if wide {
+            Pill::new("", PillKind::GhostDanger)
+                .icon_only(Icon::Trash, lang.action_delete())
+                .height(36.0)
+                .enabled(enabled)
+                .show(ui)
+                .on_hover_text(lang.action_delete())
+        } else {
+            Pill::new(lang.action_delete(), PillKind::GhostDanger)
+                .icon(Icon::Trash)
+                .height(36.0)
+                .enabled(enabled)
+                .show(ui)
+        };
+        if delete.clicked() {
+            self.remove_confirmation = Some(item.project.name.clone());
+        }
+    }
+
+    fn project_lifecycle_actions(&mut self, ui: &mut egui::Ui, item: &ProjectStatus, wide: bool) {
+        let lang = self.lang;
         if !self.daemon_online {
             return;
         }
@@ -1583,86 +1672,129 @@ impl LocalWebApp {
             return;
         }
         if item.running {
-            if Pill::new(lang.action_stop(), PillKind::Secondary)
+            self.project_stop_action(ui, item, wide);
+            self.project_restart_action(ui, item, wide);
+            self.project_open_action(ui, item, wide);
+            self.project_mail_action(ui, item, wide);
+        } else {
+            let start = Pill::new(lang.action_start(), PillKind::Primary)
+                .icon(Icon::Play)
+                .height(36.0)
+                .min_width(96.0)
+                .enabled(self.pending == 0)
+                .show(ui);
+            if start.clicked() {
+                self.project_transition =
+                    Some((item.project.name.clone(), ProjectTransition::Starting));
+                self.request(
+                    Action::StartProject,
+                    Request::ProjectStart {
+                        name: item.project.name.clone(),
+                    },
+                );
+            }
+        }
+    }
+
+    fn project_stop_action(&mut self, ui: &mut egui::Ui, item: &ProjectStatus, wide: bool) {
+        let lang = self.lang;
+        let stop = if wide {
+            Pill::new("", PillKind::Secondary)
+                .icon_only(Icon::Stop, lang.action_stop())
+                .height(36.0)
+                .enabled(self.pending == 0)
+                .show(ui)
+                .on_hover_text(lang.action_stop())
+        } else {
+            Pill::new(lang.action_stop(), PillKind::Secondary)
                 .icon(Icon::Stop)
                 .height(36.0)
                 .enabled(self.pending == 0)
                 .show(ui)
-                .clicked()
-            {
-                self.project_transition =
-                    Some((item.project.name.clone(), ProjectTransition::Stopping));
-                self.request(
-                    Action::StopProject,
-                    Request::ProjectStop {
-                        name: item.project.name.clone(),
-                    },
-                );
-            }
-            if Pill::new(lang.action_restart(), PillKind::Secondary)
+        };
+        if stop.clicked() {
+            self.project_transition =
+                Some((item.project.name.clone(), ProjectTransition::Stopping));
+            self.request(
+                Action::StopProject,
+                Request::ProjectStop {
+                    name: item.project.name.clone(),
+                },
+            );
+        }
+    }
+
+    fn project_restart_action(&mut self, ui: &mut egui::Ui, item: &ProjectStatus, wide: bool) {
+        let lang = self.lang;
+        let restart = if wide {
+            Pill::new("", PillKind::Secondary)
+                .icon_only(Icon::Refresh, lang.action_restart())
+                .height(36.0)
+                .enabled(self.pending == 0)
+                .show(ui)
+                .on_hover_text(lang.action_restart())
+        } else {
+            Pill::new(lang.action_restart(), PillKind::Secondary)
                 .icon(Icon::Refresh)
                 .height(36.0)
                 .enabled(self.pending == 0)
                 .show(ui)
-                .clicked()
-            {
-                self.project_transition =
-                    Some((item.project.name.clone(), ProjectTransition::Restarting));
-                self.request(
-                    Action::RestartProject,
-                    Request::ProjectRestart {
-                        name: item.project.name.clone(),
-                    },
-                );
-            }
-            if Pill::new(lang.action_open(), PillKind::Secondary)
-                .icon(Icon::External)
-                .height(36.0)
-                .show(ui)
-                .clicked()
-            {
-                open_browser(
-                    &item.project.hostname,
-                    item.project.web_port,
-                    item.public_url.as_deref(),
-                    lang,
-                    &mut self.notice,
-                );
-            }
-            if let Some(url) = item.mail_web_url.as_deref() {
-                let mail = if wide {
-                    Pill::new("", PillKind::Ghost)
-                        .icon(Icon::Mail)
-                        .accessible_label("Mailpit")
-                        .height(36.0)
-                        .show(ui)
-                        .on_hover_text("Mailpit")
-                } else {
-                    Pill::new("Mailpit", PillKind::Secondary)
-                        .icon(Icon::Mail)
-                        .height(36.0)
-                        .show(ui)
-                };
-                if mail.clicked() {
-                    open_url(url, lang, &mut self.notice);
-                }
-            }
-        } else if Pill::new(lang.action_start(), PillKind::Primary)
-            .icon(Icon::Play)
-            .height(36.0)
-            .min_width(96.0)
-            .enabled(self.pending == 0)
-            .show(ui)
-            .clicked()
-        {
+        };
+        if restart.clicked() {
             self.project_transition =
-                Some((item.project.name.clone(), ProjectTransition::Starting));
+                Some((item.project.name.clone(), ProjectTransition::Restarting));
             self.request(
-                Action::StartProject,
-                Request::ProjectStart {
+                Action::RestartProject,
+                Request::ProjectRestart {
                     name: item.project.name.clone(),
                 },
             );
+        }
+    }
+
+    fn project_open_action(&mut self, ui: &mut egui::Ui, item: &ProjectStatus, wide: bool) {
+        let lang = self.lang;
+        let open = if wide {
+            Pill::new("", PillKind::Ghost)
+                .icon_only(Icon::External, lang.action_open())
+                .height(36.0)
+                .show(ui)
+                .on_hover_text(lang.action_open())
+        } else {
+            Pill::new(lang.action_open(), PillKind::Secondary)
+                .icon(Icon::External)
+                .height(36.0)
+                .show(ui)
+        };
+        if open.clicked() {
+            open_browser(
+                &item.project.hostname,
+                item.project.web_port,
+                item.public_url.as_deref(),
+                lang,
+                &mut self.notice,
+            );
+        }
+    }
+
+    fn project_mail_action(&mut self, ui: &mut egui::Ui, item: &ProjectStatus, wide: bool) {
+        let Some(url) = item.mail_web_url.as_deref() else {
+            return;
+        };
+        let mail = if wide {
+            Pill::new("", PillKind::Ghost)
+                .icon_only(Icon::Mail, "Mailpit")
+                .height(36.0)
+                .show(ui)
+                .on_hover_text("Mailpit")
+        } else {
+            Pill::new("Mailpit", PillKind::Secondary)
+                .icon(Icon::Mail)
+                .height(36.0)
+                .show(ui)
+        };
+        if mail.clicked() {
+            open_url(url, self.lang, &mut self.notice);
         }
     }
 
@@ -1714,18 +1846,6 @@ impl LocalWebApp {
             .color(INK_MUTED),
         );
         ui.add_space(8.0);
-        if self.daemon_online {
-            if Pill::new(lang.edit_settings(), PillKind::Secondary)
-                .icon(Icon::Settings)
-                .height(36.0)
-                .enabled(self.pending == 0)
-                .show(ui)
-                .clicked()
-            {
-                self.edit_project_settings(project);
-            }
-            ui.add_space(8.0);
-        }
         if self.environment.is_none() && self.environment_error.is_none() {
             if Pill::new(lang.reveal_environment(), PillKind::Secondary)
                 .height(36.0)
@@ -1789,18 +1909,6 @@ impl LocalWebApp {
                 .clicked()
             {
                 self.environment_error = None;
-            }
-        }
-        if !item.running && self.daemon_online {
-            ui.add_space(6.0);
-            if Pill::new(lang.action_remove(), PillKind::GhostDanger)
-                .icon(Icon::Trash)
-                .height(36.0)
-                .enabled(self.pending == 0)
-                .show(ui)
-                .clicked()
-            {
-                self.remove_confirmation = Some(item.project.name.clone());
             }
         }
         ui.add_space(6.0);
@@ -2296,9 +2404,9 @@ impl LocalWebApp {
             return;
         };
         let modal = egui::Modal::new(egui::Id::new("remove_project")).show(context, |ui| {
-            ui.label(strong(lang.remove_title()).size(SECTION_TITLE_SIZE));
+            ui.label(strong(lang.delete_title()).size(SECTION_TITLE_SIZE));
             ui.add_space(4.0);
-            ui.label(RichText::new(lang.remove_body(&name)).color(INK_MUTED));
+            ui.label(RichText::new(lang.delete_body(&name)).color(INK_MUTED));
             ui.add_space(14.0);
             ui.horizontal(|ui| {
                 if Pill::new(lang.cancel(), PillKind::Ghost)
@@ -2308,7 +2416,7 @@ impl LocalWebApp {
                 {
                     self.remove_confirmation = None;
                 }
-                if Pill::new(lang.remove_confirm(), PillKind::Danger)
+                if Pill::new(lang.delete_confirm(), PillKind::Danger)
                     .icon(Icon::Trash)
                     .height(36.0)
                     .enabled(self.pending == 0)
@@ -2383,6 +2491,33 @@ impl LocalWebApp {
 }
 
 impl eframe::App for LocalWebApp {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if !self.tray_checked {
+            self.tray_checked = true;
+            self.tray = Tray::new(self.lang, ctx.clone(), self.tray_sender.clone());
+        }
+        while let Ok(command) = self.tray_receiver.try_recv() {
+            match command {
+                TrayCommand::Open => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                }
+                TrayCommand::Quit => {
+                    self.quit_requested = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            }
+        }
+        if self.tray.is_some()
+            && !self.quit_requested
+            && ctx.input(|input| input.viewport().close_requested())
+        {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        }
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let context = ui.ctx().clone();
         self.receive_events();
@@ -2648,6 +2783,7 @@ impl AddProjectForm {
             },
             cron: cron_entries,
             cron_preset: self.cron,
+            clear_cron: false,
             mail: self.mail,
             web_port: None,
             database_port: None,
@@ -3300,6 +3436,7 @@ mod tests {
                     },
                 ],
                 cron_preset: false,
+                clear_cron: false,
                 mail: true,
                 autostart: true,
             },
@@ -3535,10 +3672,21 @@ mod tests {
                 &mut app,
                 View::Projects,
                 560.0,
-                &[lang.action_start(), stop],
+                &[
+                    lang.action_start(),
+                    lang.project_details(),
+                    lang.action_edit(),
+                    lang.action_delete(),
+                    stop,
+                ],
             );
             app.details = Some(project.name.clone());
-            assert_view_fits(&mut app, View::Projects, 4000.0, &[lang.edit_settings()]);
+            assert_view_fits(
+                &mut app,
+                View::Projects,
+                4000.0,
+                &[lang.reveal_environment()],
+            );
             assert_view_fits(&mut app, View::AddProject, 560.0, &[stop]);
             assert_view_fits(
                 &mut app,

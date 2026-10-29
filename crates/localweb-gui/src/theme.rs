@@ -227,6 +227,8 @@ mod tests {
             (INK, ACCENT),
             (Color32::WHITE, DANGER),
             (ACCENT_TEXT, ACCENT_SOFT),
+            (DANGER, SURFACE),
+            (DANGER, CANVAS),
             (DANGER, DANGER_SOFT),
             (WARNING, WARNING_SOFT),
             (FOCUS, CANVAS),

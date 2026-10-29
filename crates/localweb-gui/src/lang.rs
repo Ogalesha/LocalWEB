@@ -994,22 +994,59 @@ impl Lang {
         }
     }
 
-    pub fn action_remove(self) -> &'static str {
+    pub fn action_delete(self) -> &'static str {
         match self {
-            Self::English => "Remove",
-            Self::Italiano => "Rimuovi",
-            Self::Shqip => "Hiq",
+            Self::English => "Delete",
+            Self::Italiano => "Elimina",
+            Self::Shqip => "Fshi",
             Self::Spanish => "Eliminar",
             Self::French => "Supprimer",
-            Self::Portuguese => "Remover",
+            Self::Portuguese => "Excluir",
             Self::Russian => "Удалить",
             Self::Polish => "Usuń",
             Self::Ukrainian => "Видалити",
-            Self::Turkish => "Kaldır",
-            Self::Greek => "Αφαίρεση",
+            Self::Turkish => "Sil",
+            Self::Greek => "Διαγραφή",
             Self::Hindi => "हटाएँ",
-            Self::Chinese => "移除",
+            Self::Chinese => "删除",
             Self::Swedish => "Ta bort",
+        }
+    }
+
+    pub fn action_edit(self) -> &'static str {
+        match self {
+            Self::English => "Edit",
+            Self::Italiano => "Modifica",
+            Self::Shqip => "Ndrysho",
+            Self::Spanish | Self::Portuguese => "Editar",
+            Self::French => "Modifier",
+            Self::Russian => "Изменить",
+            Self::Polish => "Edytuj",
+            Self::Ukrainian => "Змінити",
+            Self::Turkish => "Düzenle",
+            Self::Greek => "Επεξεργασία",
+            Self::Hindi => "संपादित करें",
+            Self::Chinese => "编辑",
+            Self::Swedish => "Redigera",
+        }
+    }
+
+    pub fn tray_quit(self) -> &'static str {
+        match self {
+            Self::English => "Quit",
+            Self::Italiano => "Esci",
+            Self::Shqip => "Dil",
+            Self::Spanish => "Salir",
+            Self::French => "Quitter",
+            Self::Portuguese => "Sair",
+            Self::Russian => "Выйти",
+            Self::Polish => "Zakończ",
+            Self::Ukrainian => "Вийти",
+            Self::Turkish => "Çık",
+            Self::Greek => "Έξοδος",
+            Self::Hindi => "बाहर निकलें",
+            Self::Chinese => "退出",
+            Self::Swedish => "Avsluta",
         }
     }
 
@@ -1113,25 +1150,6 @@ impl Lang {
             Self::Hindi => "प्रोजेक्ट संपादित करें",
             Self::Chinese => "编辑项目",
             Self::Swedish => "Redigera projekt",
-        }
-    }
-
-    pub fn edit_settings(self) -> &'static str {
-        match self {
-            Self::English => "Edit settings",
-            Self::Italiano => "Modifica impostazioni",
-            Self::Shqip => "Ndrysho cilësimet",
-            Self::Spanish => "Editar ajustes",
-            Self::French => "Modifier les réglages",
-            Self::Portuguese => "Editar definições",
-            Self::Russian => "Изменить настройки",
-            Self::Polish => "Edytuj ustawienia",
-            Self::Ukrainian => "Змінити налаштування",
-            Self::Turkish => "Ayarları düzenle",
-            Self::Greek => "Επεξεργασία ρυθμίσεων",
-            Self::Hindi => "सेटिंग्स संपादित करें",
-            Self::Chinese => "编辑设置",
-            Self::Swedish => "Redigera inställningar",
         }
     }
 
@@ -2085,102 +2103,102 @@ impl Lang {
 
     // Remove dialog.
 
-    pub fn remove_title(self) -> &'static str {
+    pub fn delete_title(self) -> &'static str {
         match self {
-            Self::English => "Remove project",
-            Self::Italiano => "Rimuovi progetto",
-            Self::Shqip => "Hiq projektin",
+            Self::English => "Delete project",
+            Self::Italiano => "Elimina progetto",
+            Self::Shqip => "Fshi projektin",
             Self::Spanish => "Eliminar proyecto",
             Self::French => "Supprimer le projet",
-            Self::Portuguese => "Remover projeto",
+            Self::Portuguese => "Excluir projeto",
             Self::Russian => "Удалить проект",
             Self::Polish => "Usuń projekt",
             Self::Ukrainian => "Видалити проєкт",
-            Self::Turkish => "Projeyi kaldır",
-            Self::Greek => "Αφαίρεση έργου",
+            Self::Turkish => "Projeyi sil",
+            Self::Greek => "Διαγραφή έργου",
             Self::Hindi => "प्रोजेक्ट हटाएँ",
-            Self::Chinese => "移除项目",
+            Self::Chinese => "删除项目",
             Self::Swedish => "Ta bort projekt",
         }
     }
 
-    pub fn remove_body(self, name: &str) -> String {
+    pub fn delete_body(self, name: &str) -> String {
         match self {
             Self::English => {
                 format!(
-                    "Remove {name} from LocalWeb? Its source folder and database data are kept. The local domain and project configuration are removed."
+                    "Delete {name} from LocalWeb? If it is running, it is stopped first. The source folder and database data are kept. The local domain and project configuration are removed."
                 )
             }
             Self::Italiano => {
                 format!(
-                    "Rimuovere {name} da LocalWeb? Cartella sorgente e dati del database restano. Il dominio locale e la configurazione del progetto vengono rimossi."
+                    "Eliminare {name} da LocalWeb? Se è attivo, viene prima fermato. La cartella sorgente e i dati del database restano. Il dominio locale e la configurazione del progetto vengono rimossi."
                 )
             }
             Self::Shqip => {
                 format!(
-                    "Të hiqet {name} nga LocalWeb? Dosja burimore dhe të dhënat ruhen. Domain-i lokal dhe konfigurimi hiqen."
+                    "Të fshihet {name} nga LocalWeb? Nëse është aktiv, ndalohet fillimisht. Dosja burimore dhe të dhënat e bazës ruhen. Domain-i lokal dhe konfigurimi i projektit hiqen."
                 )
             }
             Self::Spanish => {
                 format!(
-                    "¿Eliminar {name} de LocalWeb? La carpeta de origen y los datos de la base de datos se conservan. El dominio local y la configuración del proyecto se eliminan."
+                    "¿Eliminar {name} de LocalWeb? Si está activo, se detiene primero. La carpeta de origen y los datos de la base de datos se conservan. El dominio local y la configuración del proyecto se eliminan."
                 )
             }
             Self::French => {
                 format!(
-                    "Supprimer {name} de LocalWeb ? Le dossier source et les données de la base sont conservés. Le domaine local et la configuration du projet sont supprimés."
+                    "Supprimer {name} de LocalWeb ? S'il est actif, il est d'abord arrêté. Le dossier source et les données de la base sont conservés. Le domaine local et la configuration du projet sont supprimés."
                 )
             }
             Self::Portuguese => {
                 format!(
-                    "Remover {name} do LocalWeb? A pasta de origem e os dados da base de dados são mantidos. O domínio local e a configuração do projeto são removidos."
+                    "Excluir {name} do LocalWeb? Se estiver ativo, ele é parado primeiro. A pasta de origem e os dados da base de dados são mantidos. O domínio local e a configuração do projeto são removidos."
                 )
             }
             Self::Russian => {
                 format!(
-                    "Удалить {name} из LocalWeb? Папка с исходниками и данные базы сохранятся. Локальный домен и конфигурация проекта будут удалены."
+                    "Удалить {name} из LocalWeb? Если проект запущен, он сначала будет остановлен. Папка с исходниками и данные базы сохранятся. Локальный домен и конфигурация проекта будут удалены."
                 )
             }
             Self::Polish => {
                 format!(
-                    "Usunąć {name} z LocalWeb? Folder źródłowy i dane bazy danych zostaną zachowane. Domena lokalna i konfiguracja projektu zostaną usunięte."
+                    "Usunąć {name} z LocalWeb? Jeśli projekt jest uruchomiony, zostanie najpierw zatrzymany. Folder źródłowy i dane bazy danych zostaną zachowane. Domena lokalna i konfiguracja projektu zostaną usunięte."
                 )
             }
             Self::Ukrainian => {
                 format!(
-                    "Видалити {name} з LocalWeb? Тека з вихідним кодом і дані бази залишаться. Локальний домен і конфігурацію проєкту буде видалено."
+                    "Видалити {name} з LocalWeb? Якщо проєкт запущено, його буде спочатку зупинено. Тека з вихідним кодом і дані бази залишаться. Локальний домен і конфігурацію проєкту буде видалено."
                 )
             }
             Self::Turkish => {
                 format!(
-                    "{name} projesi LocalWeb'den kaldırılsın mı? Kaynak klasör ve veritabanı verileri korunur. Yerel alan adı ve proje yapılandırması kaldırılır."
+                    "{name} projesi LocalWeb'den silinsin mi? Proje çalışıyorsa önce durdurulur. Kaynak klasör ve veritabanı verileri korunur. Yerel alan adı ve proje yapılandırması silinir."
                 )
             }
             Self::Greek => {
                 format!(
-                    "Να αφαιρεθεί το {name} από το LocalWeb; Ο φάκελος πηγαίου κώδικα και τα δεδομένα της βάσης διατηρούνται. Ο τοπικός τομέας και η ρύθμιση του έργου αφαιρούνται."
+                    "Να διαγραφεί το {name} από το LocalWeb; Αν είναι ενεργό, σταματά πρώτα. Ο φάκελος πηγαίου κώδικα και τα δεδομένα της βάσης διατηρούνται. Ο τοπικός τομέας και η ρύθμιση του έργου διαγράφονται."
                 )
             }
             Self::Hindi => {
                 format!(
-                    "{name} को LocalWeb से हटाएँ? स्रोत फ़ोल्डर और डेटाबेस डेटा सुरक्षित रहते हैं। स्थानीय डोमेन और प्रोजेक्ट कॉन्फ़िगरेशन हट जाते हैं।"
+                    "{name} को LocalWeb से हटाएँ? यदि यह चल रहा है, तो पहले बंद किया जाएगा। स्रोत फ़ोल्डर और डेटाबेस डेटा सुरक्षित रहते हैं। स्थानीय डोमेन और प्रोजेक्ट कॉन्फ़िगरेशन हट जाते हैं।"
                 )
             }
             Self::Chinese => {
                 format!(
-                    "将 {name} 从 LocalWeb 中移除？源文件夹和数据库数据会保留，本地域名和项目配置将被删除。"
+                    "从 LocalWeb 中删除 {name}？如果项目正在运行，会先停止。源文件夹和数据库数据会保留，本地域名和项目配置将被删除。"
                 )
             }
             Self::Swedish => {
                 format!(
-                    "Ta bort {name} från LocalWeb? Källkodsmappen och databasens data behålls. Den lokala domänen och projektkonfigurationen tas bort."
+                    "Ta bort {name} från LocalWeb? Om projektet är aktivt stoppas det först. Källkodsmappen och databasens data behålls. Den lokala domänen och projektkonfigurationen tas bort."
                 )
             }
         }
     }
 
-    pub fn remove_confirm(self) -> &'static str {
-        self.remove_title()
+    pub fn delete_confirm(self) -> &'static str {
+        self.delete_title()
     }
 
     // Notices.

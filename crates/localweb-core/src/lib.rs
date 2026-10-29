@@ -496,6 +496,10 @@ impl Default for ResourceSettings {
 }
 
 /// Describes a project to create; unset fields use global defaults.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "creation flags map to independent CLI and GUI options"
+)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewProject {
     /// Project root to adopt.
@@ -535,6 +539,10 @@ pub struct NewProject {
     /// Whether framework cron presets are added alongside explicit entries.
     #[serde(default)]
     pub cron_preset: bool,
+    /// Whether an update also drops disabled tasks from the previous
+    /// configuration. Ignored when creating a project.
+    #[serde(default)]
+    pub clear_cron: bool,
     /// Whether Mailpit captures the project email.
     #[serde(default)]
     pub mail: bool,
@@ -662,6 +670,7 @@ impl Project {
     /// worker commands, or cron schedules.
     pub fn from_update(existing: &Self, input: NewProject, global: &GlobalConfig) -> Result<Self> {
         let database = input.database.unwrap_or(global.defaults.database);
+        let clear_cron = input.clear_cron;
         let database_port = if matches!(
             database,
             Database::Mariadb | Database::Mysql | Database::Postgres
@@ -688,6 +697,7 @@ impl Project {
                 supervisor: input.supervisor,
                 cron: input.cron,
                 cron_preset: input.cron_preset,
+                clear_cron,
                 mail: input.mail,
                 autostart: input.autostart,
             },
@@ -699,10 +709,13 @@ impl Project {
         updated.resources = existing.resources.clone();
         updated.created_at = existing.created_at;
         // The edit form cannot represent per-entry enabled flags, so disabled
-        // tasks survive an edit instead of being silently discarded.
-        updated
-            .cron
-            .extend(existing.cron.iter().filter(|entry| !entry.enabled).cloned());
+        // tasks survive an edit instead of being silently discarded. Explicit
+        // clearing is the exception.
+        if !clear_cron {
+            updated
+                .cron
+                .extend(existing.cron.iter().filter(|entry| !entry.enabled).cloned());
+        }
         Ok(updated)
     }
 
@@ -1525,6 +1538,7 @@ mod tests {
                 },
                 cron: Vec::new(),
                 cron_preset: false,
+                clear_cron: false,
                 mail: false,
                 node: None,
                 autostart: false,
@@ -1572,6 +1586,7 @@ mod tests {
                 supervisor: SupervisorConfig::default(),
                 cron: Vec::new(),
                 cron_preset: false,
+                clear_cron: false,
                 mail: false,
                 autostart: false,
             },
@@ -1610,6 +1625,7 @@ mod tests {
                 command: vec!["@php".into(), "artisan".into(), "schedule:run".into()],
             }],
             cron_preset: false,
+            clear_cron: false,
             mail: false,
             autostart: true,
         };
@@ -1706,6 +1722,7 @@ mod tests {
                 supervisor: SupervisorConfig::default(),
                 cron: Vec::new(),
                 cron_preset: false,
+                clear_cron: false,
                 mail: true,
                 autostart: false,
             },

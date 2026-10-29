@@ -51,6 +51,8 @@ pub enum Icon {
     Copy,
     /// Settings and preferences.
     Settings,
+    /// Edit a project.
+    Pencil,
     /// MCP server or command line.
     Terminal,
     /// Search fields.
@@ -260,6 +262,20 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32, width: f
                     color,
                 );
             }
+        }
+        Icon::Pencil => {
+            painter.add(Shape::closed_line(
+                vec![
+                    at(2.4, 13.6),
+                    at(3.0, 10.8),
+                    at(10.9, 2.9),
+                    at(13.1, 5.1),
+                    at(5.2, 13.0),
+                ],
+                stroke,
+            ));
+            painter.line_segment([at(3.0, 10.8), at(5.2, 13.0)], stroke);
+            painter.line_segment([at(10.2, 3.6), at(12.4, 5.8)], stroke);
         }
         Icon::Terminal => {
             painter.rect_stroke(

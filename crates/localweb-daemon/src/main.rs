@@ -368,15 +368,19 @@ async fn execute(request: Request, state: &Arc<State>) -> localweb_core::Result<
         Request::ProjectRemove { name } => {
             let _operations = state.operations.lock().await;
             let project = find_project(&state.paths, &name)?;
-            if state.running.lock().await.contains(&name) {
-                return Err(LocalWebError::Service(
-                    "stop the project before removing it".into(),
-                ));
-            }
+            let was_running = state.running.lock().await.contains(&name);
+            // Stop first so an active project never keeps serving with a
+            // configuration that no longer exists.
+            stop_project_locked(state, &name).await?;
             fs::remove_file(state.paths.project_file(project.id))?;
-            Ok(Response::Message(format!(
-                "Removed LocalWeb configuration for {name}; source files were retained"
-            )))
+            cleanup_project_runtime(&state.paths, &project);
+            Ok(Response::Message(if was_running {
+                format!(
+                    "Stopped and removed LocalWeb configuration for {name}; source files were retained"
+                )
+            } else {
+                format!("Removed LocalWeb configuration for {name}; source files were retained")
+            }))
         }
         Request::ProjectStart { name } => {
             start_project(state, &name).await?;
@@ -852,6 +856,73 @@ fn stop_project_owned_services(project: &Project) -> localweb_core::Result<()> {
         Ok(())
     } else {
         Err(LocalWebError::Service(failures.join("; ")))
+    }
+}
+
+/// Removes project-scoped runtime artifacts after its configuration is gone.
+///
+/// Source files and database data are intentionally retained. Every path here
+/// is owned by `LocalWeb` and can be regenerated on the next start.
+fn cleanup_project_runtime(paths: &Paths, project: &Project) {
+    let services = paths.runtime.join("services");
+    for directory in [
+        services.join("shims").join(&project.name),
+        services.join(format!("redis-{}", project.name)),
+        services.join(format!("mailpit-{}", project.name)),
+    ] {
+        remove_project_path(&directory, true);
+    }
+    for unit in [
+        services::supervisor_unit(project),
+        services::redis_unit(project),
+        services::mailpit_unit(project),
+    ] {
+        remove_project_path(&services.join(format!("{unit}.pid")), false);
+    }
+    for file in [
+        paths
+            .config
+            .join("generated/redis")
+            .join(format!("{}.conf", project.name)),
+        paths
+            .state
+            .join("logs")
+            .join(format!("{}-cron.log", project.name)),
+        paths
+            .state
+            .join("logs")
+            .join(format!("{}-redis.log", project.name)),
+        paths
+            .state
+            .join("logs")
+            .join(format!("localweb-project-{}-supervisor.log", project.name)),
+        paths
+            .state
+            .join("logs")
+            .join(format!("localweb-project-{}-redis.log", project.name)),
+        paths
+            .state
+            .join("logs")
+            .join(format!("localweb-project-{}-mailpit.log", project.name)),
+    ] {
+        remove_project_path(&file, false);
+    }
+}
+
+fn remove_project_path(path: &std::path::Path, directory: bool) {
+    let result = if directory {
+        fs::remove_dir_all(path)
+    } else {
+        fs::remove_file(path)
+    };
+    match result {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => warn!(
+            path = %path.display(),
+            %error,
+            "could not clean project runtime artifact"
+        ),
     }
 }
 
@@ -1848,6 +1919,101 @@ mod tests {
                 0o600
             );
         };
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn cleanup_removes_only_project_runtime_artifacts() {
+        use localweb_core::{Cache, Database, NewProject, Profile, SupervisorConfig};
+
+        let base = std::env::temp_dir().join(format!("localweb-cleanup-{}", uuid::Uuid::new_v4()));
+        let paths = Paths {
+            config: base.join("config"),
+            data: base.join("data"),
+            state: base.join("state"),
+            runtime: base.join("runtime"),
+        };
+        paths.create().unwrap();
+        let source = base.join("source");
+        fs::create_dir_all(source.join("public")).unwrap();
+        fs::write(source.join("index.php"), "<?php").unwrap();
+        fs::create_dir_all(paths.data.join("projects/demo")).unwrap();
+        fs::write(paths.data.join("projects/demo/database.sqlite"), "data").unwrap();
+        let project = Project::from_new(
+            NewProject {
+                path: source.clone(),
+                name: Some("demo".into()),
+                hostname: Some("demo.test".into()),
+                web_port: Some(9_123),
+                database_port: None,
+                document_root: Some("public".into()),
+                profile: Some(Profile::GenericPhp),
+                web_server: Some(WebServer::Nginx),
+                php: Some("8.4".into()),
+                composer: Some("2".into()),
+                node: Some("24".into()),
+                database: Some(Database::Sqlite),
+                cache: Some(Cache::Redis),
+                supervisor: SupervisorConfig::default(),
+                cron: Vec::new(),
+                cron_preset: false,
+                clear_cron: false,
+                mail: false,
+                autostart: false,
+            },
+            &GlobalConfig::default(),
+        )
+        .unwrap();
+        let services = paths.runtime.join("services");
+        let shims = services.join("shims/demo");
+        fs::create_dir_all(&shims).unwrap();
+        fs::write(shims.join("php"), "#!/bin/sh").unwrap();
+        let redis_dir = services.join("redis-demo");
+        fs::create_dir_all(&redis_dir).unwrap();
+        fs::write(redis_dir.join("redis.conf"), "port 0").unwrap();
+        let mailpit_dir = services.join("mailpit-demo");
+        fs::create_dir_all(&mailpit_dir).unwrap();
+        fs::write(mailpit_dir.join("mailpit.db"), "mail").unwrap();
+        let redis_config = paths.config.join("generated/redis/demo.conf");
+        fs::create_dir_all(redis_config.parent().unwrap()).unwrap();
+        fs::write(&redis_config, "port 0").unwrap();
+        let logs = paths.state.join("logs");
+        fs::create_dir_all(&logs).unwrap();
+        let log_files = [
+            logs.join("demo-cron.log"),
+            logs.join("demo-redis.log"),
+            logs.join("localweb-project-demo-supervisor.log"),
+            logs.join("localweb-project-demo-redis.log"),
+            logs.join("localweb-project-demo-mailpit.log"),
+        ];
+        for log in &log_files {
+            fs::write(log, "log").unwrap();
+        }
+        let pid_files = [
+            services.join("localweb-project-demo-supervisor.pid"),
+            services.join("localweb-project-demo-redis.pid"),
+            services.join("localweb-project-demo-mailpit.pid"),
+        ];
+        for pid in &pid_files {
+            fs::write(pid, "1").unwrap();
+        }
+
+        cleanup_project_runtime(&paths, &project);
+
+        assert!(!shims.exists());
+        assert!(!redis_dir.exists());
+        assert!(!mailpit_dir.exists());
+        assert!(!redis_config.exists());
+        assert!(log_files.iter().all(|log| !log.exists()));
+        assert!(pid_files.iter().all(|pid| !pid.exists()));
+        assert_eq!(
+            fs::read_to_string(source.join("index.php")).unwrap(),
+            "<?php"
+        );
+        assert_eq!(
+            fs::read_to_string(paths.data.join("projects/demo/database.sqlite")).unwrap(),
+            "data"
+        );
         fs::remove_dir_all(base).unwrap();
     }
 

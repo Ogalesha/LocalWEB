@@ -520,6 +520,7 @@ async fn project_add(arguments: &Value) -> Result<String, String> {
         },
         cron,
         cron_preset: optional_bool(arguments, "cron_preset", false),
+        clear_cron: false,
         mail: optional_bool(arguments, "mail", false),
         web_port,
         database_port,
