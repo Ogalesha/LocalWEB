@@ -1303,7 +1303,7 @@ mod tests {
             Project::from_update(&existing, input, &localweb_core::GlobalConfig::default())
                 .unwrap();
         assert!(!updated.supervisor.enabled);
-        assert!(updated.cron.is_empty());
+        assert_eq!(updated.cron, Vec::new());
         assert!(!updated.mail);
         assert!(!updated.autostart);
         std::fs::remove_dir_all(path).unwrap();
