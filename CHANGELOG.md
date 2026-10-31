@@ -11,10 +11,16 @@ All notable changes to this project are documented here. The format follows
 - Explicit **Details**, **Edit** and **Delete** actions on every desktop project row, with 44 px targets, tooltips, accessible names and labeled controls in the stacked layout.
 - `localweb project update <name>` changes only the supplied settings and preserves the project identity, path, hostname, environment, resources and creation time; `create`, `show`, `edit` and `delete` are accepted as CRUD aliases.
 - A Linux, macOS and Windows system tray with localized **Open** and **Quit** actions; closing the window keeps LocalWeb available in the tray.
+- Adding a project while LocalWeb is stopped queues the request, starts the daemon, then creates the project automatically.
+- The desktop window is centered on first launch and reopens at its last position and maximized state.
+- Brand assets from the supplied logo: the desktop and window icon, the Windows taskbar ICO and the horizontal logo in Settings and the README.
+- Interface icons now come from a single provider, [Lucide](https://lucide.dev), embedded as a font under the ISC licence.
 
 ### Changed
 
 - Deleting a running project stops it first, then removes its configuration, local domain and project-owned runtime artifacts while retaining source files and database data.
+- The interface palette now derives from the logo: brand blue for actions, navy for text and navigation, cyan-tinted surfaces, and darker green, amber and red state colors that keep WCAG AA contrast.
+- Native packages install the PNG desktop icon on Linux, build the macOS `.icns` from the same PNG, and include the multi-size ICO in the Windows ZIP.
 
 ## [0.1.3] - 2026-10-26
 

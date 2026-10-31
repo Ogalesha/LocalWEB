@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/brand/localweb-logo.png" alt="LocalWeb" width="420">
+</p>
+
 # LocalWeb
 
 A native local development environment for web developers. Choose a source
@@ -30,7 +34,7 @@ requirements still determine which PHP and database versions it can use.
 | **Scheduled tasks** | Five-field cron schedules, framework presets, logs and overlap protection while the project is active. |
 | **Local domains** | Exact project entries in `/etc/hosts`, with `.dev` as the default suffix. |
 | **Direct ports and HTTPS domains** | Every project gets a fixed loopback HTTP port (18000–18999) and, for network databases, a fixed loopback database port (19000–19999) forwarded to the shared engine. On Linux the TLS gateway owns a dedicated loopback identity such as `127.0.0.2:443`, so other local stacks can keep `127.0.0.1:443`. |
-| **Desktop app** | Explicit project details, edit and delete actions, runtime/service selection, start/stop/restart, browser and Mailpit opening, connection settings, and a system tray that keeps LocalWeb available after closing the window. |
+| **Desktop app** | Explicit project details, edit and delete actions, runtime/service selection, start/stop/restart, browser and Mailpit opening, connection settings, offline project creation, a remembered window position, and a system tray that keeps LocalWeb available after closing the window. |
 | **CLI** | Project management, PHP/Composer/Node commands, shell access, environment values and diagnostics. |
 | **AI assistants (MCP)** | A Model Context Protocol server (`localweb-mcp`) that lets AI assistants create, start, inspect and test projects through the same daemon as the desktop app. |
 | **Autostart** | Optional login startup and per-project startup preferences. |

@@ -662,20 +662,20 @@ impl Lang {
 
     pub fn stopped_add_body(self) -> &'static str {
         match self {
-            Self::English => "Start LocalWeb before adding a project.",
-            Self::Italiano => "Avvia LocalWeb prima di aggiungere un progetto.",
-            Self::Shqip => "Nis LocalWeb para se të shtosh projektin.",
-            Self::Spanish => "Inicia LocalWeb antes de añadir un proyecto.",
-            Self::French => "Démarrez LocalWeb avant d'ajouter un projet.",
-            Self::Portuguese => "Inicie o LocalWeb antes de adicionar um projeto.",
-            Self::Russian => "Запустите LocalWeb, прежде чем добавлять проект.",
-            Self::Polish => "Uruchom LocalWeb przed dodaniem projektu.",
-            Self::Ukrainian => "Запустіть LocalWeb, перш ніж додавати проєкт.",
-            Self::Turkish => "Proje eklemeden önce LocalWeb'i başlatın.",
-            Self::Greek => "Εκκινήστε το LocalWeb πριν προσθέσετε έργο.",
-            Self::Hindi => "प्रोजेक्ट जोड़ने से पहले LocalWeb शुरू करें।",
-            Self::Chinese => "请先启动 LocalWeb，再添加项目。",
-            Self::Swedish => "Starta LocalWeb innan du lägger till ett projekt.",
+            Self::English => "LocalWeb starts automatically when you create the project.",
+            Self::Italiano => "LocalWeb si avvia automaticamente quando crei il progetto.",
+            Self::Shqip => "LocalWeb niset automatikisht kur krijon projektin.",
+            Self::Spanish => "LocalWeb se inicia automáticamente al crear el proyecto.",
+            Self::French => "LocalWeb démarre automatiquement lorsque vous créez le projet.",
+            Self::Portuguese => "O LocalWeb inicia automaticamente quando cria o projeto.",
+            Self::Russian => "LocalWeb запускается автоматически при создании проекта.",
+            Self::Polish => "LocalWeb uruchamia się automatycznie po utworzeniu projektu.",
+            Self::Ukrainian => "LocalWeb запускається автоматично під час створення проєкту.",
+            Self::Turkish => "LocalWeb, projeyi oluşturduğunuzda otomatik olarak başlar.",
+            Self::Greek => "Το LocalWeb ξεκινά αυτόματα όταν δημιουργείτε το έργο.",
+            Self::Hindi => "प्रोजेक्ट बनाते ही LocalWeb अपने आप शुरू हो जाता है।",
+            Self::Chinese => "创建项目时 LocalWeb 会自动启动。",
+            Self::Swedish => "LocalWeb startar automatiskt när du skapar projektet.",
         }
     }
 
@@ -828,20 +828,20 @@ impl Lang {
 
     pub fn empty_offline(self) -> &'static str {
         match self {
-            Self::English => "Start LocalWeb, then add the first project.",
-            Self::Italiano => "Avvia LocalWeb, quindi aggiungi il primo progetto.",
-            Self::Shqip => "Nis LocalWeb, pastaj shto projektin e parë.",
-            Self::Spanish => "Inicia LocalWeb y añade el primer proyecto.",
-            Self::French => "Démarrez LocalWeb, puis ajoutez le premier projet.",
-            Self::Portuguese => "Inicie o LocalWeb e adicione o primeiro projeto.",
-            Self::Russian => "Запустите LocalWeb и добавьте первый проект.",
-            Self::Polish => "Uruchom LocalWeb, a następnie dodaj pierwszy projekt.",
-            Self::Ukrainian => "Запустіть LocalWeb, а потім додайте перший проєкт.",
-            Self::Turkish => "LocalWeb'i başlatın, ardından ilk projeyi ekleyin.",
-            Self::Greek => "Εκκινήστε το LocalWeb και προσθέστε το πρώτο έργο.",
-            Self::Hindi => "LocalWeb शुरू करें, फिर पहला प्रोजेक्ट जोड़ें।",
-            Self::Chinese => "启动 LocalWeb，然后添加第一个项目。",
-            Self::Swedish => "Starta LocalWeb och lägg sedan till det första projektet.",
+            Self::English => "Add the first project; LocalWeb starts automatically.",
+            Self::Italiano => "Aggiungi il primo progetto: LocalWeb si avvia automaticamente.",
+            Self::Shqip => "Shto projektin e parë; LocalWeb niset automatikisht.",
+            Self::Spanish => "Añade el primer proyecto; LocalWeb se inicia automáticamente.",
+            Self::French => "Ajoutez le premier projet ; LocalWeb démarre automatiquement.",
+            Self::Portuguese => "Adicione o primeiro projeto; o LocalWeb inicia automaticamente.",
+            Self::Russian => "Добавьте первый проект — LocalWeb запустится автоматически.",
+            Self::Polish => "Dodaj pierwszy projekt — LocalWeb uruchomi się automatycznie.",
+            Self::Ukrainian => "Додайте перший проєкт — LocalWeb запуститься автоматично.",
+            Self::Turkish => "İlk projeyi ekleyin; LocalWeb otomatik olarak başlar.",
+            Self::Greek => "Προσθέστε το πρώτο έργο· το LocalWeb ξεκινά αυτόματα.",
+            Self::Hindi => "पहला प्रोजेक्ट जोड़ें; LocalWeb अपने आप शुरू हो जाता है।",
+            Self::Chinese => "添加第一个项目，LocalWeb 会自动启动。",
+            Self::Swedish => "Lägg till det första projektet; LocalWeb startar automatiskt.",
         }
     }
 

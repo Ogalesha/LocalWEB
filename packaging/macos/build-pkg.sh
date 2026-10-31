@@ -69,20 +69,16 @@ cat > "$app/Contents/Info.plist" <<EOF
 </plist>
 EOF
 
-if command -v rsvg-convert >/dev/null && command -v iconutil >/dev/null && command -v sips >/dev/null; then
+if command -v iconutil >/dev/null && command -v sips >/dev/null; then
     iconset=$(mktemp -d)/LocalWeb.iconset
     mkdir -p "$iconset"
-    rsvg-convert -w 1024 -h 1024 \
-        "$workspace/packaging/icons/io.localweb.LocalWeb.svg" \
-        -o "$iconset/base.png"
     for size in 16 32 128 256 512; do
         double=$((size * 2))
-        sips -z "$size" "$size" "$iconset/base.png" \
+        sips -z "$size" "$size" "$workspace/assets/brand/localweb-icon.png" \
             --out "$iconset/icon_${size}x${size}.png" >/dev/null
-        sips -z "$double" "$double" "$iconset/base.png" \
+        sips -z "$double" "$double" "$workspace/assets/brand/localweb-icon.png" \
             --out "$iconset/icon_${size}x${size}@2x.png" >/dev/null
     done
-    rm -f "$iconset/base.png"
     iconutil -c icns "$iconset" -o "$app/Contents/Resources/LocalWeb.icns"
     rm -rf "${iconset%/*}"
 fi

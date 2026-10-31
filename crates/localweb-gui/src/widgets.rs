@@ -96,8 +96,8 @@ impl<'a> Pill<'a> {
         let enabled = self.enabled && ui.is_enabled();
         let font = FontId::new(theme::LABEL_SIZE, theme::medium_family());
         let base_text = match self.kind {
-            PillKind::Danger => Color32::WHITE,
-            PillKind::Primary | PillKind::Secondary | PillKind::Ghost => theme::INK,
+            PillKind::Primary | PillKind::Danger => theme::ON_ACCENT,
+            PillKind::Secondary | PillKind::Ghost => theme::INK,
             PillKind::GhostDanger => theme::DANGER,
         };
         let text_color = if enabled {
@@ -231,8 +231,7 @@ impl<'a> Pill<'a> {
             if let Some(icon) = self.icon {
                 let icon_color = if enabled {
                     match self.kind {
-                        PillKind::Primary => theme::INK,
-                        PillKind::Danger => Color32::WHITE,
+                        PillKind::Primary | PillKind::Danger => theme::ON_ACCENT,
                         PillKind::GhostDanger => theme::DANGER,
                         PillKind::Secondary | PillKind::Ghost => theme::INK_MUTED,
                     }
@@ -243,13 +242,7 @@ impl<'a> Pill<'a> {
                     egui::pos2(start_x + icon_size / 2.0, rect.center().y),
                     Vec2::splat(icon_size),
                 );
-                crate::icons::paint(
-                    painter,
-                    icon_rect,
-                    icon,
-                    icon_color,
-                    (self.height * 0.095).clamp(1.3, 1.75),
-                );
+                crate::icons::paint(painter, icon_rect, icon, icon_color);
             }
             painter.galley(
                 egui::pos2(start_x + icon_w, rect.center().y - galley.size().y / 2.0),
@@ -295,7 +288,6 @@ pub fn icon_tile(ui: &mut Ui, icon: Icon, background: Color32, foreground: Color
         egui::Rect::from_center_size(rect.center(), Vec2::splat(size * 0.46)),
         icon,
         foreground,
-        (size * 0.06).clamp(1.5, 2.6),
     );
 }
 
@@ -461,7 +453,7 @@ pub fn callout(ui: &mut Ui, kind: CalloutKind, icon: Icon, content: impl FnOnce(
         .show(ui, |ui| {
             ui.horizontal_top(|ui| {
                 let (rect, _) = ui.allocate_exact_size(Vec2::splat(20.0), Sense::hover());
-                crate::icons::paint(ui.painter(), rect, icon, color, 1.7);
+                crate::icons::paint(ui.painter(), rect, icon, color);
                 ui.add_space(2.0);
                 content(ui);
             });
@@ -497,7 +489,6 @@ pub fn icon_button(ui: &mut Ui, icon: Icon, size: f32, accessible_label: &str) -
             egui::Rect::from_center_size(rect.center(), Vec2::splat((size * 0.58).min(20.0))),
             icon,
             color,
-            1.6,
         );
     }
     if response.has_focus() {
@@ -562,7 +553,7 @@ pub fn check_row(ui: &mut Ui, checked: &mut bool, label: &str) -> Response {
         );
         if *checked {
             painter.rect_filled(box_rect, 0, theme::ACCENT);
-            crate::icons::paint(painter, box_rect, Icon::Check, theme::INK, 1.9);
+            crate::icons::paint(painter, box_rect, Icon::Check, theme::ON_ACCENT);
         }
         painter.galley(
             egui::pos2(rect.left() + 32.0, rect.center().y - galley.size().y / 2.0),
@@ -602,7 +593,6 @@ pub fn empty_card(
                     rect,
                     icon,
                     theme::INK_MUTED.gamma_multiply(0.8),
-                    2.2,
                 );
                 ui.add_space(10.0);
                 ui.label(
@@ -648,7 +638,7 @@ pub fn rail_item(ui: &mut Ui, label: &str, icon: Icon, selected: bool) -> Respon
             painter.rect_filled(rect, radius, theme::NAV_HOVER.gamma_multiply(t));
         }
         let text_color = if selected {
-            theme::INK
+            theme::ON_ACCENT
         } else if pressed {
             Color32::WHITE
         } else {
@@ -662,7 +652,6 @@ pub fn rail_item(ui: &mut Ui, label: &str, icon: Icon, selected: bool) -> Respon
             ),
             icon,
             text_color,
-            1.6,
         );
         let family = if selected {
             theme::strong_family()
@@ -682,7 +671,7 @@ pub fn rail_item(ui: &mut Ui, label: &str, icon: Icon, selected: bool) -> Respon
             ui.painter().rect_stroke(
                 rect.shrink(1.0),
                 theme::RADIUS_CONTROL,
-                Stroke::new(2.0, theme::INK),
+                Stroke::new(2.0, theme::ON_ACCENT),
                 egui::StrokeKind::Inside,
             );
         } else {

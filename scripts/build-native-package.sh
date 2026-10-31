@@ -15,7 +15,7 @@ cargo build --workspace --release --locked
 stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT
 mkdir -p "$stage/usr/bin" "$stage/usr/lib/localweb" "$stage/usr/lib/systemd/user" \
-    "$stage/usr/share/applications" "$stage/usr/share/icons/hicolor/scalable/apps" \
+    "$stage/usr/share/applications" "$stage/usr/share/icons/hicolor/1024x1024/apps" \
     "$stage/usr/share/polkit-1/actions" "$stage/usr/share/doc/localweb" dist
 for binary in localweb localwebd localweb-gateway localweb-helper localweb-gui localweb-mcp; do
     install -m 0755 "target/release/$binary" "$stage/usr/lib/localweb/$binary"
@@ -24,7 +24,7 @@ done
 cp -a packaging/runtime-root "$stage/usr/lib/localweb/runtime"
 install -m 0644 packaging/systemd/localwebd.service "$stage/usr/lib/systemd/user/"
 install -m 0644 packaging/desktop/io.localweb.LocalWeb.desktop "$stage/usr/share/applications/"
-install -m 0644 packaging/icons/io.localweb.LocalWeb.svg "$stage/usr/share/icons/hicolor/scalable/apps/"
+install -m 0644 assets/brand/localweb-icon.png "$stage/usr/share/icons/hicolor/1024x1024/apps/io.localweb.LocalWeb.png"
 install -m 0644 packaging/polkit/io.localweb.helper.policy "$stage/usr/share/polkit-1/actions/"
 install -m 0644 README.md ARCHITECTURE.md SECURITY.md "$stage/usr/share/doc/localweb/"
 rm -f dist/*.pkg.tar.zst

@@ -55,7 +55,7 @@ install -d \
     "$stage/usr/lib/localweb" \
     "$stage/usr/lib/systemd/user" \
     "$stage/usr/share/applications" \
-    "$stage/usr/share/icons/hicolor/scalable/apps" \
+    "$stage/usr/share/icons/hicolor/1024x1024/apps" \
     "$stage/usr/share/polkit-1/actions" \
     "$stage/usr/share/doc/localweb"
 
@@ -68,7 +68,7 @@ cp -a "$runtime_root" "$stage/usr/lib/localweb/runtime"
 install -m 0644 "$workspace/packaging/systemd/localwebd.service" "$stage/usr/lib/systemd/user/localwebd.service"
 install -m 0644 "$workspace/packaging/polkit/io.localweb.helper.policy" "$stage/usr/share/polkit-1/actions/io.localweb.helper.policy"
 install -m 0644 "$workspace/packaging/desktop/io.localweb.LocalWeb.desktop" "$stage/usr/share/applications/io.localweb.LocalWeb.desktop"
-install -m 0644 "$workspace/packaging/icons/io.localweb.LocalWeb.svg" "$stage/usr/share/icons/hicolor/scalable/apps/io.localweb.LocalWeb.svg"
+install -m 0644 "$workspace/assets/brand/localweb-icon.png" "$stage/usr/share/icons/hicolor/1024x1024/apps/io.localweb.LocalWeb.png"
 install -m 0644 "$workspace/README.md" "$stage/usr/share/doc/localweb/README.md"
 install -m 0644 "$workspace/ARCHITECTURE.md" "$stage/usr/share/doc/localweb/ARCHITECTURE.md"
 install -m 0644 "$workspace/SECURITY.md" "$stage/usr/share/doc/localweb/SECURITY.md"

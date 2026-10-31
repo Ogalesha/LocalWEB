@@ -125,11 +125,7 @@ jobs:
       - name: Build the installer
         env:
           LOCALWEB_BIN_DIR: target/universal/release
-        run: |
-          if ! command -v rsvg-convert >/dev/null; then
-            brew install librsvg || true
-          fi
-          sh packaging/macos/build-pkg.sh
+        run: sh packaging/macos/build-pkg.sh
       - uses: actions/upload-artifact@v5
         with:
           name: localweb-macos-universal

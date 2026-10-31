@@ -30,14 +30,18 @@ from pathlib import Path
 bin_dir, out, version = sys.argv[1], sys.argv[2], sys.argv[3]
 prefix = f"localweb-{version}"
 binaries = ["localweb", "localwebd", "localweb-gateway", "localweb-helper", "localweb-gui", "localweb-mcp"]
-extras = [Path("README.md"), Path("LICENSE")]
+extras = [
+    (Path("README.md"), "README.md"),
+    (Path("LICENSE"), "LICENSE"),
+    (Path("assets/brand/localweb-icon.ico"), "localweb.ico"),
+]
 
 with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as archive:
     for binary in binaries:
         archive.write(Path(bin_dir) / f"{binary}.exe", f"{prefix}/{binary}.exe")
-    for extra in extras:
-        if extra.is_file():
-            archive.write(extra, f"{prefix}/{extra.name}")
+    for source, name in extras:
+        if source.is_file():
+            archive.write(source, f"{prefix}/{name}")
 PY
 
 test -s "$out"

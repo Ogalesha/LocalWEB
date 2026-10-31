@@ -33,7 +33,7 @@ package() {
   cd "LocalWEB-$pkgver"
   install -d "$pkgdir/usr/bin" "$pkgdir/usr/lib/localweb" \
     "$pkgdir/usr/lib/systemd/user" "$pkgdir/usr/share/applications" \
-    "$pkgdir/usr/share/icons/hicolor/scalable/apps" \
+    "$pkgdir/usr/share/icons/hicolor/1024x1024/apps" \
     "$pkgdir/usr/share/polkit-1/actions" "$pkgdir/usr/share/doc/localweb"
   for binary in localweb localwebd localweb-gateway localweb-helper localweb-gui localweb-mcp; do
     install -m 0755 "target/release/$binary" "$pkgdir/usr/lib/localweb/$binary"
@@ -43,6 +43,6 @@ package() {
   install -m 0644 packaging/systemd/localwebd.service "$pkgdir/usr/lib/systemd/user/localwebd.service"
   install -m 0644 packaging/polkit/io.localweb.helper.policy "$pkgdir/usr/share/polkit-1/actions/io.localweb.helper.policy"
   install -m 0644 packaging/desktop/io.localweb.LocalWeb.desktop "$pkgdir/usr/share/applications/io.localweb.LocalWeb.desktop"
-  install -m 0644 packaging/icons/io.localweb.LocalWeb.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/io.localweb.LocalWeb.svg"
+  install -m 0644 assets/brand/localweb-icon.png "$pkgdir/usr/share/icons/hicolor/1024x1024/apps/io.localweb.LocalWeb.png"
   install -m 0644 README.md ARCHITECTURE.md SECURITY.md "$pkgdir/usr/share/doc/localweb/"
 }

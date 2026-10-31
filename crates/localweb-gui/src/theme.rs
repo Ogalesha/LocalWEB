@@ -1,9 +1,9 @@
 //! Design tokens, typography and `egui` style for `LocalWeb`.
 //!
 //! The visual language is flat, minimal and square: no corner rounding, no
-//! shadows, hairline borders and a single sage accent. Every color and
-//! font used by the interface lives here so the system stays reviewable in one
-//! place.
+//! shadows, hairline borders and a single blue accent drawn from the brand
+//! mark. Every color and font used by the interface lives here so the system
+//! stays reviewable in one place.
 
 use eframe::egui::{
     self, Color32, FontData, FontDefinitions, FontFamily, FontId, Stroke, TextStyle,
@@ -12,72 +12,74 @@ use std::sync::Arc;
 
 // Working surfaces.
 
-/// Warm sage paper canvas behind every page.
-pub const CANVAS: Color32 = Color32::from_rgb(242, 244, 232);
+/// Cool blue-white canvas behind every page.
+pub const CANVAS: Color32 = Color32::from_rgb(244, 248, 253);
 /// Content plane: cards, banner, controls.
-pub const SURFACE: Color32 = Color32::from_rgb(251, 252, 246);
+pub const SURFACE: Color32 = Color32::from_rgb(255, 255, 255);
 /// Recessed plane for grouped or inactive content.
-pub const SURFACE_MUTED: Color32 = Color32::from_rgb(231, 235, 220);
+pub const SURFACE_MUTED: Color32 = Color32::from_rgb(234, 241, 249);
 /// Hover state for rows and neutral controls.
-pub const SURFACE_HOVER: Color32 = Color32::from_rgb(239, 245, 231);
+pub const SURFACE_HOVER: Color32 = Color32::from_rgb(240, 246, 253);
 
 // Text.
 
-/// Primary text.
-pub const INK: Color32 = Color32::from_rgb(22, 37, 28);
+/// Primary text: the navy of the brand mark.
+pub const INK: Color32 = Color32::from_rgb(16, 33, 55);
 /// Supporting text and metadata.
-pub const INK_MUTED: Color32 = Color32::from_rgb(67, 80, 72);
+pub const INK_MUTED: Color32 = Color32::from_rgb(83, 101, 123);
+/// Text and icons placed on the solid blue accent.
+pub const ON_ACCENT: Color32 = Color32::WHITE;
 
 // Navigation rail.
 
-/// Deep forest rail.
-pub const NAV: Color32 = Color32::from_rgb(37, 61, 44);
+/// Deep navy rail, a shade darker than the mark so its middle band stays visible.
+pub const NAV: Color32 = Color32::from_rgb(11, 27, 46);
 /// Rail supporting text.
-pub const NAV_MUTED: Color32 = Color32::from_rgb(210, 221, 210);
+pub const NAV_MUTED: Color32 = Color32::from_rgb(185, 199, 216);
 /// Hover plane on the dark rail.
-pub const NAV_HOVER: Color32 = Color32::from_rgb(47, 75, 56);
+pub const NAV_HOVER: Color32 = Color32::from_rgb(22, 43, 69);
 /// Pressed plane on the dark rail.
-pub const NAV_PRESSED: Color32 = Color32::from_rgb(58, 90, 69);
+pub const NAV_PRESSED: Color32 = Color32::from_rgb(30, 58, 90);
 
 // Actions and state.
 
-/// Sage primary action.
-pub const ACCENT: Color32 = Color32::from_rgb(157, 186, 129);
-/// Sage hover.
-pub const ACCENT_HOVER: Color32 = Color32::from_rgb(169, 199, 146);
-/// Sage pressed.
-pub const ACCENT_PRESSED: Color32 = Color32::from_rgb(143, 182, 116);
-/// Tinted green plane for selection and active fields.
-pub const ACCENT_SOFT: Color32 = Color32::from_rgb(229, 240, 219);
+/// Brand blue primary action.
+pub const ACCENT: Color32 = Color32::from_rgb(0, 109, 244);
+/// Darker blue hover that keeps white text above 4.5:1.
+pub const ACCENT_HOVER: Color32 = Color32::from_rgb(0, 95, 204);
+/// Darker blue pressed state.
+pub const ACCENT_PRESSED: Color32 = Color32::from_rgb(0, 79, 179);
+/// Tinted blue plane for selection and active fields.
+pub const ACCENT_SOFT: Color32 = Color32::from_rgb(230, 241, 255);
 /// Pressed tint for neutral and text-only controls.
-pub const ACCENT_SOFT_PRESSED: Color32 = Color32::from_rgb(216, 230, 204);
-/// Dark green for accent text and small marks on light planes.
-pub const ACCENT_TEXT: Color32 = Color32::from_rgb(43, 79, 53);
+pub const ACCENT_SOFT_PRESSED: Color32 = Color32::from_rgb(207, 227, 255);
+/// Dark blue for accent text and small marks on light planes.
+pub const ACCENT_TEXT: Color32 = Color32::from_rgb(0, 85, 196);
 /// Accessible focus and link color.
-pub const FOCUS: Color32 = Color32::from_rgb(43, 79, 53);
-/// Successful state color.
-pub const SUCCESS: Color32 = Color32::from_rgb(31, 97, 57);
+pub const FOCUS: Color32 = Color32::from_rgb(0, 89, 201);
+/// Successful state color, taken from the green mark dot but darkened for text.
+pub const SUCCESS: Color32 = Color32::from_rgb(11, 122, 51);
 /// Tinted success plane.
-pub const SUCCESS_SOFT: Color32 = Color32::from_rgb(226, 239, 227);
-/// Warning state color.
-pub const WARNING: Color32 = Color32::from_rgb(128, 75, 6);
+pub const SUCCESS_SOFT: Color32 = Color32::from_rgb(230, 248, 236);
+/// Warning state color, a readable version of the yellow mark dot.
+pub const WARNING: Color32 = Color32::from_rgb(138, 90, 0);
 /// Tinted warning plane.
-pub const WARNING_SOFT: Color32 = Color32::from_rgb(250, 242, 226);
-/// Danger state color.
-pub const DANGER: Color32 = Color32::from_rgb(168, 28, 41);
+pub const WARNING_SOFT: Color32 = Color32::from_rgb(255, 244, 214);
+/// Danger state color, a readable version of the red mark dot.
+pub const DANGER: Color32 = Color32::from_rgb(201, 42, 27);
 /// Danger hover.
-pub const DANGER_HOVER: Color32 = Color32::from_rgb(176, 31, 45);
+pub const DANGER_HOVER: Color32 = Color32::from_rgb(180, 35, 24);
 /// Tinted danger plane.
-pub const DANGER_SOFT: Color32 = Color32::from_rgb(251, 235, 236);
+pub const DANGER_SOFT: Color32 = Color32::from_rgb(254, 236, 234);
 
 // Structure.
 
 /// Hairline structure.
-pub const BORDER: Color32 = Color32::from_rgb(116, 136, 119);
+pub const BORDER: Color32 = Color32::from_rgb(125, 147, 170);
 /// Stronger hairline for hovered structure.
-pub const BORDER_STRONG: Color32 = Color32::from_rgb(73, 96, 78);
+pub const BORDER_STRONG: Color32 = Color32::from_rgb(82, 106, 130);
 /// Inactive status marks.
-pub const STATUS_OFF: Color32 = Color32::from_rgb(111, 128, 117);
+pub const STATUS_OFF: Color32 = Color32::from_rgb(125, 143, 163);
 
 /// Cards and banners are square.
 pub const RADIUS_CARD: u8 = 0;
@@ -122,6 +124,12 @@ pub fn strong_family() -> FontFamily {
 #[must_use]
 pub fn medium_family() -> FontFamily {
     FontFamily::Name("medium".into())
+}
+
+/// Icon family backed by the embedded Lucide icon font.
+#[must_use]
+pub fn icon_family() -> FontFamily {
+    FontFamily::Name("icons".into())
 }
 
 /// Installs fonts, theme colors, spacing and text styles.
@@ -224,7 +232,9 @@ mod tests {
             (INK_MUTED, CANVAS),
             (INK, SURFACE),
             (NAV_MUTED, NAV),
-            (INK, ACCENT),
+            (ON_ACCENT, ACCENT),
+            (ON_ACCENT, ACCENT_HOVER),
+            (ON_ACCENT, ACCENT_PRESSED),
             (Color32::WHITE, DANGER),
             (ACCENT_TEXT, ACCENT_SOFT),
             (DANGER, SURFACE),
@@ -285,6 +295,15 @@ fn install_fonts(context: &egui::Context) {
             include_bytes!("../assets/fonts/NotoSansDevanagari-Regular.ttf").as_slice(),
         )),
     );
+    fonts.font_data.insert(
+        "lucide".to_owned(),
+        Arc::new(FontData::from_static(
+            include_bytes!("../assets/fonts/Lucide.ttf").as_slice(),
+        )),
+    );
+    fonts
+        .families
+        .insert(icon_family(), vec!["lucide".to_owned()]);
     let extras = ["noto-devanagari", "noto-cjk"];
     let mut proportional = vec!["inter".to_owned()];
     proportional.extend(extras.iter().map(|name| (*name).to_owned()));

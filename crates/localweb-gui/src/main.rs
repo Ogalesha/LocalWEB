@@ -57,18 +57,54 @@ const DAEMON_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 const DAEMON_BACKGROUND_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn main() -> eframe::Result {
+    let placement = Paths::discover()
+        .ok()
+        .and_then(|paths| WindowPlacement::load(&paths.config));
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_inner_size([1_280.0, 800.0])
+        .with_min_inner_size([840.0, 560.0])
+        .with_icon(brand::icon_data());
+    if let Some(placement) = placement {
+        viewport = viewport.with_position([placement.x, placement.y]);
+        if placement.maximized {
+            viewport = viewport.with_maximized(true);
+        }
+    }
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1_280.0, 800.0])
-            .with_min_inner_size([840.0, 560.0])
-            .with_icon(brand::icon_data()),
+        viewport,
         ..Default::default()
     };
     eframe::run_native(
         "LocalWeb",
         options,
-        Box::new(|context| Ok(Box::new(LocalWebApp::new(context)))),
+        Box::new(move |context| Ok(Box::new(LocalWebApp::new(context, placement.is_none())))),
     )
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct WindowPlacement {
+    x: f32,
+    y: f32,
+    maximized: bool,
+}
+
+impl WindowPlacement {
+    fn load(config: &Path) -> Option<Self> {
+        let text = fs::read_to_string(config.join("gui-window")).ok()?;
+        let mut fields = text.split_whitespace();
+        let x: f32 = fields.next()?.parse().ok()?;
+        let y: f32 = fields.next()?.parse().ok()?;
+        let maximized = fields.next() == Some("1");
+        (x.is_finite() && y.is_finite()).then_some(Self { x, y, maximized })
+    }
+
+    fn save(self, config: &Path) -> std::io::Result<()> {
+        fs::create_dir_all(config)?;
+        fs::write(
+            config.join("gui-window"),
+            format!("{:.1} {:.1} {}\n", self.x, self.y, u8::from(self.maximized)),
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -171,6 +207,7 @@ struct LocalWebApp {
     project_search: String,
     form: AddProjectForm,
     edit_project: Option<Project>,
+    queued_add: Option<NewProject>,
     picker: Option<DirectoryPicker>,
     remove_confirmation: Option<String>,
     stop_confirmation: bool,
@@ -190,10 +227,13 @@ struct LocalWebApp {
     tray_sender: Sender<TrayCommand>,
     tray_receiver: Receiver<TrayCommand>,
     quit_requested: bool,
+    center_on_first_frame: bool,
+    brand_texture: Option<egui::TextureHandle>,
+    logo_texture: Option<egui::TextureHandle>,
 }
 
 impl LocalWebApp {
-    fn new(context: &eframe::CreationContext<'_>) -> Self {
+    fn new(context: &eframe::CreationContext<'_>, center_on_first_frame: bool) -> Self {
         configure_style(&context.egui_ctx);
         let (paths, notice) = match Paths::discover() {
             Ok(paths) => (Some(paths), None),
@@ -203,6 +243,9 @@ impl LocalWebApp {
             .as_ref()
             .map_or_else(Lang::default, |paths| Lang::load(&paths.config));
         let mut app = Self::state(paths, lang, notice);
+        app.center_on_first_frame = center_on_first_frame;
+        app.brand_texture = brand::icon_texture(&context.egui_ctx);
+        app.logo_texture = brand::logo_texture(&context.egui_ctx);
         app.refresh_all();
         app
     }
@@ -228,6 +271,7 @@ impl LocalWebApp {
             project_search: String::new(),
             form: AddProjectForm::default(),
             edit_project: None,
+            queued_add: None,
             picker: None,
             remove_confirmation: None,
             stop_confirmation: false,
@@ -247,6 +291,9 @@ impl LocalWebApp {
             tray_sender,
             tray_receiver,
             quit_requested: false,
+            center_on_first_frame: false,
+            brand_texture: None,
+            logo_texture: None,
         }
     }
 
@@ -475,6 +522,9 @@ impl LocalWebApp {
         if matches!(&action, Action::Setup) && result.is_err() {
             self.daemon_transition = None;
         }
+        if matches!(&action, Action::StartDaemon | Action::Setup) && result.is_err() {
+            self.queued_add = None;
+        }
         match (action, result) {
             (Action::Setup, Ok(_)) => {
                 self.notice = Some(Notice::success(self.lang.notice_setup()));
@@ -487,6 +537,9 @@ impl LocalWebApp {
             (Action::StartDaemon, Ok(_)) => {
                 self.notice = Some(Notice::success(self.lang.notice_started()));
                 self.refresh_all();
+                if let Some(request) = self.queued_add.take() {
+                    self.request(Action::AddProject, Request::ProjectAdd(request));
+                }
             }
             (Action::SyncHosts, Ok(_)) => {
                 self.notice = Some(Notice::success(self.lang.notice_hosts()));
@@ -589,7 +642,7 @@ impl LocalWebApp {
             )
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    brand::app_icon(ui, 26.0);
+                    brand::app_icon(ui, self.brand_texture.as_ref(), 30.0);
                     ui.add_space(6.0);
                     ui.label(
                         RichText::new("LocalWeb")
@@ -805,7 +858,6 @@ impl LocalWebApp {
                                 },
                             )
                             .icon(Icon::Plus)
-                            .enabled(self.daemon_online)
                             .show(ui)
                             .clicked();
                         }
@@ -833,7 +885,6 @@ impl LocalWebApp {
                             },
                         )
                         .icon(Icon::Plus)
-                        .enabled(self.daemon_online)
                         .show(ui)
                         .clicked();
                     }
@@ -875,7 +926,7 @@ impl LocalWebApp {
                 } else {
                     lang.empty_offline()
                 },
-                self.daemon_online.then_some((lang.nav_add(), Icon::Plus)),
+                Some((lang.nav_add(), Icon::Plus)),
             ) {
                 self.open_add_project();
             }
@@ -1038,7 +1089,7 @@ impl LocalWebApp {
                     ui.horizontal(|ui| {
                         let (rect, _) =
                             ui.allocate_exact_size(Vec2::splat(18.0), egui::Sense::hover());
-                        icons::paint(ui.painter(), rect, Icon::Search, INK_MUTED, 1.5);
+                        icons::paint(ui.painter(), rect, Icon::Search, INK_MUTED);
                         ui.add(
                             egui::TextEdit::singleline(&mut self.project_search)
                                 .frame(egui::Frame::NONE)
@@ -1068,7 +1119,7 @@ impl LocalWebApp {
                 } else {
                     lang.empty_offline()
                 },
-                self.daemon_online.then_some((lang.nav_add(), Icon::Plus)),
+                Some((lang.nav_add(), Icon::Plus)),
             ) {
                 self.open_add_project();
             }
@@ -1118,7 +1169,9 @@ impl LocalWebApp {
         self.settings_environment(ui);
         ui.add_space(24.0);
         self.settings_maintenance(ui);
-        ui.add_space(20.0);
+        ui.add_space(28.0);
+        brand::logo(ui, self.logo_texture.as_ref(), 168.0);
+        ui.add_space(8.0);
         ui.label(
             RichText::new(format!("LocalWeb {}", env!("CARGO_PKG_VERSION")))
                 .size(SMALL_SIZE)
@@ -1929,7 +1982,7 @@ impl LocalWebApp {
                 lang.add_title()
             },
             false,
-            self.daemon_online,
+            true,
         );
         ui.add_space(22.0);
         if !self.daemon_online {
@@ -1937,6 +1990,10 @@ impl LocalWebApp {
                 ui.vertical(|ui| {
                     ui.label(strong(if self.connection == Connection::Checking {
                         lang.checking_status()
+                    } else if matches!(self.daemon_transition, Some(DaemonTransition::Starting)) {
+                        lang.op_starting()
+                    } else if matches!(self.daemon_transition, Some(DaemonTransition::Setup)) {
+                        lang.op_setup()
                     } else if self.connection == Connection::Stopped {
                         lang.stopped_title()
                     } else {
@@ -1945,7 +2002,10 @@ impl LocalWebApp {
                     ui.label(RichText::new(lang.stopped_add_body()).color(INK_MUTED));
                 });
             });
-            return;
+            if editing {
+                return;
+            }
+            ui.add_space(14.0);
         }
         let mut submit = false;
         self.project_source_form(ui);
@@ -2004,8 +2064,17 @@ impl LocalWebApp {
                                 input: request,
                             },
                         );
-                    } else {
+                    } else if self.daemon_online {
                         self.request(Action::AddProject, Request::ProjectAdd(request));
+                    } else {
+                        self.queued_add = Some(request);
+                        if self.daemon_transition.is_none() {
+                            if self.setup_complete() {
+                                self.start_daemon();
+                            } else {
+                                self.setup();
+                            }
+                        }
                     }
                 }
                 Err(error) => self.form.error = Some(error),
@@ -2488,10 +2557,40 @@ impl LocalWebApp {
             .and_then(|paths| GlobalConfig::load_or_create(paths).ok())
             .unwrap_or_default()
     }
+
+    fn save_window_placement(&self, ctx: &egui::Context) {
+        let Some(paths) = &self.paths else {
+            return;
+        };
+        let (rect, minimized, maximized) = ctx.input(|input| {
+            let viewport = input.viewport();
+            (viewport.outer_rect, viewport.minimized, viewport.maximized)
+        });
+        if minimized == Some(true) {
+            return;
+        }
+        let Some(rect) = rect else {
+            return;
+        };
+        let placement = WindowPlacement {
+            x: rect.min.x,
+            y: rect.min.y,
+            maximized: maximized.unwrap_or(false),
+        };
+        if let Err(error) = placement.save(&paths.config) {
+            eprintln!("could not save the LocalWeb window position: {error}");
+        }
+    }
 }
 
 impl eframe::App for LocalWebApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if self.center_on_first_frame
+            && let Some(command) = egui::ViewportCommand::center_on_screen(ctx)
+        {
+            ctx.send_viewport_cmd(command);
+            self.center_on_first_frame = false;
+        }
         if !self.tray_checked {
             self.tray_checked = true;
             self.tray = Tray::new(self.lang, ctx.clone(), self.tray_sender.clone());
@@ -2509,10 +2608,11 @@ impl eframe::App for LocalWebApp {
                 }
             }
         }
-        if self.tray.is_some()
-            && !self.quit_requested
-            && ctx.input(|input| input.viewport().close_requested())
-        {
+        let close_requested = ctx.input(|input| input.viewport().close_requested());
+        if close_requested {
+            self.save_window_placement(ctx);
+        }
+        if self.tray.is_some() && !self.quit_requested && close_requested {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
         }
@@ -3104,7 +3204,6 @@ fn picker_row(
                 ),
                 icon,
                 if selected { ACCENT_TEXT } else { INK_MUTED },
-                1.5,
             );
             label_left = rect.left() + 38.0;
         }
@@ -3393,6 +3492,56 @@ mod tests {
             std::env::temp_dir().join(format!("localweb-gui-{label}-{}", std::process::id()));
         fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    #[test]
+    fn window_placement_round_trips() {
+        let config = test_source("window-placement");
+        let placement = WindowPlacement {
+            x: 123.5,
+            y: -45.0,
+            maximized: true,
+        };
+        placement.save(&config).unwrap();
+        assert_eq!(WindowPlacement::load(&config), Some(placement));
+        fs::write(config.join("gui-window"), "not a position").unwrap();
+        assert_eq!(WindowPlacement::load(&config), None);
+        fs::remove_dir_all(config).unwrap();
+    }
+
+    #[test]
+    fn add_form_is_usable_while_localweb_is_stopped() {
+        let path = test_source("offline-add");
+        let form = AddProjectForm {
+            path: path.display().to_string(),
+            ..Default::default()
+        };
+        let mut app = LocalWebApp::state(None, Lang::English, None);
+        app.connection = Connection::Stopped;
+        app.view = View::AddProject;
+        app.form = form;
+        assert_view_fits(
+            &mut app,
+            View::AddProject,
+            4000.0,
+            &[Lang::English.create_project(), Lang::English.cancel()],
+        );
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn offline_add_is_queued_until_the_daemon_starts() {
+        let path = test_source("offline-queue");
+        let form = AddProjectForm {
+            path: path.display().to_string(),
+            ..Default::default()
+        };
+        let mut app = LocalWebApp::state(None, Lang::English, None);
+        app.connection = Connection::Stopped;
+        app.queued_add = Some(form.to_request(Lang::English).unwrap());
+        app.handle_command(Action::StartDaemon, Ok("started".into()));
+        assert!(app.queued_add.is_none());
+        fs::remove_dir_all(path).unwrap();
     }
 
     #[test]

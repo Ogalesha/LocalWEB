@@ -2162,8 +2162,10 @@ version = "0.1.3"
 dependencies = [
  "anyhow",
  "eframe",
+ "image",
  "localweb-core",
  "mimalloc",
+ "skrifa",
  "tokio",
  "tray-icon",
  "zbus",
