@@ -3750,6 +3750,7 @@ mod tests {
     }
 
     fn assert_view_fits(app: &mut LocalWebApp, view: View, height: f32, required: &[&str]) {
+        let form_path = app.form.path.clone();
         let (screen, output) = render_minimum_view(app, view, height);
         for label in required {
             let matches = output
@@ -3786,10 +3787,27 @@ mod tests {
                 continue;
             };
             let rect = egui::Rect::from_min_size(text.pos, text.galley.size());
+            if rect.left() >= screen.left() && rect.right() <= screen.right() {
+                continue;
+            }
+            // A single-line editor scrolls its own long value instead of widening
+            // the form, so only the editor bounds must stay inside the window.
+            let source_field = view == View::AddProject
+                && !form_path.is_empty()
+                && text.galley.job.text == form_path;
             assert!(
-                rect.left() >= screen.left() && rect.right() <= screen.right(),
+                source_field,
                 "text {:?} overflows the minimum window horizontally in {view:?}",
                 text.galley.job.text
+            );
+            assert!(
+                shape.clip_rect.left() >= screen.left()
+                    && shape.clip_rect.right() <= screen.right(),
+                "the source folder field must stay inside the minimum window in {view:?}"
+            );
+            assert!(
+                shape.clip_rect.width() < rect.width(),
+                "the source folder field must clip the long path instead of widening the layout in {view:?}"
             );
         }
     }
