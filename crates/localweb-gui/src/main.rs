@@ -1988,18 +1988,25 @@ impl LocalWebApp {
         if !self.daemon_online {
             callout(ui, CalloutKind::Warning, Icon::Warning, |ui| {
                 ui.vertical(|ui| {
-                    ui.label(strong(if self.connection == Connection::Checking {
-                        lang.checking_status()
-                    } else if matches!(self.daemon_transition, Some(DaemonTransition::Starting)) {
-                        lang.op_starting()
-                    } else if matches!(self.daemon_transition, Some(DaemonTransition::Setup)) {
-                        lang.op_setup()
-                    } else if self.connection == Connection::Stopped {
-                        lang.stopped_title()
-                    } else {
-                        lang.daemon_unavailable()
-                    }));
-                    ui.label(RichText::new(lang.stopped_add_body()).color(INK_MUTED));
+                    ui.add(
+                        egui::Label::new(strong(if self.connection == Connection::Checking {
+                            lang.checking_status()
+                        } else if matches!(self.daemon_transition, Some(DaemonTransition::Starting))
+                        {
+                            lang.op_starting()
+                        } else if matches!(self.daemon_transition, Some(DaemonTransition::Setup)) {
+                            lang.op_setup()
+                        } else if self.connection == Connection::Stopped {
+                            lang.stopped_title()
+                        } else {
+                            lang.daemon_unavailable()
+                        }))
+                        .wrap(),
+                    );
+                    ui.add(
+                        egui::Label::new(RichText::new(lang.stopped_add_body()).color(INK_MUTED))
+                            .wrap(),
+                    );
                 });
             });
             if editing {
