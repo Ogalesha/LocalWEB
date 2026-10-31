@@ -30,4 +30,13 @@ jobs:
       - name: Workspace compiles on Darwin
         run: cargo check --workspace --all-targets
       - name: Platform-independent tests
-        run: cargo test -p localweb-core -p localweb-gui
+        run: |
+          set -o pipefail
+          cargo test --no-fail-fast -p localweb-core -p localweb-gui 2>&1 | tee "$RUNNER_TEMP/localweb-tests.log"
+      - name: Report failing tests
+        if: failure()
+        run: |
+          grep -E '^(test .* FAILED|failures:|---- .* stdout ----|thread .* panicked|assertion .* failed)' \
+            "$RUNNER_TEMP/localweb-tests.log" | head -40 | while IFS= read -r line; do
+            echo "::error title=macOS test failure::$line"
+          done
