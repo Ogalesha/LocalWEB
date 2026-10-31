@@ -36,7 +36,7 @@ jobs:
       - name: Report failing tests
         if: failure()
         run: |
-          grep -E '^(test .* FAILED|failures:|---- .* stdout ----|thread .* panicked|assertion .* failed)' \
+          grep -E '^(test .* FAILED|failures:|---- .* stdout ----|thread .* panicked|text .* overflows|assertion .* failed)' \
             "$RUNNER_TEMP/localweb-tests.log" | head -40 | while IFS= read -r line; do
             echo "::error title=macOS test failure::$line"
           done
