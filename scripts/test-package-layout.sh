@@ -51,6 +51,14 @@ for installed in \
     ./usr/share/polkit-1/actions/io.localweb.helper.policy; do
     dpkg-deb --fsys-tarfile "$package" | tar -tf - | grep -Fx "$installed" >/dev/null
 done
+for icon in "$workspace"/assets/brand/hicolor/*/apps/io.localweb.LocalWeb.png; do
+    relative=${icon#"$workspace/assets/brand/hicolor/"}
+    dpkg-deb --fsys-tarfile "$package" | tar -tf - | grep -Fx "./usr/share/icons/hicolor/$relative" >/dev/null
+done
+if dpkg-deb --fsys-tarfile "$package" | tar -tf - | grep -Fx ./usr/share/icons/hicolor/1024x1024/apps/io.localweb.LocalWeb.png >/dev/null; then
+    echo "The unindexed 1024x1024 icon must not be installed" >&2
+    exit 1
+fi
 for maintainer in ./prerm ./postrm; do
     dpkg-deb --ctrl-tarfile "$package" | tar -tf - | grep -Fx "$maintainer" >/dev/null
 done
