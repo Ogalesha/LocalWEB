@@ -9,6 +9,7 @@ use std::{
     io::{BufRead, IsTerminal, Write},
     path::PathBuf,
     process::Command,
+    time::Duration,
 };
 
 #[global_allocator]
@@ -531,7 +532,7 @@ async fn main() -> Result<()> {
             Request::ProjectEnvironment { name }
         }
         CommandKind::Start => {
-            start_daemon()?;
+            start_daemon(&paths).await?;
             return Ok(());
         }
         CommandKind::Autostart { command } => {
@@ -822,11 +823,32 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn start_daemon() -> Result<()> {
+async fn start_daemon(paths: &Paths) -> Result<()> {
     // Restart so a stale daemon left behind by a package upgrade is replaced.
     localweb_core::service::restart_daemon()?;
+    wait_for_daemon(paths).await?;
     println!("LocalWeb daemon started");
     Ok(())
+}
+
+async fn wait_for_daemon(paths: &Paths) -> Result<()> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let error = match tokio::time::timeout(
+            Duration::from_secs(2),
+            send_request(paths, Request::Status),
+        )
+        .await
+        {
+            Ok(Ok(_)) => return Ok(()),
+            Ok(Err(error)) => error.to_string(),
+            Err(_) => "the daemon did not reply in time".to_owned(),
+        };
+        if tokio::time::Instant::now() >= deadline {
+            bail!("LocalWeb daemon did not become ready: {error}");
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 fn setup(paths: &Paths) -> Result<()> {

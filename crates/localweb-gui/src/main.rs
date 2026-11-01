@@ -440,6 +440,9 @@ impl LocalWebApp {
                 self.connection = Connection::Connected;
                 self.daemon_online = true;
                 self.status = Some(status);
+                if let Some(request) = self.queued_add.take() {
+                    self.request(Action::AddProject, Request::ProjectAdd(request));
+                }
             }
             (Action::LoadProjects, Response::Projects(projects)) => {
                 self.projects_loaded = true;
@@ -536,10 +539,10 @@ impl LocalWebApp {
             }
             (Action::StartDaemon, Ok(_)) => {
                 self.notice = Some(Notice::success(self.lang.notice_started()));
+                // The start command returns before the daemon binds its socket.
+                // Send a queued project only after a status reply proves it is
+                // reachable; the periodic refresh retries if this one races.
                 self.refresh_all();
-                if let Some(request) = self.queued_add.take() {
-                    self.request(Action::AddProject, Request::ProjectAdd(request));
-                }
             }
             (Action::SyncHosts, Ok(_)) => {
                 self.notice = Some(Notice::success(self.lang.notice_hosts()));
@@ -2038,6 +2041,7 @@ impl LocalWebApp {
             {
                 self.form = AddProjectForm::default();
                 self.edit_project = None;
+                self.queued_add = None;
                 self.view = View::Projects;
             }
             submit = Pill::new(
@@ -3537,7 +3541,7 @@ mod tests {
     }
 
     #[test]
-    fn offline_add_is_queued_until_the_daemon_starts() {
+    fn offline_add_waits_for_a_reachable_daemon() {
         let path = test_source("offline-queue");
         let form = AddProjectForm {
             path: path.display().to_string(),
@@ -3547,7 +3551,35 @@ mod tests {
         app.connection = Connection::Stopped;
         app.queued_add = Some(form.to_request(Lang::English).unwrap());
         app.handle_command(Action::StartDaemon, Ok("started".into()));
-        assert!(app.queued_add.is_none());
+        assert!(
+            app.queued_add.is_some(),
+            "the project must wait for a reachable daemon"
+        );
+        app.handle_response(
+            Action::RefreshStatus,
+            Err("I/O error: No such file or directory (os error 2)".into()),
+        );
+        assert!(
+            app.queued_add.is_some(),
+            "a failed status probe must keep the project queued"
+        );
+        app.handle_response(
+            Action::RefreshStatus,
+            Ok(Response::Status(Status {
+                daemon_running: true,
+                gateway_running: false,
+                gateway_bind_address: None,
+                gateway_https_port: None,
+                project_count: 0,
+                active_projects: 0,
+            })),
+        );
+        assert!(
+            app.queued_add.is_none(),
+            "the project is sent once the daemon answers"
+        );
+        assert!(app.daemon_online);
+        assert!(app.connection == Connection::Connected);
         fs::remove_dir_all(path).unwrap();
     }
 
