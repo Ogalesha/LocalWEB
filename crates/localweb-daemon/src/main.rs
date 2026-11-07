@@ -25,8 +25,10 @@ const CRON_TICK_INTERVAL: Duration = Duration::from_secs(30);
 /// Standard HTTPS port used on a LocalWeb-owned loopback address.
 const GATEWAY_HTTPS_PORT: u16 = 443;
 /// First dedicated IPv4 loopback host considered on Linux.
+#[cfg(all(unix, not(target_os = "macos")))]
 const GATEWAY_LOOPBACK_START: u8 = 2;
 /// Last dedicated IPv4 loopback host considered on Linux.
+#[cfg(all(unix, not(target_os = "macos")))]
 const GATEWAY_LOOPBACK_END: u8 = 254;
 /// First unprivileged HTTPS fallback port. The selected port is loopback-only.
 const GATEWAY_FALLBACK_START: u16 = 8_443;

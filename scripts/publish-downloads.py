@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import time
 
 VERSION = r"(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)"
 PACKAGES = (
@@ -18,6 +19,7 @@ PACKAGES = (
     (rf"localweb-{VERSION}-windows-x86_64\.zip", "localweb-windows-x86_64.zip", "Windows 10/11"),
 )
 CURRENT_ASSETS = {alias for _, alias, _ in PACKAGES} | {"SHA256SUMS"}
+REQUIRED_CHECKS = (".github/workflows/native-builds.yml", ".github/workflows/macos-smoke.yml")
 
 
 def gh(*args):
@@ -50,6 +52,47 @@ def digest(path):
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             result.update(chunk)
     return result.hexdigest()
+
+
+def release_checks_ready(runs, repository, sha, build_id, current_build=False):
+    trusted = [run for run in runs if (
+        run.get("head_sha") == sha
+        and (run.get("head_repository") or {}).get("full_name") == repository
+        and run.get("event") == "push"
+        and (run.get("head_branch") == "main" or
+             (current_build and run.get("id") == build_id and run.get("path") == REQUIRED_CHECKS[0]))
+        and type(run.get("id")) is int and run["id"] > 0
+    )]
+    for workflow in REQUIRED_CHECKS:
+        candidates = [run for run in trusted if run.get("path") == workflow]
+        if not candidates:
+            return False
+        run = max(candidates, key=lambda item: item["id"])
+        if workflow == REQUIRED_CHECKS[0] and run["id"] != build_id:
+            raise ValueError("A newer native run exists for this commit; retain the previous downloads")
+        if current_build and workflow == REQUIRED_CHECKS[0] and run["status"] == "in_progress":
+            # This job depends on every native build/test job. Publication is
+            # the final job in its own workflow, so that workflow is not done yet.
+            continue
+        if run["status"] != "completed":
+            return False
+        if run.get("conclusion") != "success":
+            raise ValueError(f"Release blocked: {workflow} ended with {run.get('conclusion')}")
+    return True
+
+
+def wait_for_release_checks(repository, sha, build_id):
+    current_build = (os.environ.get("GITHUB_WORKFLOW") == "Native packages and acceptance"
+                     and os.environ.get("GITHUB_RUN_ID") == str(build_id))
+    for attempt in range(21):
+        runs = json.loads(gh("api", f"repos/{repository}/actions/runs?head_sha={sha}&per_page=100"))
+        if release_checks_ready(runs["workflow_runs"], repository, sha, build_id, current_build):
+            print(f"Required release checks passed for {sha}", flush=True)
+            return
+        if attempt < 20:
+            print("Waiting for this commit's required release checks; previous downloads remain available", flush=True)
+            time.sleep(30)
+    raise ValueError("Release checks did not finish; retain the previous downloads")
 
 
 def prepare(source, destination, repository, sha, run_id):
@@ -121,7 +164,7 @@ def publish(destination, notes_path, repository, sha):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["select", "publish"])
+    parser.add_argument("command", choices=["select", "verify", "publish"])
     parser.add_argument("--source", type=Path, default=Path("release-files"))
     parser.add_argument("--destination", type=Path, default=Path("rolling-files"))
     args = parser.parse_args()
@@ -134,7 +177,13 @@ def main():
         print(f"Selected successful main build {run['id']} ({run['head_sha']})")
     else:
         sha = os.environ["BUILD_SHA"]
-        notes = prepare(args.source, args.destination, repository, sha, int(os.environ["BUILD_RUN_ID"]))
+        build_id = int(os.environ["BUILD_RUN_ID"])
+        if not re.fullmatch(r"[0-9a-f]{40}", sha) or build_id <= 0:
+            raise ValueError("Invalid build identity")
+        wait_for_release_checks(repository, sha, build_id)
+        if args.command == "verify":
+            return
+        notes = prepare(args.source, args.destination, repository, sha, build_id)
         notes_path = args.destination.parent / "rolling-notes.md"
         notes_path.write_text(notes)
         publish(args.destination, notes_path, repository, sha)

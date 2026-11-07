@@ -32,6 +32,14 @@ System paths include versioned Ubuntu binaries and native unversioned Linux
 PHP/FPM. A manually supplied private PHP runtime uses `bin/php`, `sbin/php-fpm` and optional `etc/php.ini`.
 There is no runtime-download/install command in this version.
 
+## Database administration
+
+MariaDB and MySQL administrator credentials are separate from app credentials
+and stay in LocalWeb's private data/config directories. Passwordless root
+connections are rejected. Project database names, logins and data are preserved
+when applying this protection. Starting another project reuses a healthy
+shared database instead of restarting it.
+
 ## Extensions and commands
 
 Full PHP builds include the common XML, mbstring, curl, intl, ZIP, GD,

@@ -36,6 +36,29 @@ class DownloadsTest(unittest.TestCase):
         latest = self.run_fixture(id=11)
         self.assertEqual(publisher.select_run([latest, good], REPOSITORY), latest)
 
+    def checks_fixture(self):
+        return [self.run_fixture(), self.run_fixture(id=11, path=publisher.REQUIRED_CHECKS[1])]
+
+    def test_every_required_workflow_must_pass_for_the_same_commit(self):
+        runs = self.checks_fixture()
+        self.assertTrue(publisher.release_checks_ready(runs, REPOSITORY, SHA, 10))
+        for changes in [dict(conclusion="failure"), dict(conclusion="cancelled"), dict(conclusion="timed_out")]:
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                publisher.release_checks_ready([runs[0], runs[1] | changes], REPOSITORY, SHA, 10)
+        for changes in [dict(status="in_progress", conclusion=None), dict(head_sha="b"*40),
+                        dict(head_repository={"full_name": "fork/LocalWEB"})]:
+            with self.subTest(changes=changes):
+                self.assertFalse(publisher.release_checks_ready([runs[0], runs[1] | changes], REPOSITORY, SHA, 10))
+        self.assertFalse(publisher.release_checks_ready(runs[:1], REPOSITORY, SHA, 10))
+
+    def test_only_the_current_native_publication_can_be_in_progress(self):
+        native, mac = self.checks_fixture()
+        native |= dict(status="in_progress", conclusion=None)
+        self.assertTrue(publisher.release_checks_ready([native, mac], REPOSITORY, SHA, 10, True))
+        self.assertFalse(publisher.release_checks_ready([native, mac], REPOSITORY, SHA, 10, False))
+        with self.assertRaises(ValueError):
+            publisher.release_checks_ready([native | dict(id=12), mac], REPOSITORY, SHA, 10, True)
+
     def make_installers(self, root):
         names = ["localweb_0.1.3_amd64.deb", "localweb-0.1.3-1-x86_64.pkg.tar.zst",
                  "LocalWeb-0.1.3.pkg", "localweb-0.1.3-windows-x86_64.zip"]

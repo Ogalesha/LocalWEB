@@ -3,12 +3,6 @@ name: macOS smoke
 on:
   push:
     branches: [main]
-    paths:
-      - "crates/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - ".github/ci/**"
-      - ".github/workflows/macos-smoke.yml"
   workflow_dispatch:
 
 concurrency:

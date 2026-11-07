@@ -649,9 +649,10 @@ mod windows {
             }
             thread::sleep(Duration::from_millis(100));
         }
-        let logs = Paths::discover()
-            .map(|paths| paths.state.join("logs").display().to_string())
-            .unwrap_or_else(|_| "the LocalWeb log directory".into());
+        let logs = Paths::discover().map_or_else(
+            |_| "the LocalWeb log directory".into(),
+            |paths| paths.state.join("logs").display().to_string(),
+        );
         Err(LocalWebError::Service(format!(
             "{service} did not remain active in {unit}; inspect {logs}"
         )))
@@ -818,9 +819,10 @@ mod macos {
             }
             thread::sleep(Duration::from_millis(100));
         }
-        let logs = Paths::discover()
-            .map(|paths| paths.state.join("logs").display().to_string())
-            .unwrap_or_else(|_| "the LocalWeb log directory".into());
+        let logs = Paths::discover().map_or_else(
+            |_| "the LocalWeb log directory".into(),
+            |paths| paths.state.join("logs").display().to_string(),
+        );
         Err(LocalWebError::Service(format!(
             "{service} did not remain active in {unit}; inspect {logs}"
         )))
@@ -993,8 +995,9 @@ mod macos {
         if !identity.is_current() {
             return Ok(());
         }
-        let pid = i32::try_from(identity.pid)
-            .map_err(|_| LocalWebError::Service("Invalid service process ID".into()))?;
+        let pid = i32::try_from(identity.pid).map_err(|error| {
+            LocalWebError::Service(format!("Invalid service process ID: {error}"))
+        })?;
         // SAFETY: getpgid only queries the positive, creation-time-checked PID.
         if unsafe { libc::getpgid(pid) } != pid {
             if !identity.is_current() {

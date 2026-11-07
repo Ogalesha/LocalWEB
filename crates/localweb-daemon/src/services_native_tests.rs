@@ -236,3 +236,164 @@ fn bundled_web_servers_execute_php() {
 fn bundled_web_servers_support_paths_with_spaces() {
     check_routing(true);
 }
+
+fn initialize_test_database(
+    engine: Database,
+    services: &Services<'_>,
+    data: &Path,
+) -> (PathBuf, PathBuf, PathBuf, u16) {
+    let layout = RuntimeLayout::discover();
+    match engine {
+        Database::Mariadb => {
+            let (server, initializer, client) = layout.mariadb().unwrap();
+            let output = Command::new(initializer)
+                .arg("--no-defaults")
+                .arg(format!("--basedir={}", layout.mariadb_basedir().display()))
+                .arg(format!("--datadir={}", data.display()))
+                .args(["--auth-root-authentication-method=normal", "--skip-test-db"])
+                .env("LD_LIBRARY_PATH", layout.library_path())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            (
+                server,
+                client,
+                services.render_mariadb(data).unwrap(),
+                MARIADB_PORT,
+            )
+        }
+        Database::Mysql => {
+            let (server, client) = layout.mysql().unwrap();
+            let output = Command::new(&server)
+                .args(["--no-defaults", "--initialize-insecure"])
+                .arg(format!("--datadir={}", data.display()))
+                .arg(format!(
+                    "--lc-messages-dir={}",
+                    layout.mysql_messages_dir().display()
+                ))
+                .env("LD_LIBRARY_PATH", layout.library_path())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            (
+                server,
+                client,
+                services.render_mysql(data).unwrap(),
+                MYSQL_PORT,
+            )
+        }
+        _ => panic!("unsupported test engine"),
+    }
+}
+
+fn check_database_administration(engine: Database) {
+    let root = std::env::temp_dir().join(format!(
+        "lw-db-auth-{}",
+        &Uuid::new_v4().simple().to_string()[..8]
+    ));
+    let _directory = TestDirectory(root.clone());
+    let paths = Paths {
+        config: root.join("config"),
+        data: root.join("data"),
+        state: root.join("state"),
+        runtime: root.join("run"),
+    };
+    paths.create().unwrap();
+    let services = Services { paths: &paths };
+    let layout = RuntimeLayout::discover();
+    let data = root.join("database");
+    fs::create_dir(&data).unwrap();
+    let (server, client, config, original_port) =
+        initialize_test_database(engine, &services, &data);
+    let reserved = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = reserved.local_addr().unwrap().port();
+    drop(reserved);
+    fs::write(
+        &config,
+        fs::read_to_string(&config)
+            .unwrap()
+            .replace(&format!("port={original_port}"), &format!("port={port}")),
+    )
+    .unwrap();
+    for iteration in 0..2 {
+        let defaults = format!("--defaults-file={}", config.display());
+        let server_process = spawn(&server, &[&defaults]);
+        wait_for_tcp(port, "isolated database").unwrap();
+        services
+            .wait_database_admin(engine)
+            .unwrap_or_else(|error| {
+                let log_name = if engine == Database::Mariadb {
+                    "mariadb.log"
+                } else {
+                    "mysql.log"
+                };
+                let log = fs::read_to_string(paths.state.join("logs").join(log_name))
+                    .unwrap_or_default()
+                    .replace(
+                        &services.database_admin_password(engine).unwrap(),
+                        "[redacted]",
+                    );
+                panic!("{error}: {log}");
+            });
+        let unauthenticated = Command::new(&client)
+            .args([
+                "--no-defaults",
+                "--protocol=tcp",
+                "--host=127.0.0.1",
+                "--user=root",
+                "--skip-password",
+            ])
+            .arg(format!("--port={port}"))
+            .arg("--execute=SELECT 1")
+            .env("LD_LIBRARY_PATH", layout.library_path())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(
+            !unauthenticated.success(),
+            "{engine:?} allowed passwordless TCP root"
+        );
+        let sql = if iteration == 0 {
+            "CREATE DATABASE audit; CREATE TABLE audit.marker (value INT); INSERT INTO audit.marker VALUES (42);"
+        } else {
+            "SELECT value FROM audit.marker;"
+        };
+        let output = services
+            .mysql_admin_command(engine, &client)
+            .unwrap()
+            .args(["--batch", "--skip-column-names", "--execute", sql])
+            .env("LD_LIBRARY_PATH", layout.library_path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if iteration == 1 {
+            assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "42");
+        }
+        drop(server_process);
+    }
+}
+
+#[test]
+#[ignore = "requires the installed MariaDB runtime; creates an isolated temporary database"]
+fn mariadb_rejects_passwordless_root_and_preserves_data_on_restart() {
+    check_database_administration(Database::Mariadb);
+}
+
+#[test]
+#[ignore = "requires the installed MySQL runtime; creates an isolated temporary database"]
+fn mysql_rejects_passwordless_root_and_preserves_data_on_restart() {
+    check_database_administration(Database::Mysql);
+}

@@ -104,14 +104,14 @@ async fn https_listener(address: Ipv4Addr, port: u16) -> Result<TcpListener> {
         .context("bind HTTPS loopback port")
 }
 
-/// Takes the launchd-owned socket when the gateway runs as a LaunchAgent.
+/// Takes the launchd-owned socket when the gateway runs as a `LaunchAgent`.
 ///
 /// Binding port 443 as an unprivileged user is only possible through launchd
 /// socket activation; when the process was started manually this returns
 /// `None` so a plain bind can be attempted instead.
 #[cfg(target_os = "macos")]
 fn launchd_listener() -> Result<Option<TcpListener>> {
-    use std::{ffi::CStr, os::fd::FromRawFd, ptr};
+    use std::{os::fd::FromRawFd, ptr};
 
     unsafe extern "C" {
         fn launch_activate_socket(
@@ -121,7 +121,7 @@ fn launchd_listener() -> Result<Option<TcpListener>> {
         ) -> libc::c_int;
     }
 
-    let name = CStr::from_bytes_with_nul(b"LocalWebHTTPS\0").expect("static socket name");
+    let name = c"LocalWebHTTPS";
     let mut descriptors = ptr::null_mut();
     let mut count: libc::size_t = 0;
     // SAFETY: both out-pointers are valid for the duration of the call; launchd
@@ -140,9 +140,7 @@ fn launchd_listener() -> Result<Option<TcpListener>> {
         }
     }
     // SAFETY: launchd allocated the array with malloc and passes ownership.
-    unsafe {
-        libc::free(descriptors.cast());
-    }
+    unsafe { libc::free(descriptors.cast()) };
     // SAFETY: the activated descriptor is now owned by this process.
     let listener = unsafe { std::net::TcpListener::from_raw_fd(descriptor) };
     listener.set_nonblocking(true)?;

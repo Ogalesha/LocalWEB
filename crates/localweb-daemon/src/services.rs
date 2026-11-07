@@ -20,6 +20,9 @@ use uuid::Uuid;
 
 use crate::backend;
 
+#[path = "services_admin.rs"]
+mod admin;
+
 #[cfg(all(test, target_os = "linux"))]
 #[path = "services_native_tests.rs"]
 mod native_tests;
@@ -629,6 +632,9 @@ impl Services<'_> {
             }
         }
         let config = self.render_mariadb(&data)?;
+        if is_active("localweb-db-mariadb") && self.database_admin_ready(Database::Mariadb)? {
+            return Ok(());
+        }
         let defaults = format!("--defaults-file={}", config.display());
         Self::start_or_restart("localweb-db-mariadb", &server, &[&defaults])?;
         wait_for_tcp(MARIADB_PORT, "MariaDB")?;
@@ -637,7 +643,7 @@ impl Services<'_> {
             &self.paths.runtime.join("services/mariadb.sock"),
             "MariaDB socket",
         )?;
-        Ok(())
+        self.wait_database_admin(Database::Mariadb)
     }
 
     pub fn ensure_project_database(&self, project: &Project) -> Result<()> {
@@ -663,22 +669,7 @@ impl Services<'_> {
             user = secrets.database_user,
             password = secrets.database_password,
         );
-        let mut command = Command::new(client);
-        command.arg("--no-defaults");
-        #[cfg(unix)]
-        {
-            let socket = self.paths.runtime.join("services/mariadb.sock");
-            command
-                .arg("--protocol=socket")
-                .arg(format!("--socket={}", socket.display()))
-                .arg("--user=root");
-        };
-        #[cfg(windows)]
-        {
-            command
-                .args(["--protocol=tcp", "--host=127.0.0.1"])
-                .arg(format!("--port={MARIADB_PORT}"));
-        };
+        let mut command = self.mysql_admin_command(Database::Mariadb, &client)?;
         let mut child = command
             .env("LD_LIBRARY_PATH", RuntimeLayout::discover().library_path())
             .stdin(Stdio::piped())
@@ -726,6 +717,9 @@ impl Services<'_> {
             }
         }
         let config = self.render_mysql(&data)?;
+        if is_active("localweb-db-mysql") && self.database_admin_ready(Database::Mysql)? {
+            return Ok(());
+        }
         let defaults = format!("--defaults-file={}", config.display());
         Self::start_or_restart("localweb-db-mysql", &server, &[&defaults])?;
         wait_for_tcp(MYSQL_PORT, "MySQL")?;
@@ -734,7 +728,7 @@ impl Services<'_> {
             &self.paths.runtime.join("services/mysql.sock"),
             "MySQL socket",
         )?;
-        Ok(())
+        self.wait_database_admin(Database::Mysql)
     }
 
     pub fn ensure_project_mysql_database(&self, project: &Project) -> Result<()> {
@@ -760,22 +754,7 @@ impl Services<'_> {
             user = secrets.database_user,
             password = secrets.database_password,
         );
-        let mut command = Command::new(client);
-        command.arg("--no-defaults");
-        #[cfg(unix)]
-        {
-            let socket = self.paths.runtime.join("services/mysql.sock");
-            command
-                .arg("--protocol=socket")
-                .arg(format!("--socket={}", socket.display()))
-                .arg("--user=root");
-        };
-        #[cfg(windows)]
-        {
-            command
-                .args(["--protocol=tcp", "--host=127.0.0.1"])
-                .arg(format!("--port={MYSQL_PORT}"));
-        };
+        let mut command = self.mysql_admin_command(Database::Mysql, &client)?;
         let mut child = command
             .env("LD_LIBRARY_PATH", RuntimeLayout::discover().library_path())
             .stdin(Stdio::piped())
@@ -824,8 +803,10 @@ impl Services<'_> {
         );
         #[cfg(windows)]
         let socket = String::new();
+        let (admin_init, _) = self.mysql_admin_files(Database::Mysql)?;
         let config = format!(
-            "[client]\nport={port}\n{socket}[mysqld]\ndatadir={data}\n{basedir}port={port}\nbind-address=127.0.0.1\n{socket}pid-file={pid}\nlog-error={log}\nlc-messages-dir={messages}\nmax-connections=40\n{skip_name_resolve}disable-log-bin\nsecure-file-priv={files}\n",
+            "[client]\nport={port}\n{socket}[mysqld]\ninit-file=\"{admin_init}\"\ndatadir={data}\n{basedir}port={port}\nbind-address=127.0.0.1\n{socket}pid-file={pid}\nlog-error={log}\nlc-messages-dir={messages}\nmax-connections=40\n{skip_name_resolve}disable-log-bin\nsecure-file-priv={files}\n",
+            admin_init = config_path(&admin_init),
             port = MYSQL_PORT,
             data = config_path(data),
             pid = config_path(&self.paths.runtime.join("services/mysql.pid")),
@@ -1338,8 +1319,10 @@ impl Services<'_> {
         );
         #[cfg(windows)]
         let socket = String::new();
+        let (admin_init, _) = self.mysql_admin_files(Database::Mariadb)?;
         let config = format!(
-            "[client]\nport={port}\n{socket}[mysqld]\ndatadir={data}\n{basedir}port={port}\nbind-address=127.0.0.1\n{socket}pid-file={pid}\nlog-error={log}\nplugin-dir={plugins}\nlc-messages-dir={messages}\nmax-connections=40\n{skip_name_resolve}",
+            "[client]\nport={port}\n{socket}[mysqld]\ninit-file=\"{admin_init}\"\ndatadir={data}\n{basedir}port={port}\nbind-address=127.0.0.1\n{socket}pid-file={pid}\nlog-error={log}\nplugin-dir={plugins}\nlc-messages-dir={messages}\nmax-connections=40\n{skip_name_resolve}",
+            admin_init = config_path(&admin_init),
             port = MARIADB_PORT,
             data = config_path(data),
             pid = config_path(&self.paths.runtime.join("services/mariadb.pid")),
@@ -1598,7 +1581,7 @@ fn safe_config_path(path: &Path) -> Result<()> {
 mod tests {
     use super::*;
 
-    fn fixture() -> (PathBuf, Paths, Project) {
+    pub(super) fn fixture() -> (PathBuf, Paths, Project) {
         let base = std::env::temp_dir().join(format!("localweb-services-{}", Uuid::new_v4()));
         let paths = Paths {
             config: base.join("config"),

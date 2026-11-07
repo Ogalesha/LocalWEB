@@ -6,6 +6,19 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-11-07
+
+### Security
+
+- Protect MariaDB and MySQL administration with private credentials; reject passwordless root access without changing app database credentials or data.
+- Reject unrelated Host headers on direct web ports, cancel command trees on stop/timeout, and verify native process identity before termination.
+
+### Fixed
+
+- Correct Nginx FastCGI metadata, Apache high-port reporting, project environment exports, worker restart and cron stop behavior.
+- Correct macOS PHP matching, native helper/gateway checks and Windows runtime diagnostics.
+- Publish permanent download links for each OS, current checksums and matching rolling source archives. Native quality/regression checks gate publication.
+
 ### Added
 
 - Explicit **Details**, **Edit** and **Remove** actions on every desktop project row, with 44 px targets, tooltips, accessible names and labeled controls in the stacked layout.

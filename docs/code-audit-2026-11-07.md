@@ -12,6 +12,7 @@ macOS/Windows process ownership and public download publication. Ubuntu
 | High | Scheduled commands survived project stop; a tick could start work using an obsolete running-project snapshot. | Track job handles, serialize registration with project operations and cancel only the selected project's jobs before stopping its services. Regression checks project isolation. |
 | High | Cron buffered arbitrary command output; MCP timeouts only killed the immediate child. | Share a command runner that drains both pipes with bounded retention and cancels the owned process tree. Tests exercise verbose output and a real child/grandchild tree, including Windows in Wine CI. |
 | High | macOS/Windows PID files could target a reused PID. macOS also accepted zero/negative process-group IDs. | Store PID plus native process creation time, reject unverifiable records and signal only a matching process. Windows retains a verified process handle during termination; macOS creates and checks a dedicated process group. Tests reject malformed/legacy records and mismatched creation times. |
+| High | Private MariaDB accepted passwordless root connections over TCP; MySQL also initialized with an empty administrator password. | Persist separate private administrator credentials, apply them through a restricted startup SQL file before accepting connections and use private client options for provisioning. Both real engines reject passwordless root and preserve data across restarts in isolated tests. |
 | High | Direct web ports served the default project for unrelated Host headers. | Add explicit rejecting default hosts for Nginx and Apache. Native requests reject foreign and suffix-spoofed hostnames while preserving project and loopback access. |
 | Medium | Windows could spawn a worker after stop had cancelled it; failed identity persistence left a child running. | Serialize worker ownership checks, spawn and identity persistence with cancellation. Reap children when recording ownership fails. |
 | Medium | Nginx omitted client address/port and server address/port from FastCGI. Apache reported port 80 on a high-port listener. | Supply standard CGI parameters and enable Apache's physical-port fallback. Real PHP requests verify metadata with both servers, including paths containing spaces. |
@@ -38,10 +39,11 @@ still own their configuration and data-import steps.
 ## Verification and limits
 
 - Local Ubuntu workspace regression suite, formatting and Clippy with
-  warnings denied: 112 tests passed; five opt-in native service tests passed separately.
+  warnings denied: 113 tests passed; seven opt-in native service tests run separately, including isolated database authentication checks.
 - Native checks cover Nginx/Apache/PHP/Redis, request metadata, paths with
   spaces, literal systemd arguments, cancellation of pending restarts and
   worker restart after exit 0.
+- macOS publication now requires the workspace quality and regression checks, including platform-specific helper and gateway code. Windows also has a native runner quality/regression gate.
 - macOS CI now runs the whole workspace suite and Clippy. Windows CI
   cross-builds and runs core/daemon regressions under Wine in addition to
   the existing CLI, named-pipe, MCP and GUI smoke checks.
@@ -49,6 +51,9 @@ still own their configuration and data-import steps.
   their current runtime requirements and artifact contracts.
 - The latest-download publisher passed against the previous verified build;
   all four public assets, their SHA-256 values and source commit were checked.
+- Publication checks all required validation workflows for the same source
+  commit. Failed, cancelled, timed-out or superseded runs block publication;
+  pending runs keep previous downloads available while checks finish.
 
 Full Linux install/removal acceptance runs on disposable Ubuntu and Arch CI
 hosts. A real Omarchy desktop and full native web-stack acceptance on macOS
@@ -65,3 +70,5 @@ Source references:
 [Apache canonical port](https://httpd.apache.org/docs/2.4/en/mod/core.html#usecanonicalphysicalport),
 [Tokio process cancellation](https://docs.rs/tokio/latest/tokio/process/index.html),
 [artifact download contract](https://github.com/actions/download-artifact).
+
+A fresh RustSec scan found no vulnerability advisories. Four unmaintained-crate notices and three yanked-version notices remain; no advisories were suppressed.
