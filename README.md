@@ -15,6 +15,17 @@ The **Generic PHP** preset lets you choose the document root, database,
 cache, worker command and scheduled tasks yourself. Your application's
 requirements still determine which PHP and database versions it can use.
 
+**Download the latest verified build:**
+[Ubuntu](https://github.com/Ogalesha/LocalWEB/releases/download/rolling/localweb-ubuntu-amd64.deb) ·
+[Arch / Omarchy](https://github.com/Ogalesha/LocalWEB/releases/download/rolling/localweb-arch-x86_64.pkg.tar.zst) ·
+[macOS](https://github.com/Ogalesha/LocalWEB/releases/download/rolling/LocalWeb-macos-universal.pkg) ·
+[Windows](https://github.com/Ogalesha/LocalWEB/releases/download/rolling/localweb-windows-x86_64.zip)
+
+These links always point to the latest successful `main` build for all four
+platforms. See its [version, source commit and checksums](https://github.com/Ogalesha/LocalWEB/releases/tag/rolling).
+Builds are published after testing, so a push may take time to appear here.
+[Stable releases](https://github.com/Ogalesha/LocalWEB/releases/latest) are separate snapshots.
+
 ## Tools and features
 
 | Tool | What LocalWeb provides |
@@ -90,16 +101,17 @@ files as public release assets.
 
 ## Install and get started
 
-Download the package for your OS from [GitHub Releases](https://github.com/Ogalesha/LocalWEB/releases).
-Version tags are stable releases; the [LocalWeb rolling builds](https://github.com/Ogalesha/LocalWEB/releases/tag/rolling)
-pre-release is rebuilt from every successful push to `main`. Release assets
+Use the OS download links above for the latest verified `main` build, or
+choose a versioned [stable release](https://github.com/Ogalesha/LocalWEB/releases/latest).
+The [rolling pre-release](https://github.com/Ogalesha/LocalWEB/releases/tag/rolling)
+updates after the complete native build passes. Failed builds leave the previous downloads in place. Release assets
 download without an account, while the artifacts attached to individual
 **Actions** runs require a GitHub sign-in. Check the package's SHA-256 against the accompanying
 `SHA256SUMS` file.
 
 ```bash
-sudo apt install ./localweb_0.1.3_amd64.deb          # Ubuntu
-sudo pacman -U ./localweb-0.1.3-1-x86_64.pkg.tar.zst # Arch / Omarchy
+sudo apt install ./localweb-ubuntu-amd64.deb           # Ubuntu
+sudo pacman -U ./localweb-arch-x86_64.pkg.tar.zst       # Arch / Omarchy
 ```
 
 Open the desktop app and choose **Set up LocalWeb**, then **Trust certificate**.
@@ -119,7 +131,11 @@ local-domain changes. Project services run as your desktop user.
 In the desktop app, open **Add project**, select an existing source folder,
 check its preset and document root, choose the runtime and services, then
 confirm with **Add project**. The source files are kept where they are.
-Select **Start** to run the project and **Open** to visit it.
+Before starting, open **Details → Show connection settings** and copy the
+database, Redis and email values into your app's configuration. Update its
+base URL to the LocalWeb HTTPS URL shown in Details. LocalWeb leaves your
+source files and existing databases in place; it does not import data from
+another development stack. Then select **Start** and **Open**.
 
 ## Project CRUD
 
@@ -161,9 +177,11 @@ For a terminal workflow:
 ```bash
 localweb project add ~/Code/acme --php 8.5 --web nginx \
   --db mariadb --cache redis --document-root public --domain acme.dev
+localweb env acme --format dotenv
+# Apply these values to the app's config; import existing data if needed.
+localweb composer acme -- install
 localweb project start acme
 localweb php acme -- -v
-localweb composer acme -- install
 ```
 
 Choose a different stack for another project:
@@ -245,7 +263,9 @@ The displayed project state is the daemon's active-project state, not a
 continuous health check of every service. When a project starts or restarts,
 the daemon reads a bounded HTTP/1.x status line from its direct loopback port:
 2xx/3xx and authentication challenges (401/403) count as reachable, while
-404, 5xx, malformed responses and timeouts fail the start. Gateway state is
+404, 5xx, malformed responses and timeouts fail the start. An HTTP 500 means
+the app returned an error: check its logs and the values from `localweb env <name>`.
+Gateway state is
 checked through the native service manager. Worker counts describe configured
 workers.
 

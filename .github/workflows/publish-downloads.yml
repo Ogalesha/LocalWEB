@@ -1,0 +1,72 @@
+name: Publish latest downloads
+
+on:
+  workflow_run:
+    workflows: [Native packages and acceptance]
+    branches: [main]
+    types: [completed]
+  push:
+    branches: [main]
+    paths:
+      - README.md
+      - scripts/publish-downloads.py
+      - scripts/test-publish-downloads.py
+      - .github/workflows/publish-downloads.yml
+  workflow_dispatch:
+
+concurrency:
+  group: publish-latest-downloads
+  cancel-in-progress: false
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  publish:
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Test publication rules
+        run: python3 scripts/test-publish-downloads.py
+      - name: Select the latest successful main build
+        id: build
+        run: python3 scripts/publish-downloads.py select
+      - uses: actions/download-artifact@v5
+        with:
+          name: localweb-ubuntu-amd64
+          path: release-files/ubuntu
+          run-id: ${{ steps.build.outputs.run_id }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v5
+        with:
+          name: localweb-arch-omarchy-amd64
+          path: release-files/arch
+          run-id: ${{ steps.build.outputs.run_id }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v5
+        with:
+          name: localweb-macos-universal
+          path: release-files/macos
+          run-id: ${{ steps.build.outputs.run_id }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v5
+        with:
+          name: localweb-windows-amd64
+          path: release-files/windows
+          run-id: ${{ steps.build.outputs.run_id }}
+          github-token: ${{ github.token }}
+      - name: Publish fixed download URLs and checksums
+        env:
+          BUILD_SHA: ${{ steps.build.outputs.sha }}
+          BUILD_RUN_ID: ${{ steps.build.outputs.run_id }}
+        run: python3 scripts/publish-downloads.py publish
