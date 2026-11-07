@@ -32,30 +32,35 @@ jobs:
         id: build
         run: python3 scripts/publish-downloads.py select
       - uses: actions/download-artifact@v8.0.2
+        if: steps.build.outputs.run_id != ''
         with:
           name: localweb-ubuntu-amd64
           path: release-files/ubuntu
           run-id: ${{ steps.build.outputs.run_id }}
           github-token: ${{ github.token }}
       - uses: actions/download-artifact@v8.0.2
+        if: steps.build.outputs.run_id != ''
         with:
           name: localweb-arch-omarchy-amd64
           path: release-files/arch
           run-id: ${{ steps.build.outputs.run_id }}
           github-token: ${{ github.token }}
       - uses: actions/download-artifact@v8.0.2
+        if: steps.build.outputs.run_id != ''
         with:
           name: localweb-macos-universal
           path: release-files/macos
           run-id: ${{ steps.build.outputs.run_id }}
           github-token: ${{ github.token }}
       - uses: actions/download-artifact@v8.0.2
+        if: steps.build.outputs.run_id != ''
         with:
           name: localweb-windows-amd64
           path: release-files/windows
           run-id: ${{ steps.build.outputs.run_id }}
           github-token: ${{ github.token }}
       - name: Publish fixed download URLs and checksums
+        if: steps.build.outputs.run_id != ''
         env:
           BUILD_SHA: ${{ steps.build.outputs.sha }}
           BUILD_RUN_ID: ${{ steps.build.outputs.run_id }}

@@ -305,11 +305,11 @@ impl RuntimeLayout {
                     return Ok(path);
                 }
             }
-            return which("httpd.exe").ok_or_else(|| {
+            which("httpd.exe").ok_or_else(|| {
                 LocalWebError::RuntimeNotInstalled(
                     "Apache httpd is not installed via Scoop or Chocolatey".into(),
                 )
-            });
+            })
         }
         #[cfg(not(windows))]
         {
@@ -331,15 +331,14 @@ impl RuntimeLayout {
     pub fn apache_server_root(&self) -> PathBuf {
         #[cfg(windows)]
         {
-            return self
-                .apache()
+            self.apache()
                 .ok()
                 .and_then(|httpd| httpd.parent().map(Path::to_path_buf))
                 .and_then(|bin| {
                     let root = bin.parent()?;
                     root.join("conf").is_dir().then(|| root.to_path_buf())
                 })
-                .unwrap_or_else(|| self.root.join("apache"));
+                .unwrap_or_else(|| self.root.join("apache"))
         }
         #[cfg(not(windows))]
         {
@@ -360,7 +359,9 @@ impl RuntimeLayout {
     #[must_use]
     pub fn apache_modules_dir(&self) -> PathBuf {
         #[cfg(windows)]
-        return self.apache_server_root().join("modules");
+        {
+            self.apache_server_root().join("modules")
+        }
         #[cfg(not(windows))]
         {
             #[cfg(target_os = "macos")]
@@ -385,7 +386,9 @@ impl RuntimeLayout {
     #[must_use]
     pub fn apache_mime_types(&self) -> PathBuf {
         #[cfg(windows)]
-        return self.apache_server_root().join("conf/mime.types");
+        {
+            self.apache_server_root().join("conf/mime.types")
+        }
         #[cfg(not(windows))]
         {
             #[cfg(target_os = "macos")]
@@ -409,7 +412,7 @@ impl RuntimeLayout {
     pub fn node(&self) -> Result<PathBuf> {
         #[cfg(windows)]
         {
-            return scoop_app("nodejs")
+            scoop_app("nodejs")
                 .map(|directory| directory.join("node.exe"))
                 .filter(|path| path.is_file())
                 .or_else(|| which("node.exe"))
@@ -417,7 +420,7 @@ impl RuntimeLayout {
                     LocalWebError::RuntimeNotInstalled(
                         "Node.js is not installed via Scoop or Chocolatey".into(),
                     )
-                });
+                })
         }
         #[cfg(not(windows))]
         {
@@ -450,9 +453,9 @@ impl RuntimeLayout {
                     return Ok(path);
                 }
             }
-            return Err(LocalWebError::RuntimeNotInstalled(
+            Err(LocalWebError::RuntimeNotInstalled(
                 "npm-cli.js is missing from the Node.js installation".into(),
-            ));
+            ))
         }
         #[cfg(not(windows))]
         {
@@ -477,7 +480,7 @@ impl RuntimeLayout {
     pub fn mailpit(&self) -> Result<PathBuf> {
         #[cfg(windows)]
         {
-            return scoop_app("mailpit")
+            scoop_app("mailpit")
                 .map(|directory| directory.join("mailpit.exe"))
                 .filter(|path| path.is_file())
                 .or_else(|| which("mailpit.exe"))
@@ -485,7 +488,7 @@ impl RuntimeLayout {
                     LocalWebError::RuntimeNotInstalled(
                         "Mailpit is not installed via Scoop or Chocolatey".into(),
                     )
-                });
+                })
         }
         #[cfg(not(windows))]
         {
@@ -520,11 +523,11 @@ impl RuntimeLayout {
                     )
                 })?;
             let bin = base.join("bin");
-            return Ok((
+            Ok((
                 require_file(bin.join("mariadbd.exe"), "MariaDB server")?,
                 require_file(bin.join("mariadb-install-db.exe"), "MariaDB initializer")?,
                 require_file(bin.join("mariadb.exe"), "MariaDB client")?,
-            ));
+            ))
         }
         #[cfg(not(windows))]
         {
@@ -573,10 +576,10 @@ impl RuntimeLayout {
                     )
                 })?;
             let bin = base.join("bin");
-            return Ok((
+            Ok((
                 require_file(bin.join("mysqld.exe"), "MySQL server")?,
                 require_file(bin.join("mysql.exe"), "MySQL client")?,
-            ));
+            ))
         }
         #[cfg(not(windows))]
         {
@@ -619,11 +622,11 @@ impl RuntimeLayout {
                     )
                 })?;
             let bin = base.join("bin");
-            return Ok((
+            Ok((
                 require_file(bin.join("postgres.exe"), "PostgreSQL server")?,
                 require_file(bin.join("initdb.exe"), "PostgreSQL initializer")?,
                 require_file(bin.join("psql.exe"), "PostgreSQL client")?,
-            ));
+            ))
         }
         #[cfg(not(windows))]
         {
@@ -665,10 +668,10 @@ impl RuntimeLayout {
                         "Redis is not installed via Scoop or Chocolatey".into(),
                     )
                 })?;
-            return Ok((
+            Ok((
                 require_file(base.join("redis-server.exe"), "Redis server")?,
                 require_file(base.join("redis-cli.exe"), "Redis client")?,
-            ));
+            ))
         }
         #[cfg(not(windows))]
         {
@@ -685,8 +688,8 @@ impl RuntimeLayout {
     pub fn mariadb_basedir(&self) -> PathBuf {
         #[cfg(windows)]
         {
-            return windows_tool_base("mariadbd.exe", "mariadb")
-                .unwrap_or_else(|| self.root.join("mariadb"));
+            windows_tool_base("mariadbd.exe", "mariadb")
+                .unwrap_or_else(|| self.root.join("mariadb"))
         }
         #[cfg(not(windows))]
         {
@@ -703,7 +706,7 @@ impl RuntimeLayout {
     pub fn mariadb_plugin_dir(&self) -> PathBuf {
         #[cfg(windows)]
         {
-            return self.mariadb_basedir().join("lib/plugin");
+            self.mariadb_basedir().join("lib/plugin")
         }
         #[cfg(not(windows))]
         {
@@ -720,7 +723,7 @@ impl RuntimeLayout {
     pub fn mariadb_messages_dir(&self) -> PathBuf {
         #[cfg(windows)]
         {
-            return self.mariadb_basedir().join("share/mariadb");
+            self.mariadb_basedir().join("share/mariadb")
         }
         #[cfg(not(windows))]
         {
@@ -737,8 +740,8 @@ impl RuntimeLayout {
     pub fn mysql_messages_dir(&self) -> PathBuf {
         #[cfg(windows)]
         {
-            return windows_tool_base("mysqld.exe", "mysql")
-                .map_or_else(|| self.root.join("mysql/share"), |base| base.join("share"));
+            windows_tool_base("mysqld.exe", "mysql")
+                .map_or_else(|| self.root.join("mysql/share"), |base| base.join("share"))
         }
         #[cfg(not(windows))]
         {
@@ -758,10 +761,10 @@ impl RuntimeLayout {
             let base = windows_tool_base("postgres.exe", "postgresql")
                 .unwrap_or_else(|| self.root.join("postgres"));
             let candidates = [base.join("share/postgresql"), base.join("share")];
-            return candidates
+            candidates
                 .into_iter()
                 .find(|path| path.join("postgres.bki").is_file())
-                .unwrap_or_else(|| base.join("share"));
+                .unwrap_or_else(|| base.join("share"))
         }
         #[cfg(not(windows))]
         {
@@ -778,9 +781,9 @@ impl RuntimeLayout {
     pub fn postgres_lib(&self) -> PathBuf {
         #[cfg(windows)]
         {
-            return windows_tool_base("postgres.exe", "postgresql")
+            windows_tool_base("postgres.exe", "postgresql")
                 .unwrap_or_else(|| self.root.join("postgres"))
-                .join("lib");
+                .join("lib")
         }
         #[cfg(not(windows))]
         {

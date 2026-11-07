@@ -22,6 +22,10 @@ CURRENT_ASSETS = {alias for _, alias, _ in PACKAGES} | {"SHA256SUMS"}
 REQUIRED_CHECKS = (".github/workflows/native-builds.yml", ".github/workflows/macos-smoke.yml")
 
 
+class NoVerifiedBuild(ValueError):
+    """The first complete main build has not succeeded yet."""
+
+
 def gh(*args):
     result = subprocess.run(["gh", *args], text=True, capture_output=True)
     if result.returncode:
@@ -42,7 +46,7 @@ def select_run(runs, repository):
         and re.fullmatch(r"[0-9a-f]{40}", run.get("head_sha", ""))
     )]
     if not trusted:
-        raise ValueError("No successful main build is available")
+        raise NoVerifiedBuild("No successful main build is available")
     return max(trusted, key=lambda run: run["id"])
 
 
@@ -171,7 +175,11 @@ def main():
     repository = os.environ["GITHUB_REPOSITORY"]
     if args.command == "select":
         runs = json.loads(gh("api", f"repos/{repository}/actions/workflows/native-builds.yml/runs?branch=main&event=push&status=success&per_page=30"))
-        run = select_run(runs["workflow_runs"], repository)
+        try:
+            run = select_run(runs["workflow_runs"], repository)
+        except NoVerifiedBuild:
+            print("::notice title=Downloads unchanged::No verified main build is available; keeping existing downloads.")
+            return
         with Path(os.environ["GITHUB_OUTPUT"]).open("a") as output:
             output.write(f"run_id={run['id']}\nsha={run['head_sha']}\n")
         print(f"Selected successful main build {run['id']} ({run['head_sha']})")

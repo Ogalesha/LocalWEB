@@ -2,6 +2,8 @@
 """Regression checks for public download selection and publication."""
 
 import importlib.util
+import contextlib
+import io
 import json
 from pathlib import Path
 import subprocess
@@ -35,6 +37,15 @@ class DownloadsTest(unittest.TestCase):
                     publisher.select_run([self.run_fixture() | changes], REPOSITORY)
         latest = self.run_fixture(id=11)
         self.assertEqual(publisher.select_run([latest, good], REPOSITORY), latest)
+
+    def test_bootstrap_retains_downloads_until_a_verified_build_exists(self):
+        output = io.StringIO()
+        with patch.object(publisher, "gh", return_value=json.dumps({"workflow_runs": []})) as gh, \
+             patch.dict(publisher.os.environ, {"GITHUB_REPOSITORY": REPOSITORY}), \
+             patch("sys.argv", ["publish-downloads.py", "select"]), contextlib.redirect_stdout(output):
+            publisher.main()
+        self.assertEqual(gh.call_count, 1)
+        self.assertIn("Downloads unchanged", output.getvalue())
 
     def checks_fixture(self):
         return [self.run_fixture(), self.run_fixture(id=11, path=publisher.REQUIRED_CHECKS[1])]

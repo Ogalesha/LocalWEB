@@ -1908,19 +1908,17 @@ fn runtime_diagnostics() -> Vec<Diagnostic> {
     let mut checks = Vec::new();
     let runtime = RuntimeLayout::discover();
     #[cfg(any(target_os = "macos", windows))]
-    {
-        checks.push(Diagnostic {
-            level: "OK".into(),
-            check: "runtime source".into(),
-            detail: if cfg!(windows) {
-                "Native tools from Scoop, Chocolatey or PATH"
-            } else {
-                "Homebrew-managed native tools"
-            }
-            .into(),
-            fix: None,
-        });
-    }
+    checks.push(Diagnostic {
+        level: "OK".into(),
+        check: "runtime source".into(),
+        detail: if cfg!(windows) {
+            "Native tools from Scoop, Chocolatey or PATH"
+        } else {
+            "Homebrew-managed native tools"
+        }
+        .into(),
+        fix: None,
+    });
     #[cfg(not(any(target_os = "macos", windows)))]
     {
         match runtime.manifest() {
