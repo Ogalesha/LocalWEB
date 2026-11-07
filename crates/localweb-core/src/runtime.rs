@@ -2,7 +2,7 @@
 
 use crate::{LocalWebError, Result, validate_php_version};
 use serde::{Deserialize, Serialize};
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos", test))]
 use std::process::Command;
 use std::{
     fs,
@@ -124,7 +124,7 @@ impl RuntimeLayout {
             for directory in windows_php_directories(version) {
                 let php = directory.join("php.exe");
                 let cgi = directory.join("php-cgi.exe");
-                if php.is_file() && cgi.is_file() && windows_php_matches(&php, version) {
+                if php.is_file() && cgi.is_file() && php_pair_matches(&php, &cgi, version) {
                     return Ok((php, cgi));
                 }
             }
@@ -136,18 +136,24 @@ impl RuntimeLayout {
         {
             #[cfg(target_os = "macos")]
             {
+                let private = self.root.join("php").join(version);
+                let php = private.join("bin/php");
+                let fpm = private.join("sbin/php-fpm");
+                if php_pair_matches(&php, &fpm, version) {
+                    return Ok((php, fpm));
+                }
                 for formula in [format!("php@{version}"), "php".to_owned()] {
                     if let Some(directory) = macos_opt_dir(&formula) {
                         let php = directory.join("bin/php");
                         let fpm = directory.join("sbin/php-fpm");
-                        if php.is_file() && fpm.is_file() {
+                        if php_pair_matches(&php, &fpm, version) {
                             return Ok((php, fpm));
                         }
                     }
                 }
                 let php = PathBuf::from("/usr/bin/php");
                 let fpm = PathBuf::from("/usr/sbin/php-fpm");
-                if php.is_file() && fpm.is_file() {
+                if php_pair_matches(&php, &fpm, version) {
                     return Ok((php, fpm));
                 }
             }
@@ -155,6 +161,12 @@ impl RuntimeLayout {
             let php = base.join("bin/php");
             let fpm = base.join("sbin/php-fpm");
             require_pair(&php, &fpm, &format!("bundled PHP {version}"))?;
+            #[cfg(target_os = "macos")]
+            if !php_pair_matches(&php, &fpm, version) {
+                return Err(LocalWebError::RuntimeNotInstalled(format!(
+                    "Matching PHP {version} CLI/FPM were not found"
+                )));
+            }
             Ok((php, fpm))
         }
     }
@@ -873,14 +885,24 @@ fn windows_php_directories(version: &str) -> Vec<PathBuf> {
     directories
 }
 
-#[cfg(windows)]
-fn windows_php_matches(php: &Path, version: &str) -> bool {
-    Command::new(php)
-        .args(["-n", "-r", "echo PHP_MAJOR_VERSION.'.'.PHP_MINOR_VERSION;"])
-        .output()
-        .is_ok_and(|output| {
-            output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == version
-        })
+#[cfg(any(windows, target_os = "macos", test))]
+fn php_pair_matches(php: &Path, handler: &Path, version: &str) -> bool {
+    let mut cli = Command::new(php);
+    cli.args(["-n", "-r", "echo PHP_MAJOR_VERSION.'.'.PHP_MINOR_VERSION;"]);
+    let mut fastcgi = Command::new(handler);
+    fastcgi.args(["-n", "-v"]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        cli.creation_flags(0x0800_0000);
+        fastcgi.creation_flags(0x0800_0000);
+    }
+    cli.output().is_ok_and(|output| {
+        output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == version
+    }) && fastcgi.output().is_ok_and(|output| {
+        output.status.success()
+            && String::from_utf8_lossy(&output.stdout).starts_with(&format!("PHP {version}."))
+    })
 }
 
 #[cfg(target_os = "macos")]
@@ -1003,6 +1025,25 @@ fn require_pair(first: &Path, second: &Path, label: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_selection_rejects_mismatched_php_pairs() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = std::env::temp_dir().join(format!("lw-php-pair-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&root).unwrap();
+        let php = root.join("php");
+        let fpm = root.join("php-fpm");
+        fs::write(&php, "#!/bin/sh\nprintf '8.4'\n").unwrap();
+        fs::write(&fpm, "#!/bin/sh\nprintf 'PHP 8.5.26 (fpm-fcgi)'\n").unwrap();
+        fs::set_permissions(&php, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&fpm, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(!php_pair_matches(&php, &fpm, "8.4"));
+        assert!(!php_pair_matches(&php, &fpm, "8.5"));
+        fs::write(&fpm, "#!/bin/sh\nprintf 'PHP 8.4.26 (fpm-fcgi)'\n").unwrap();
+        assert!(php_pair_matches(&php, &fpm, "8.4"));
+        fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn bundled_layout_is_deterministic() {
         let layout = RuntimeLayout::from_root(PathBuf::from("/opt/localweb-runtime"));
@@ -1010,6 +1051,9 @@ mod tests {
             layout.manifest_path(),
             PathBuf::from("/opt/localweb-runtime/runtime-manifest.json")
         );
+        #[cfg(windows)]
+        assert!(layout.library_path().is_empty());
+        #[cfg(not(windows))]
         assert!(
             layout
                 .library_path()

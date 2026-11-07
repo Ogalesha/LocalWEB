@@ -1,6 +1,9 @@
 # Runtime management
 
-LocalWeb uses private native runtimes under `/usr/lib/localweb/runtime`.
+Ubuntu and Arch packages use private native runtimes under
+`/usr/lib/localweb/runtime`. macOS and Windows packages currently contain
+the application binaries: their native runtimes come from Homebrew and
+Scoop/Chocolatey or PATH, respectively. Run `localweb doctor` to check them.
 
 ## Versions and availability
 
@@ -40,6 +43,19 @@ is not exposed as a GUI/CLI setting.
 PHP, Composer, workers and `@php` scheduled tasks use the project's selected
 executable and its private `php.ini` when present. PHP-FPM uses the same
 private configuration. External system PHP keeps its own configuration.
+
+Extra variables saved in a project's `environment` table apply to CLI,
+MCP commands, workers and cron. CLI and MCP share the same command setup;
+LocalWeb's command shims remain first on PATH. Connection values still need
+to be applied to the app's own configuration; LocalWeb does not rewrite it.
+Cron output is capped at 64 KiB per stream and marked when truncated.
+Stopping a project cancels its active scheduled commands and descendants.
+Workers restart after both successful and failed exits. Stop cancels that
+restart behavior; Linux also limits repeated starts to five within 30 seconds.
+
+On macOS and Windows, stop LocalWeb before replacing its installed binaries.
+Service records include the process creation time. Unverified records from
+an older version are reported rather than used to terminate a process.
 
 Node.js 20/22 availability is checked when a Node/npm command is requested.
 It requires a matching executable and npm entry point in the expected system

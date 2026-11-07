@@ -114,10 +114,7 @@ impl Services<'_> {
             for prefix in ["/opt/homebrew", "/usr/local"] {
                 let base = Path::new(prefix);
                 let versioned = base.join(format!("opt/php@{version}"));
-                candidates.insert(
-                    0,
-                    (versioned.join("bin/php"), versioned.join("sbin/php-fpm")),
-                );
+                candidates.push((versioned.join("bin/php"), versioned.join("sbin/php-fpm")));
                 candidates.push((
                     base.join("opt/php/bin/php"),
                     base.join("opt/php/sbin/php-fpm"),
@@ -510,7 +507,7 @@ impl Services<'_> {
                 LocalWebError::Config(format!("{} has no direct web port", project.name))
             })?;
             write!(servers,
-                "server {{\n listen 127.0.0.1:{port};\n server_name {host};\n root \"{root}\";\n index index.php index.html;\n location / {{ try_files $uri $uri/ /index.php?$query_string; }}\n location ~ /\\.(?!well-known(?:/|$)) {{ deny all; }}\n location ~ \\.php$ {{\n  try_files $uri =404;\n  fastcgi_pass \"{upstream}\";\n  fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;\n  fastcgi_param SCRIPT_NAME $fastcgi_script_name;\n  fastcgi_param QUERY_STRING $query_string;\n  fastcgi_param REQUEST_METHOD $request_method;\n  fastcgi_param CONTENT_TYPE $content_type;\n  fastcgi_param CONTENT_LENGTH $content_length;\n  fastcgi_param REQUEST_URI $request_uri;\n  fastcgi_param DOCUMENT_URI $document_uri;\n  fastcgi_param DOCUMENT_ROOT $document_root;\n  fastcgi_param SERVER_PROTOCOL $server_protocol;\n  fastcgi_param SERVER_NAME $server_name;\n  fastcgi_param HTTP_HOST $http_host;\n  fastcgi_param HTTPS $fastcgi_https;\n }}\n}}\n",
+                "server {{\n listen 127.0.0.1:{port} default_server;\n server_name _;\n return 421;\n}}\nserver {{\n listen 127.0.0.1:{port};\n server_name {host} 127.0.0.1 localhost;\n root \"{root}\";\n index index.php index.html;\n location / {{ try_files $uri $uri/ /index.php?$query_string; }}\n location ~ /\\.(?!well-known(?:/|$)) {{ deny all; }}\n location ~ \\.php$ {{\n  try_files $uri =404;\n  fastcgi_pass \"{upstream}\";\n  fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;\n  fastcgi_param SCRIPT_NAME $fastcgi_script_name;\n  fastcgi_param QUERY_STRING $query_string;\n  fastcgi_param REQUEST_METHOD $request_method;\n  fastcgi_param CONTENT_TYPE $content_type;\n  fastcgi_param CONTENT_LENGTH $content_length;\n  fastcgi_param REQUEST_URI $request_uri;\n  fastcgi_param DOCUMENT_URI $document_uri;\n  fastcgi_param DOCUMENT_ROOT $document_root;\n  fastcgi_param SERVER_PROTOCOL $server_protocol;\n  fastcgi_param GATEWAY_INTERFACE CGI/1.1;\n  fastcgi_param SERVER_SOFTWARE nginx/$nginx_version;\n  fastcgi_param SERVER_ADDR $server_addr;\n  fastcgi_param SERVER_PORT $server_port;\n  fastcgi_param REMOTE_ADDR $remote_addr;\n  fastcgi_param REMOTE_PORT $remote_port;\n  fastcgi_param SERVER_NAME $server_name;\n  fastcgi_param HTTP_HOST $http_host;\n  fastcgi_param HTTPS $fastcgi_https;\n }}\n}}\n",
                 host = project.hostname, root = config_path(&root), upstream = upstream,
             ).map_err(|error| LocalWebError::Config(format!("cannot render nginx server: {error}")))?;
         }
@@ -585,7 +582,7 @@ impl Services<'_> {
             })?;
             listens.insert(port);
             write!(vhosts,
-                "<VirtualHost 127.0.0.1:{port}>\n ServerName {host}\n DocumentRoot \"{root}\"\n DirectoryIndex index.php index.html\n SetEnvIf X-Forwarded-Proto \"^https$\" HTTPS=on\n <Directory \"{root}\">\n  AllowOverride None\n  Require all granted\n  RewriteEngine On\n  RewriteCond %{{REQUEST_URI}} !\\.php(?:/|$) [NC]\n  RewriteCond %{{REQUEST_FILENAME}} !-f\n  RewriteCond %{{REQUEST_FILENAME}} !-d\n  RewriteRule ^ index.php [QSA]\n </Directory>\n <LocationMatch \"/\\.(?!well-known(?:/|$))\">\n  Require all denied\n </LocationMatch>\n <FilesMatch \"^\\.(?!well-known$)\">\n  Require all denied\n </FilesMatch>\n <FilesMatch \"\\.php$\">\n  SetHandler \"proxy:{fcgi}\"\n </FilesMatch>\n</VirtualHost>\n",
+                "<VirtualHost 127.0.0.1:{port}>\n ServerName localweb.invalid\n <Location />\n  Require all denied\n </Location>\n</VirtualHost>\n<VirtualHost 127.0.0.1:{port}>\n ServerName {host}\n ServerAlias 127.0.0.1 localhost\n UseCanonicalPhysicalPort On\n DocumentRoot \"{root}\"\n DirectoryIndex index.php index.html\n SetEnvIf X-Forwarded-Proto \"^https$\" HTTPS=on\n <Directory \"{root}\">\n  AllowOverride None\n  Require all granted\n  RewriteEngine On\n  RewriteCond %{{REQUEST_URI}} !\\.php(?:/|$) [NC]\n  RewriteCond %{{REQUEST_FILENAME}} !-f\n  RewriteCond %{{REQUEST_FILENAME}} !-d\n  RewriteRule ^ index.php [QSA]\n </Directory>\n <LocationMatch \"/\\.(?!well-known(?:/|$))\">\n  Require all denied\n </LocationMatch>\n <FilesMatch \"^\\.(?!well-known$)\">\n  Require all denied\n </FilesMatch>\n <FilesMatch \"\\.php$\">\n  SetHandler \"proxy:{fcgi}\"\n </FilesMatch>\n</VirtualHost>\n",
                 host = project.hostname, root = config_path(&root), fcgi = fcgi,
             ).map_err(|error| LocalWebError::Config(format!("cannot render Apache vhost: {error}")))?;
         }
@@ -1128,6 +1125,7 @@ impl Services<'_> {
             &executable,
             &worker_args,
             &RuntimeLayout::discover().library_path(),
+            &project.environment,
         )
     }
 

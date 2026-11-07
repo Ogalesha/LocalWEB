@@ -14,10 +14,9 @@ use serde_json::{Value, json};
 use std::{
     ffi::OsString,
     path::{Path, PathBuf},
-    process::Stdio,
     time::Duration,
 };
-use tokio::{io::AsyncReadExt, process::Command, time::timeout};
+use tokio::{process::Command, time::timeout};
 
 /// How long one daemon request may take before the tool reports a timeout.
 const DAEMON_TIMEOUT: Duration = Duration::from_secs(120);
@@ -595,47 +594,20 @@ async fn project_exec(arguments: &Value) -> Result<String, String> {
     };
     let (program, prefix) = resolve_program(&spec, tool)?;
     let mut process = Command::new(&program);
-    let path = std::env::join_paths(std::iter::once(spec.shim_dir.clone()).chain(
-        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
-    ))
-    .map_err(|error| format!("cannot build the project PATH: {error}"))?;
-    process
-        .args(prefix)
-        .args(extra)
-        .current_dir(&spec.project_path)
-        .env("PATH", path)
-        .env("LOCALWEB_PROJECT", &name)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    if let Some(library_path) = &spec.library_path {
-        process.env("LD_LIBRARY_PATH", library_path);
-    }
-    if let Some(php_ini) = &spec.php_ini {
-        process.env("PHPRC", php_ini);
-    }
-    let mut child = process
-        .spawn()
-        .map_err(|error| format!("cannot launch {}: {error}", program.display()))?;
-    let mut stdout = child.stdout.take().ok_or("stdout is unavailable")?;
-    let mut stderr = child.stderr.take().ok_or("stderr is unavailable")?;
-    let collect = async {
-        let (out, err, state) = tokio::join!(
-            read_stream(&mut stdout),
-            read_stream(&mut stderr),
-            child.wait(),
-        );
-        (out, err, state)
-    };
-    let (out, err, state) = timeout(Duration::from_secs(seconds), collect)
-        .await
-        .map_err(|_elapsed| format!("the command timed out after {seconds}s"))?;
-    let state = state.map_err(|error| format!("cannot wait for the command: {error}"))?;
+    spec.configure_command(process.as_std_mut(), &name)
+        .map_err(|error| error.to_string())?;
+    process.args(prefix).args(extra);
+    let output = timeout(
+        Duration::from_secs(seconds),
+        localweb_core::process::output(&mut process, OUTPUT_CAP),
+    )
+    .await
+    .map_err(|_elapsed| format!("the command timed out after {seconds}s"))?
+    .map_err(|error| format!("cannot run {}: {error}", program.display()))?;
     render(&json!({
-        "exit_code": state.code(),
-        "stdout": cap_output(&out),
-        "stderr": cap_output(&err),
+        "exit_code": output.status.code(),
+        "stdout": cap_output(&output.stdout),
+        "stderr": cap_output(&output.stderr),
     }))
 }
 
@@ -688,21 +660,6 @@ fn node_binary(spec: &ExecutionSpec) -> Result<PathBuf, String> {
     spec.node
         .clone()
         .ok_or_else(|| "Node.js is not available for this project".to_owned())
-}
-
-/// Drains a child stream, retaining only the output cap plus a truncation byte.
-/// Continuing to drain prevents a verbose child from blocking on a full pipe.
-async fn read_stream(stream: &mut (impl AsyncReadExt + Unpin)) -> Vec<u8> {
-    let mut buffer = Vec::new();
-    let mut chunk = [0; 4_096];
-    while let Ok(count) = stream.read(&mut chunk).await {
-        if count == 0 {
-            break;
-        }
-        let keep = count.min((OUTPUT_CAP + 1).saturating_sub(buffer.len()));
-        buffer.extend_from_slice(&chunk[..keep]);
-    }
-    buffer
 }
 
 /// Converts process output to text, truncating on a character boundary.
@@ -950,23 +907,6 @@ fn string_array(arguments: &Value, key: &str) -> Result<Vec<String>, String> {
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn verbose_commands_are_drained_with_bounded_memory() {
-        use tokio::io::AsyncWriteExt as _;
-        let (mut reader, mut writer) = tokio::io::duplex(8_192);
-        let sender = tokio::spawn(async move {
-            for _ in 0..8 {
-                writer.write_all(&vec![b'x'; OUTPUT_CAP]).await.unwrap();
-            }
-        });
-        let output = tokio::time::timeout(Duration::from_secs(2), read_stream(&mut reader))
-            .await
-            .unwrap();
-        sender.await.unwrap();
-        assert_eq!(output.len(), OUTPUT_CAP + 1);
-        assert!(cap_output(&output).ends_with("(output truncated)"));
-    }
-
     fn spec() -> ExecutionSpec {
         ExecutionSpec {
             project_path: PathBuf::from("/tmp/example"),
@@ -977,6 +917,7 @@ mod tests {
             shim_dir: PathBuf::from("/tmp/shims"),
             library_path: None,
             php_ini: Some(PathBuf::from("/tmp/php.ini")),
+            environment: std::collections::BTreeMap::new(),
         }
     }
 

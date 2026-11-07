@@ -19,6 +19,7 @@ pub mod copy;
 pub mod hosts;
 pub mod platform;
 pub mod privilege;
+pub mod process;
 pub mod runtime;
 pub mod service;
 pub mod transport;
@@ -750,6 +751,19 @@ impl Project {
             ));
         }
         validate_supervisor(&self.supervisor)?;
+        for (key, value) in &self.environment {
+            let mut bytes = key.bytes();
+            if !bytes
+                .next()
+                .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
+                || !bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+                || value.contains('\0')
+            {
+                return Err(LocalWebError::Config(
+                    "invalid project environment variable".into(),
+                ));
+            }
+        }
         if self.cron.len() > 64 {
             return Err(LocalWebError::Config(
                 "a project may define at most 64 cron entries".into(),
@@ -1382,6 +1396,42 @@ pub struct ExecutionSpec {
     pub library_path: Option<String>,
     /// Private php.ini generated for the project.
     pub php_ini: Option<PathBuf>,
+    /// Extra variables shared by CLI and MCP command execution.
+    #[serde(default)]
+    pub environment: BTreeMap<String, String>,
+}
+
+impl ExecutionSpec {
+    /// Applies the same project directory, environment and runtime to every
+    /// command entry point. `LocalWeb`'s shims stay first on the project PATH.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a PATH entry cannot be joined on this platform.
+    pub fn configure_command(&self, command: &mut std::process::Command, name: &str) -> Result<()> {
+        let inherited = self.environment.get("PATH").map_or_else(
+            || std::env::var_os("PATH").unwrap_or_default(),
+            std::ffi::OsString::from,
+        );
+        let path = std::env::join_paths(
+            std::iter::once(self.shim_dir.clone()).chain(std::env::split_paths(&inherited)),
+        )
+        .map_err(|error| {
+            LocalWebError::Config(format!("cannot build the project PATH: {error}"))
+        })?;
+        command
+            .current_dir(&self.project_path)
+            .envs(&self.environment)
+            .env("PATH", path)
+            .env("LOCALWEB_PROJECT", name);
+        if let Some(library_path) = &self.library_path {
+            command.env("LD_LIBRARY_PATH", library_path);
+        }
+        if let Some(php_ini) = &self.php_ini {
+            command.env("PHPRC", php_ini);
+        }
+        Ok(())
+    }
 }
 
 /// State of the local development certificate authority.
@@ -1509,6 +1559,71 @@ async fn read_response(socket: impl tokio::io::AsyncRead + Unpin) -> Result<Resp
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn configured_environment_fixture() {
+        if std::env::var_os("LOCALWEB_TEST_ENV_REPORT").is_some() {
+            println!(
+                "LOCALWEB_ENV_REPORT={}",
+                serde_json::json!({
+                    "marker": std::env::var("LOCALWEB_TEST_MARKER").unwrap(),
+                    "project": std::env::var("LOCALWEB_PROJECT").unwrap(),
+                    "path": std::env::var_os("PATH").unwrap(),
+                    "directory": std::env::current_dir().unwrap(),
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn command_environment_preserves_literal_values_and_project_runtime() {
+        let directory = std::env::temp_dir().canonicalize().unwrap();
+        let shims = directory.join("localweb command shims");
+        let extra = directory.join("custom command tools");
+        let literal = "$HOME; literal \"value\" with spaces";
+        let spec = ExecutionSpec {
+            project_path: directory.clone(),
+            php: PathBuf::new(),
+            composer_phar: None,
+            node: None,
+            npm_cli: None,
+            shim_dir: shims.clone(),
+            library_path: None,
+            php_ini: None,
+            environment: BTreeMap::from([
+                ("LOCALWEB_TEST_ENV_REPORT".into(), "1".into()),
+                ("LOCALWEB_TEST_MARKER".into(), literal.into()),
+                ("LOCALWEB_PROJECT".into(), "override".into()),
+                ("PATH".into(), extra.to_str().unwrap().into()),
+            ]),
+        };
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command.args([
+            "--exact",
+            "tests::configured_environment_fixture",
+            "--nocapture",
+        ]);
+        spec.configure_command(&mut command, "demo").unwrap();
+        let output = command.output().unwrap();
+        assert!(output.status.success());
+        let text = String::from_utf8(output.stdout).unwrap();
+        let line = text
+            .lines()
+            .find_map(|line| line.strip_prefix("LOCALWEB_ENV_REPORT="))
+            .unwrap();
+        let report: serde_json::Value = serde_json::from_str(line).unwrap();
+        assert_eq!(report["marker"], literal);
+        assert_eq!(report["project"], "demo");
+        assert_eq!(
+            report["directory"],
+            serde_json::to_value(directory).unwrap()
+        );
+        let path: std::ffi::OsString = serde_json::from_value(report["path"].clone()).unwrap();
+        assert_eq!(
+            std::env::split_paths(&path).collect::<Vec<_>>(),
+            [shims, extra]
+        );
+    }
 
     #[tokio::test]
     async fn oversized_response_is_rejected_before_eof() {

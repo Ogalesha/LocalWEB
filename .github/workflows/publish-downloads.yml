@@ -25,31 +25,31 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7.0.1
       - name: Test publication rules
         run: python3 scripts/test-publish-downloads.py
       - name: Select the latest successful main build
         id: build
         run: python3 scripts/publish-downloads.py select
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8.0.2
         with:
           name: localweb-ubuntu-amd64
           path: release-files/ubuntu
           run-id: ${{ steps.build.outputs.run_id }}
           github-token: ${{ github.token }}
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8.0.2
         with:
           name: localweb-arch-omarchy-amd64
           path: release-files/arch
           run-id: ${{ steps.build.outputs.run_id }}
           github-token: ${{ github.token }}
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8.0.2
         with:
           name: localweb-macos-universal
           path: release-files/macos
           run-id: ${{ steps.build.outputs.run_id }}
           github-token: ${{ github.token }}
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8.0.2
         with:
           name: localweb-windows-amd64
           path: release-files/windows

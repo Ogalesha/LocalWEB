@@ -50,7 +50,7 @@ Builds are published after testing, so a push may take time to appear here.
 | **AI assistants (MCP)** | A Model Context Protocol server (`localweb-mcp`) that lets AI assistants create, start, inspect and test projects through the same daemon as the desktop app. |
 | **Autostart** | Optional login startup and per-project startup preferences. |
 
-The native build pipeline assembles all six PHP CLI/FPM pairs from the
+The Linux build pipeline assembles all six PHP CLI/FPM pairs from the
 pinned sources in `packaging/php-sources.txt`. A smaller development package
 may include only PHP 8.5. Selecting another version does not download it:
 its matching CLI and FPM must already be in the runtime or on the system.
@@ -75,8 +75,10 @@ downloads are build inputs, not alternative LocalWeb distribution channels.
 | macOS 12+ arm64/x86_64 | `.pkg` (universal) | launchd agents and system keychain trust for the development CA |
 | Windows 10/11 x86_64 | `.zip` (portable) | Named pipes, scheduled task and user certificate store |
 
-The package carries LocalWeb's private web stack. It does not replace the
-machine's PHP, web servers, databases or caches. A normal desktop session
+Ubuntu and Arch packages include LocalWeb's private web stack. The macOS
+installer and Windows ZIP contain the application binaries; install the
+native tools separately through Homebrew or Scoop/Chocolatey. Check
+`localweb doctor` before starting a project. A normal desktop session
 with the platform service manager (systemd, launchd or Task Scheduler) is
 required.
 
@@ -92,11 +94,13 @@ universal binaries on a macOS runner, and the Windows binaries are
 cross-built and exercised under Wine; a final acceptance run on real macOS
 and Windows hosts is still pending.
 
-Each job builds and installs the package, tests PHP 8.0–8.5 with both web
+The Linux jobs build and install the package, test PHP 8.0–8.5 with both web
 servers and all four database choices, checks Redis,
 Mailpit and the PHP CLI, then exercises stop, removal and source-folder
 preservation. Packages are uploaded as workflow artifacts only after the
-job passes. Tagged versions and the rolling pre-release publish the same
+job passes. macOS also runs the workspace regression suite; Windows runs
+core and daemon regressions under Wine. These checks do not replace native
+web-stack acceptance on macOS and Windows. Tagged versions and the rolling pre-release publish the same
 files as public release assets.
 
 ## Install and get started

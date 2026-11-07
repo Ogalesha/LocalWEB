@@ -926,7 +926,7 @@ async fn execute_project(paths: &Paths, name: &str, kind: ExecutionKind) -> Resu
         Response::Error { code, message } => bail!("{code}: {message}"),
         _ => bail!(copy::UNEXPECTED_RESPONSE),
     };
-    let status = run_execution(name, spec, kind)?;
+    let status = run_execution(name, &spec, kind)?;
     if !status.success() {
         std::process::exit(status.code().unwrap_or(1));
     }
@@ -935,14 +935,9 @@ async fn execute_project(paths: &Paths, name: &str, kind: ExecutionKind) -> Resu
 
 fn run_execution(
     name: &str,
-    spec: ExecutionSpec,
+    spec: &ExecutionSpec,
     kind: ExecutionKind,
 ) -> Result<std::process::ExitStatus> {
-    let mut paths = vec![spec.shim_dir];
-    paths.extend(std::env::split_paths(
-        &std::env::var_os("PATH").unwrap_or_default(),
-    ));
-    let path = std::env::join_paths(paths).context("cannot build the project PATH")?;
     let mut command = match kind {
         ExecutionKind::Php(args) => {
             let mut cmd = Command::new(&spec.php);
@@ -955,6 +950,7 @@ fn run_execution(
         ExecutionKind::Composer(args) => {
             let phar = spec
                 .composer_phar
+                .as_ref()
                 .context("Composer 2 is not installed in LocalWeb runtime storage")?;
             let mut cmd = Command::new(&spec.php);
             if let Some(ini) = &spec.php_ini {
@@ -966,34 +962,39 @@ fn run_execution(
         ExecutionKind::Node(args) => {
             let node = spec
                 .node
+                .as_ref()
                 .context("Node.js is not available for this project")?;
-            let mut cmd = Command::new(&node);
+            let mut cmd = Command::new(node);
             cmd.args(args);
             cmd
         }
         ExecutionKind::Npm(args) => {
             let node = spec
                 .node
+                .as_ref()
                 .context("Node.js is not available for this project")?;
             let npm = spec
                 .npm_cli
+                .as_ref()
                 .context("npm is not available for this project")?;
-            let mut cmd = Command::new(&node);
+            let mut cmd = Command::new(node);
             cmd.arg(npm).args(args);
             cmd
         }
         ExecutionKind::Npx(args) => {
             let node = spec
                 .node
+                .as_ref()
                 .context("Node.js is not available for this project")?;
             let npm = spec
                 .npm_cli
+                .as_ref()
                 .context("npm is not available for this project")?;
             let npx = npm.with_file_name("npx-cli.js");
             if !npx.is_file() {
                 bail!("npx is not available for this project");
             }
-            let mut cmd = Command::new(&node);
+            let mut cmd = Command::new(node);
             cmd.arg(npx).args(args);
             cmd
         }
@@ -1012,16 +1013,7 @@ fn run_execution(
             Command::new(shell)
         }
     };
-    command
-        .current_dir(&spec.project_path)
-        .env("PATH", path)
-        .env("LOCALWEB_PROJECT", name);
-    if let Some(library_path) = spec.library_path {
-        command.env("LD_LIBRARY_PATH", library_path);
-    }
-    if let Some(php_ini) = spec.php_ini {
-        command.env("PHPRC", php_ini);
-    }
+    spec.configure_command(&mut command, name)?;
     command.status().context("failed to launch project command")
 }
 

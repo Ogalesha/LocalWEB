@@ -24,15 +24,17 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7.0.1
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Workspace compiles on Darwin
         run: cargo check --workspace --all-targets
-      - name: Platform-independent tests
+      - name: Check native code quality
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Workspace regression tests
         run: |
           set -o pipefail
-          cargo test --no-fail-fast -p localweb-core -p localweb-gui 2>&1 | tee "$RUNNER_TEMP/localweb-tests.log"
+          cargo test --workspace --all-targets --no-fail-fast 2>&1 | tee "$RUNNER_TEMP/localweb-tests.log"
       - name: Report failing tests
         if: failure()
         run: |

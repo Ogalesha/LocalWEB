@@ -29,6 +29,9 @@ fi
 cargo xwin build --release --target "$target" --workspace
 cargo xwin build --release --target "$target" -p localweb-gui --features localweb-gui/screenshot
 
+test_manifest=$(mktemp /tmp/localweb-windows-tests.XXXXXX)
+cargo xwin build --release --target "$target" --tests -p localweb-core -p localweb-daemon --message-format=json >"$test_manifest"
+
 wineprefix=$(mktemp -d /tmp/localweb-wineprefix.XXXXXX)
 runtime_dir=$(mktemp -d /tmp/localweb-wine-runtime.XXXXXX)
 chmod 700 "$runtime_dir"
@@ -46,6 +49,7 @@ cleanup() {
         sleep 0.5
     done
     rm -rf "$wineprefix" "$runtime_dir"
+    rm -f "$test_manifest"
 }
 trap cleanup EXIT
 
@@ -59,6 +63,16 @@ timeout 180 "$wine_bin" "$exe_dir/localweb.exe" --help | grep -q "Commands:" || 
     echo "localweb.exe --help did not list commands" >&2
     exit 1
 }
+
+python3 - "$test_manifest" "$wine_bin" <<'PYTEST'
+import json, subprocess, sys
+from pathlib import Path
+records = [json.loads(line) for line in Path(sys.argv[1]).read_text().splitlines() if line.startswith('{')]
+executables = sorted({record['executable'] for record in records if record.get('reason') == 'compiler-artifact' and record.get('profile', {}).get('test') and record.get('executable')})
+assert len(executables) == 2, executables
+for executable in executables:
+    subprocess.run([sys.argv[2], executable, '--test-threads=1'], check=True, timeout=240)
+PYTEST
 
 daemon_log=/tmp/localweb-wine-daemon.log
 rm -f "$daemon_log"

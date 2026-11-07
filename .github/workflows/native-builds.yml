@@ -29,7 +29,7 @@ jobs:
             image: archlinux:base-devel
             artifact: arch-omarchy-amd64
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7.0.1
       - name: Prepare isolated CI build host
         run: docker build --build-arg BASE_IMAGE=${{ matrix.image }} -f .github/ci/linux-builder.Dockerfile -t localweb-builder .
       - name: Build, install and exercise the full native stack
@@ -44,7 +44,7 @@ jobs:
           docker exec lw-ci test -S /run/user/1000/bus
           docker exec lw-ci runuser -u builder -- env XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus bash /workspace/scripts/ci-native-linux.sh
           docker cp lw-ci:/workspace/dist ./dist
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7.0.2
         with:
           name: localweb-${{ matrix.artifact }}
           path: dist/
@@ -56,7 +56,7 @@ jobs:
           cp native-build.log native-diagnostics/ 2>/dev/null || true
           docker cp lw-ci:/workspace/packaging/php-builds/logs native-diagnostics/php-build-logs 2>/dev/null || true
           docker cp lw-ci:/workspace/packaging/runtime-root native-diagnostics/runtime-root 2>/dev/null || true
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7.0.2
         if: always()
         with:
           name: localweb-native-diagnostics-${{ matrix.artifact }}
@@ -82,7 +82,7 @@ jobs:
           llvm_bin=$(dirname "$(find /usr/lib -name llvm-lib -print -quit)")
           ln -sf "$llvm_bin/llvm-lib" /usr/local/bin/llvm-lib
           ln -sf "$llvm_bin/llvm-ar" /usr/local/bin/llvm-ar
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7.0.1
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
@@ -92,7 +92,7 @@ jobs:
         run: bash scripts/windows-wine-smoke.sh
       - name: Package the Windows binaries
         run: bash scripts/build-windows-zip.sh
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7.0.2
         with:
           name: localweb-windows-amd64
           path: dist/*.zip
@@ -103,7 +103,7 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7.0.1
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
@@ -126,7 +126,7 @@ jobs:
         env:
           LOCALWEB_BIN_DIR: target/universal/release
         run: sh packaging/macos/build-pkg.sh
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7.0.2
         with:
           name: localweb-macos-universal
           path: dist/*.pkg
@@ -136,7 +136,7 @@ jobs:
     name: Repository hygiene and dependency security
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7.0.1
       - uses: dtolnay/rust-toolchain@stable
       - name: Check tracked files for personal data and credentials
         run: |
@@ -157,22 +157,22 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8.0.2
         with:
           name: localweb-ubuntu-amd64
           path: release-files/ubuntu
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8.0.2
         with:
           name: localweb-arch-omarchy-amd64
           path: release-files/arch
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8.0.2
         with:
           name: localweb-macos-universal
           path: release-files/macos
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8.0.2
         with:
           name: localweb-windows-amd64
           path: release-files/windows
@@ -208,20 +208,20 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/download-artifact@v5
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/download-artifact@v8.0.2
         with:
           name: localweb-ubuntu-amd64
           path: release-files/ubuntu
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8.0.2
         with:
           name: localweb-arch-omarchy-amd64
           path: release-files/arch
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8.0.2
         with:
           name: localweb-macos-universal
           path: release-files/macos
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8.0.2
         with:
           name: localweb-windows-amd64
           path: release-files/windows

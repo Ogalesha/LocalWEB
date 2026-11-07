@@ -5,7 +5,11 @@
 //! remaining services.
 
 use localweb_core::{LocalWebError, Result, runtime::RuntimeLayout};
-use std::path::Path;
+use std::{collections::BTreeMap, path::Path};
+
+#[cfg(any(test, windows, target_os = "macos"))]
+#[path = "backend_identity.rs"]
+mod identity;
 
 /// Restarts (or starts) one managed service.
 ///
@@ -44,6 +48,7 @@ pub fn start_supervised(
     executable: &Path,
     worker_args: &[String],
     library_path: &str,
+    environment: &BTreeMap<String, String>,
 ) -> Result<()> {
     if !executable.is_file() {
         return Err(LocalWebError::RuntimeNotInstalled(
@@ -53,7 +58,13 @@ pub fn start_supervised(
     #[cfg(target_os = "macos")]
     {
         let _ = (description, library_path);
-        macos::start_supervised(unit, working_directory, executable, worker_args)
+        macos::start_supervised(
+            unit,
+            working_directory,
+            executable,
+            worker_args,
+            environment,
+        )
     }
     #[cfg(windows)]
     {
@@ -64,6 +75,7 @@ pub fn start_supervised(
             executable,
             worker_args,
             library_path,
+            environment,
         )
     }
     #[cfg(all(unix, not(target_os = "macos")))]
@@ -75,6 +87,7 @@ pub fn start_supervised(
             executable,
             worker_args,
             library_path,
+            environment,
         )
     }
 }
@@ -138,7 +151,7 @@ pub fn wait_active(unit: &str, service: &str) -> Result<()> {
 
 #[cfg(all(unix, not(target_os = "macos")))]
 mod linux {
-    use super::{LocalWebError, Path, Result, RuntimeLayout};
+    use super::{BTreeMap, LocalWebError, Path, Result, RuntimeLayout};
     use std::{
         ffi::OsString,
         process::{Command, Stdio},
@@ -205,6 +218,7 @@ mod linux {
         executable: &Path,
         worker_args: &[String],
         library_path: &str,
+        environment: &BTreeMap<String, String>,
     ) -> Result<()> {
         let arguments = supervisor_systemd_args(
             unit,
@@ -213,6 +227,7 @@ mod linux {
             executable,
             worker_args,
             library_path,
+            environment,
         );
         let output = Command::new("systemd-run").args(arguments).output()?;
         if !output.status.success() {
@@ -285,6 +300,7 @@ mod linux {
         executable: &Path,
         worker_args: &[String],
         library_path: &str,
+        environment: &BTreeMap<String, String>,
     ) -> Vec<OsString> {
         let mut arguments = vec![
             OsString::from("--user"),
@@ -298,15 +314,25 @@ mod linux {
             )),
             OsString::from("--property=NoNewPrivileges=yes"),
             OsString::from("--property=PrivateTmp=yes"),
-            OsString::from("--property=Restart=on-failure"),
+            OsString::from("--property=Restart=always"),
             OsString::from("--property=RestartSec=2s"),
             OsString::from("--property=StartLimitIntervalSec=30s"),
             OsString::from("--property=StartLimitBurst=5"),
             OsString::from("--property=KillMode=control-group"),
-            OsString::from(format!("--setenv=LD_LIBRARY_PATH={library_path}")),
-            OsString::from("--"),
-            executable.as_os_str().to_owned(),
         ];
+        arguments.extend(
+            environment
+                .iter()
+                .map(|(key, value)| OsString::from(format!("--setenv={key}={value}"))),
+        );
+        arguments.push(OsString::from(format!(
+            "--setenv=LD_LIBRARY_PATH={library_path}"
+        )));
+        arguments.push(OsString::from(format!(
+            "--setenv=LOCALWEB_PROJECT={description}"
+        )));
+        arguments.push(OsString::from("--"));
+        arguments.push(executable.as_os_str().to_owned());
         arguments.extend(worker_args.iter().map(OsString::from));
         arguments
     }
@@ -394,6 +420,41 @@ mod linux {
         }
 
         #[test]
+        #[ignore = "requires a systemd user session; creates only a temporary audit worker"]
+        fn native_worker_preserves_environment_and_restarts_clean_exits() {
+            let unit = TestUnit(format!("localweb-audit-{}", uuid::Uuid::new_v4().simple()));
+            let root = std::env::temp_dir().join(format!("lw worker {}", uuid::Uuid::new_v4()));
+            std::fs::create_dir(&root).unwrap();
+            let script = "import os,time; open('marker','a').write(os.environ['AUDIT_MARKER']+'\\n'); time.sleep(0.6)";
+            let marker = "$HOME; literal value";
+            start_supervised(
+                &unit.0,
+                "demo",
+                &root,
+                Path::new("/usr/bin/python3"),
+                &["-c".into(), script.into()],
+                "",
+                &BTreeMap::from([("AUDIT_MARKER".into(), marker.into())]),
+            )
+            .unwrap();
+            let file = root.join("marker");
+            for _ in 0..200 {
+                if std::fs::read_to_string(&file).is_ok_and(|value| value.lines().count() >= 2) {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+            stop(&unit.0).unwrap();
+            let value = std::fs::read_to_string(file).unwrap();
+            assert!(
+                value.lines().count() >= 2,
+                "worker did not restart after exit 0"
+            );
+            assert!(value.lines().all(|line| line == marker));
+            std::fs::remove_dir_all(root).unwrap();
+        }
+
+        #[test]
         fn supervisor_arguments_never_pass_through_a_shell() {
             let arguments = supervisor_systemd_args(
                 "localweb-project-demo-supervisor",
@@ -402,9 +463,15 @@ mod linux {
                 Path::new("/usr/bin/php8.5"),
                 &["artisan".into(), "queue:work; touch /tmp/unsafe".into()],
                 "/usr/lib/localweb/runtime/lib",
+                &BTreeMap::from([("AUDIT_MARKER".into(), "$HOME; literal".into())]),
             );
             assert!(!arguments.iter().any(|argument| argument == "sh"));
             assert!(!arguments.iter().any(|argument| argument == "-c"));
+            assert!(
+                arguments
+                    .iter()
+                    .any(|argument| argument == "--setenv=AUDIT_MARKER=$HOME; literal")
+            );
             assert!(
                 arguments
                     .iter()
@@ -418,7 +485,7 @@ mod linux {
             assert!(
                 arguments
                     .iter()
-                    .any(|argument| argument == "--property=Restart=on-failure")
+                    .any(|argument| argument == "--property=Restart=always")
             );
             assert!(
                 arguments
@@ -436,10 +503,9 @@ mod linux {
 
 #[cfg(windows)]
 mod windows {
-    use super::{LocalWebError, Path, Result, RuntimeLayout};
+    use super::{BTreeMap, LocalWebError, Path, Result, RuntimeLayout, identity::ProcessIdentity};
     use localweb_core::Paths;
     use std::{
-        collections::BTreeMap,
         ffi::OsString,
         fs,
         os::windows::process::CommandExt as _,
@@ -470,8 +536,12 @@ mod windows {
         stop(unit)?;
         let arguments: Vec<OsString> = args.iter().map(OsString::from).collect();
         let log = log_path(unit)?;
-        let mut child = spawn_child(executable, &arguments, None, &log)?;
-        write_pid(unit, child.id())?;
+        let mut child = spawn_child(executable, &arguments, None, &log, &BTreeMap::new())?;
+        if let Err(error) = write_pid(unit, child.id()) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
         thread::spawn(move || {
             let _ = child.wait();
         });
@@ -484,19 +554,44 @@ mod windows {
         executable: &Path,
         worker_args: &[String],
         _library_path: &str,
+        environment: &BTreeMap<String, String>,
     ) -> Result<()> {
         stop(unit)?;
+        let environment = environment.clone();
         let executable = executable.to_path_buf();
         let arguments: Vec<OsString> = worker_args.iter().map(OsString::from).collect();
         let working = working_directory.to_path_buf();
         let cancel = Arc::new(AtomicBool::new(false));
-        lock(supervisors()).insert(unit.to_owned(), Arc::clone(&cancel));
         let unit_owned = unit.to_owned();
         let log = log_path(unit)?;
+        lock(supervisors()).insert(unit.to_owned(), Arc::clone(&cancel));
         thread::spawn(move || {
             while !cancel.load(Ordering::SeqCst) {
-                if let Ok(mut child) = spawn_child(&executable, &arguments, Some(&working), &log) {
-                    let _ = write_pid(&unit_owned, child.id());
+                let child = {
+                    // Stop cannot cancel the worker between the ownership check
+                    // and recording the newly spawned child.
+                    let owners = lock(supervisors());
+                    if !owners
+                        .get(&unit_owned)
+                        .is_some_and(|owner| Arc::ptr_eq(owner, &cancel))
+                        || cancel.load(Ordering::SeqCst)
+                    {
+                        break;
+                    }
+                    match spawn_child(&executable, &arguments, Some(&working), &log, &environment) {
+                        Ok(mut child) => {
+                            if write_pid(&unit_owned, child.id()).is_err() {
+                                let _ = child.kill();
+                                let _ = child.wait();
+                                None
+                            } else {
+                                Some(child)
+                            }
+                        }
+                        Err(_) => None,
+                    }
+                };
+                if let Some(mut child) = child {
                     let _ = child.wait();
                 }
                 if cancel.load(Ordering::SeqCst) {
@@ -516,27 +611,32 @@ mod windows {
         let Ok(contents) = fs::read_to_string(&path) else {
             return Ok(());
         };
-        let Ok(pid) = contents.trim().parse::<u32>() else {
+        let identity = ProcessIdentity::parse(&contents).ok_or_else(|| LocalWebError::Service(
+            format!("Cannot verify service ownership in {}. Stop older LocalWeb services before restarting.", path.display())
+        ))?;
+        let Some(_owned_process) = identity.hold() else {
             let _ = fs::remove_file(&path);
             return Ok(());
         };
-        let _ = Command::new("taskkill.exe")
-            .args(["/PID", &pid.to_string(), "/T", "/F"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-        let _ = fs::remove_file(&path);
-        Ok(())
+        let output = localweb_core::process::terminate_tree(identity.pid)?;
+        for _ in 0..100 {
+            if !identity.is_current() {
+                let _ = fs::remove_file(&path);
+                return Ok(());
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        Err(LocalWebError::Service(format!(
+            "{unit} did not stop: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )))
     }
 
     pub(super) fn is_active(unit: &str) -> bool {
-        let Ok(path) = pid_path(unit) else {
-            return false;
-        };
-        fs::read_to_string(path)
+        pid_path(unit)
             .ok()
-            .and_then(|contents| contents.trim().parse::<u32>().ok())
-            .is_some_and(alive)
+            .and_then(|path| ProcessIdentity::load(&path))
+            .is_some_and(ProcessIdentity::is_current)
     }
 
     pub(super) fn wait_active(unit: &str, service: &str) -> Result<()> {
@@ -562,6 +662,7 @@ mod windows {
         args: &[OsString],
         working_directory: Option<&Path>,
         log_path: &Path,
+        environment: &BTreeMap<String, String>,
     ) -> Result<std::process::Child> {
         let log = fs::OpenOptions::new()
             .create(true)
@@ -571,6 +672,7 @@ mod windows {
         let mut command = Command::new(executable);
         command
             .args(args)
+            .envs(environment)
             .stdin(Stdio::null())
             .stdout(Stdio::from(log))
             .stderr(Stdio::from(error_log))
@@ -592,8 +694,7 @@ mod windows {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(path, pid.to_string())?;
-        Ok(())
+        ProcessIdentity::save(&path, pid)
     }
 
     fn pid_path(unit: &str) -> Result<PathBuf> {
@@ -609,18 +710,6 @@ mod windows {
         Ok(logs.join(format!("{unit}.log")))
     }
 
-    fn alive(pid: u32) -> bool {
-        Command::new("tasklist.exe")
-            .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
-            .output()
-            .is_ok_and(|output| {
-                String::from_utf8_lossy(&output.stdout)
-                    .split(',')
-                    .nth(1)
-                    .is_some_and(|field| field.trim_matches('"').trim() == pid.to_string())
-            })
-    }
-
     fn windows_path() -> String {
         let inherited = std::env::var("PATH").unwrap_or_default();
         let libraries = RuntimeLayout::discover().library_path();
@@ -634,12 +723,12 @@ mod windows {
 
 #[cfg(target_os = "macos")]
 mod macos {
-    use super::{LocalWebError, Path, Result, RuntimeLayout};
+    use super::{BTreeMap, LocalWebError, Path, Result, RuntimeLayout, identity::ProcessIdentity};
     use localweb_core::{Paths, service::GATEWAY_LABEL};
     use std::{
         ffi::OsString,
         fs,
-        os::unix::fs::OpenOptionsExt as _,
+        os::unix::{fs::OpenOptionsExt as _, process::CommandExt as _},
         path::PathBuf,
         process::{Command, Stdio},
         thread,
@@ -656,7 +745,7 @@ mod macos {
         }
         stop(unit)?;
         let arguments: Vec<OsString> = args.iter().map(OsString::from).collect();
-        spawn(unit, executable, &arguments, None, false)
+        spawn(unit, executable, &arguments, None, false, &BTreeMap::new())
     }
 
     pub(super) fn start_supervised(
@@ -664,10 +753,18 @@ mod macos {
         working_directory: &Path,
         executable: &Path,
         worker_args: &[String],
+        environment: &BTreeMap<String, String>,
     ) -> Result<()> {
         stop(unit)?;
         let arguments: Vec<OsString> = worker_args.iter().map(OsString::from).collect();
-        spawn(unit, executable, &arguments, Some(working_directory), true)?;
+        spawn(
+            unit,
+            executable,
+            &arguments,
+            Some(working_directory),
+            true,
+            environment,
+        )?;
         wait_active(unit, "background worker")
     }
 
@@ -679,34 +776,36 @@ mod macos {
         let Ok(contents) = fs::read_to_string(&path) else {
             return Ok(());
         };
-        let Ok(pid) = contents.trim().parse::<i32>() else {
-            let _ = fs::remove_file(&path);
-            return Ok(());
-        };
-        signal(pid, libc::SIGTERM);
+        let identity = ProcessIdentity::parse(&contents).ok_or_else(|| LocalWebError::Service(
+            format!("Cannot verify service ownership in {}. Stop older LocalWeb services before restarting.", path.display())
+        ))?;
+        signal(identity, libc::SIGTERM)?;
         for _ in 0..200 {
-            if !alive(pid) {
+            if !identity.is_current() {
                 let _ = fs::remove_file(&path);
                 return Ok(());
             }
             thread::sleep(Duration::from_millis(50));
         }
-        signal(pid, libc::SIGKILL);
-        let _ = fs::remove_file(&path);
-        Ok(())
+        signal(identity, libc::SIGKILL)?;
+        for _ in 0..100 {
+            if !identity.is_current() {
+                let _ = fs::remove_file(&path);
+                return Ok(());
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        Err(LocalWebError::Service(format!("{unit} did not stop")))
     }
 
     pub(super) fn is_active(unit: &str) -> bool {
         if unit == "localweb-gateway" {
             return gateway_loaded();
         }
-        let Ok(path) = pid_path(unit) else {
-            return false;
-        };
-        fs::read_to_string(path)
+        pid_path(unit)
             .ok()
-            .and_then(|contents| contents.trim().parse::<i32>().ok())
-            .is_some_and(alive)
+            .and_then(|path| ProcessIdentity::load(&path))
+            .is_some_and(ProcessIdentity::is_current)
     }
 
     pub(super) fn wait_active(unit: &str, service: &str) -> Result<()> {
@@ -733,6 +832,7 @@ mod macos {
         args: &[OsString],
         working_directory: Option<&Path>,
         supervised: bool,
+        environment: &BTreeMap<String, String>,
     ) -> Result<()> {
         let paths = Paths::discover()?;
         let services = paths.runtime.join("services");
@@ -761,6 +861,8 @@ mod macos {
             command
         };
         command
+            .process_group(0)
+            .envs(environment)
             .stdin(Stdio::null())
             .stdout(Stdio::from(log))
             .stderr(Stdio::from(error_log))
@@ -787,7 +889,15 @@ mod macos {
             ))
         })?;
         let pid = child.id();
-        fs::write(services.join(format!("{unit}.pid")), pid.to_string())?;
+        if let Err(error) = ProcessIdentity::save(&services.join(format!("{unit}.pid")), pid) {
+            if let Ok(group) = i32::try_from(pid) {
+                // SAFETY: this unreaped child owns the group created above.
+                unsafe { libc::kill(-group, libc::SIGKILL) };
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
         thread::spawn(move || {
             let _ = child.wait();
         });
@@ -879,17 +989,29 @@ mod macos {
         unsafe { libc::getuid() }
     }
 
-    fn alive(pid: i32) -> bool {
-        // SAFETY: signal 0 performs existence checking without delivering a signal.
-        unsafe { libc::kill(pid, 0) == 0 }
-    }
-
-    fn signal(pid: i32, signal: i32) {
-        // SAFETY: the pid comes from a pidfile written by this daemon; sending a
-        // signal to a stale pid is a no-op that returns an error we ignore.
-        unsafe {
-            libc::kill(pid, signal);
+    fn signal(identity: ProcessIdentity, signal: i32) -> Result<()> {
+        if !identity.is_current() {
+            return Ok(());
         }
+        let pid = i32::try_from(identity.pid)
+            .map_err(|_| LocalWebError::Service("Invalid service process ID".into()))?;
+        // SAFETY: getpgid only queries the positive, creation-time-checked PID.
+        if unsafe { libc::getpgid(pid) } != pid {
+            if !identity.is_current() {
+                return Ok(());
+            }
+            return Err(LocalWebError::Service(
+                "Cannot verify the service process group".into(),
+            ));
+        }
+        // SAFETY: this verified process owns the group created by spawn.
+        if unsafe { libc::kill(-pid, signal) } != 0 {
+            let error = std::io::Error::last_os_error();
+            if identity.is_current() {
+                return Err(error.into());
+            }
+        }
+        Ok(())
     }
 
     fn macos_path() -> String {

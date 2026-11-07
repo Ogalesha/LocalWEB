@@ -5,7 +5,7 @@ use localweb_core::{
     WebServer, atomic_write, certificate::CaPaths, runtime::RuntimeLayout,
 };
 use std::{
-    collections::{BTreeMap, BTreeSet, HashSet},
+    collections::{BTreeMap, BTreeSet},
     fs,
     net::{Ipv4Addr, TcpListener},
     sync::Arc,
@@ -58,7 +58,7 @@ struct State {
     running: Mutex<BTreeSet<String>>,
     operations: Mutex<()>,
     db_proxies: Mutex<BTreeMap<String, DbProxy>>,
-    cron_busy: Mutex<HashSet<(String, usize)>>,
+    cron_jobs: Mutex<BTreeMap<(String, usize), tokio::task::JoinHandle<()>>>,
     cron_last_minute: Mutex<BTreeMap<(String, usize), i64>>,
     shutdown: Notify,
 }
@@ -95,7 +95,7 @@ async fn main() -> Result<()> {
         running: Mutex::new(BTreeSet::new()),
         operations: Mutex::new(()),
         db_proxies: Mutex::new(BTreeMap::new()),
-        cron_busy: Mutex::new(HashSet::new()),
+        cron_jobs: Mutex::new(BTreeMap::new()),
         cron_last_minute: Mutex::new(BTreeMap::new()),
         shutdown: Notify::new(),
     });
@@ -454,6 +454,7 @@ async fn execute(request: Request, state: &Arc<State>) -> localweb_core::Result<
                 shim_dir,
                 library_path: bundled.then(|| runtime.library_path()),
                 php_ini,
+                environment: project.environment,
             }))
         }
         Request::CaStatus => {
@@ -754,6 +755,7 @@ async fn stop_project(state: &Arc<State>, name: &str) -> localweb_core::Result<(
 
 async fn stop_project_locked(state: &Arc<State>, name: &str) -> localweb_core::Result<()> {
     let project = find_project(&state.paths, name)?;
+    cancel_project_cron(state, name).await;
     let mut active = state.running.lock().await.clone();
     if !active.remove(name) {
         let project_owned = project.clone();
@@ -1464,6 +1466,7 @@ async fn health_check(project: &Project) -> localweb_core::Result<()> {
     let port = project
         .web_port
         .ok_or_else(|| LocalWebError::Config(format!("{} has no direct web port", project.name)))?;
+    let mut last_status = None;
     for _ in 0..20 {
         if let Ok(Ok(stream)) = timeout(
             Duration::from_secs(1),
@@ -1471,16 +1474,28 @@ async fn health_check(project: &Project) -> localweb_core::Result<()> {
         )
         .await
             && let Ok(Some(status)) = probe_http_status(stream, &project.hostname).await
-            && healthy_status(status)
         {
-            return Ok(());
+            last_status = Some(status);
+            if healthy_status(status) {
+                return Ok(());
+            }
         }
         sleep(Duration::from_millis(150)).await;
     }
-    Err(LocalWebError::Service(format!(
-        "{} did not pass the HTTP health check; inspect the selected web server and PHP-FPM logs",
-        project.name
-    )))
+    let detail = match last_status {
+        Some(500) => format!(
+            "returned HTTP 500. Check the app's logs and connection settings (`localweb env {}`)",
+            project.name
+        ),
+        Some(404) => "returned HTTP 404. Check the document root and app routes".into(),
+        Some(status) => {
+            format!("returned HTTP {status}. Check the app, web server and PHP-FPM logs")
+        }
+        None => {
+            "did not return a valid HTTP response. Check the web server and PHP-FPM logs".into()
+        }
+    };
+    Err(LocalWebError::Service(format!("{} {detail}", project.name)))
 }
 
 /// Sends a minimal HTTP/1.1 request and returns the status code from a
@@ -1492,7 +1507,9 @@ async fn probe_http_status(
     hostname: &str,
 ) -> localweb_core::Result<Option<u16>> {
     use tokio::{io::AsyncBufReadExt as _, io::AsyncWriteExt as _, time::timeout};
-    let request = format!("GET / HTTP/1.1\r\nHost: {hostname}\r\nConnection: close\r\n\r\n");
+    let request = format!(
+        "GET / HTTP/1.1\r\nHost: {hostname}\r\nUser-Agent: LocalWeb health check\r\nConnection: close\r\n\r\n"
+    );
     stream.write_all(request.as_bytes()).await?;
     let mut reader = tokio::io::BufReader::new(stream.take(512));
     let mut line = String::new();
@@ -1545,6 +1562,9 @@ async fn cron_loop(state: Arc<State>) {
 }
 
 async fn cron_tick(state: &Arc<State>) {
+    // Register due jobs under the same lock as stop/remove. Otherwise a tick
+    // could launch a job from an obsolete running-project snapshot after stop.
+    let _operations = state.operations.lock().await;
     let now = chrono::Local::now();
     let projects = match load_projects(&state.paths) {
         Ok(projects) => projects,
@@ -1568,19 +1588,42 @@ async fn cron_tick(state: &Arc<State>) {
             if last.get(&key) == Some(&minute) {
                 continue;
             }
-            if !state.cron_busy.lock().await.insert(key.clone()) {
+            let mut jobs = state.cron_jobs.lock().await;
+            if jobs.contains_key(&key) {
                 continue;
             }
             last.insert(key.clone(), minute);
             drop(last);
-            let state = Arc::clone(state);
+            let task_state = Arc::clone(state);
             let project = project.clone();
             let entry = entry.clone();
-            tokio::spawn(async move {
-                run_cron_entry(&state, &project, &entry).await;
-                state.cron_busy.lock().await.remove(&key);
+            let task_key = key.clone();
+            let task = tokio::spawn(async move {
+                run_cron_entry(&task_state, &project, &entry).await;
+                task_state.cron_jobs.lock().await.remove(&task_key);
             });
+            jobs.insert(key, task);
         }
+    }
+}
+
+async fn cancel_project_cron(state: &State, name: &str) {
+    let handles = {
+        let mut jobs = state.cron_jobs.lock().await;
+        let keys: Vec<_> = jobs
+            .keys()
+            .filter(|(project, _)| project == name)
+            .cloned()
+            .collect();
+        keys.into_iter()
+            .filter_map(|key| jobs.remove(&key))
+            .collect::<Vec<_>>()
+    };
+    for handle in &handles {
+        handle.abort();
+    }
+    for handle in handles {
+        let _ = handle.await;
     }
 }
 
@@ -1610,6 +1653,7 @@ async fn execute_cron_entry(
     project: &Project,
     entry: &localweb_core::CronEntry,
 ) -> localweb_core::Result<String> {
+    const OUTPUT_CAP: usize = 65_536;
     if entry.command.is_empty() {
         return Err(localweb_core::LocalWebError::Config(
             "cron entry has no command".into(),
@@ -1646,18 +1690,21 @@ async fn execute_cron_entry(
     } else {
         entry.command[1..].to_vec()
     };
-    let output = tokio::process::Command::new(&executable)
+    let mut command = tokio::process::Command::new(&executable);
+    command
         .args(args)
         .current_dir(&project.path)
-        .env("LD_LIBRARY_PATH", runtime.library_path())
-        .output()
-        .await?;
+        .envs(&project.environment)
+        .env("LD_LIBRARY_PATH", runtime.library_path());
+    let output = localweb_core::process::output(&mut command, OUTPUT_CAP).await?;
+    let truncated = output.stdout.len() > OUTPUT_CAP || output.stderr.len() > OUTPUT_CAP;
     let code = output.status.code().unwrap_or(-1);
     let mut combined = String::from_utf8_lossy(&output.stdout).into_owned();
     combined.push_str(&String::from_utf8_lossy(&output.stderr));
     let tail: Vec<&str> = combined.lines().rev().take(5).collect();
     let tail: Vec<&str> = tail.into_iter().rev().collect();
-    Ok(format!("exit={code} {}", tail.join(" | ")))
+    let suffix = if truncated { " [output truncated]" } else { "" };
+    Ok(format!("exit={code} {}{suffix}", tail.join(" | ")))
 }
 
 async fn append_cron_log(path: &std::path::Path, line: &str) -> localweb_core::Result<()> {
@@ -1858,21 +1905,26 @@ fn doctor(state: &State) -> Vec<Diagnostic> {
 fn runtime_diagnostics() -> Vec<Diagnostic> {
     let mut checks = Vec::new();
     let runtime = RuntimeLayout::discover();
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     {
         checks.push(Diagnostic {
             level: "OK".into(),
-            check: "runtime".into(),
-            detail: "Homebrew-managed system packages".into(),
+            check: "runtime source".into(),
+            detail: if cfg!(windows) {
+                "Native tools from Scoop, Chocolatey or PATH"
+            } else {
+                "Homebrew-managed native tools"
+            }
+            .into(),
             fix: None,
         });
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
         match runtime.manifest() {
             Ok(manifest) => checks.push(Diagnostic {
                 level: "OK".into(),
-                check: "bundled runtime".into(),
+                check: "runtime source".into(),
                 detail: format!(
                     "{} components for {}",
                     manifest.components.len(),
@@ -1882,7 +1934,7 @@ fn runtime_diagnostics() -> Vec<Diagnostic> {
             }),
             Err(error) => checks.push(Diagnostic {
                 level: "ERROR".into(),
-                check: "bundled runtime".into(),
+                check: "runtime source".into(),
                 detail: error.to_string(),
                 fix: Some("Reinstall the complete LocalWeb package".into()),
             }),
@@ -1891,7 +1943,14 @@ fn runtime_diagnostics() -> Vec<Diagnostic> {
     let runtime_checks = [
         ("nginx", runtime.nginx().map(|_| ())),
         ("Apache", runtime.apache().map(|_| ())),
-        ("PHP 8.5 CLI/FPM", runtime.php("8.5").map(|_| ())),
+        (
+            if cfg!(windows) {
+                "PHP 8.5 CLI/CGI"
+            } else {
+                "PHP 8.5 CLI/FPM"
+            },
+            runtime.php("8.5").map(|_| ()),
+        ),
         ("Composer 2", runtime.composer("2").map(|_| ())),
         (
             "Node.js + npm",
@@ -1955,6 +2014,56 @@ mod tests {
         project.schema_version = 999;
         save_project(&paths, &project).unwrap();
         load_projects(&paths).unwrap_err();
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn stopping_cron_only_cancels_the_selected_projects_tasks() {
+        let (base, paths, _) = project_fixture();
+        let state = State {
+            paths,
+            config: GlobalConfig::default(),
+            running: Mutex::new(BTreeSet::new()),
+            operations: Mutex::new(()),
+            db_proxies: Mutex::new(BTreeMap::new()),
+            cron_jobs: Mutex::new(BTreeMap::new()),
+            cron_last_minute: Mutex::new(BTreeMap::new()),
+            shutdown: Notify::new(),
+        };
+        let selected = tokio::spawn(std::future::pending());
+        let other = tokio::spawn(std::future::pending());
+        let selected_handle = selected.abort_handle();
+        let other_handle = other.abort_handle();
+        state
+            .cron_jobs
+            .lock()
+            .await
+            .extend([(("demo".into(), 0), selected), (("other".into(), 0), other)]);
+        cancel_project_cron(&state, "demo").await;
+        assert!(selected_handle.is_finished());
+        assert!(!other_handle.is_finished());
+        assert_eq!(state.cron_jobs.lock().await.len(), 1);
+        cancel_project_cron(&state, "other").await;
+        assert!(other_handle.is_finished());
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn invalid_environment_is_rejected_before_command_execution() {
+        let (base, _, mut project) = project_fixture();
+        for (key, value) in [
+            ("", "x"),
+            ("BAD=NAME", "x"),
+            ("BAD\nNAME", "x"),
+            ("1BAD", "x"),
+            ("VALID_NAME", "bad\0value"),
+        ] {
+            project.environment = BTreeMap::from([(key.into(), value.into())]);
+            assert!(project.validate().is_err());
+        }
+        project.environment =
+            BTreeMap::from([("VALID_NAME".into(), "$HOME; literal value".into())]);
+        project.validate().unwrap();
         fs::remove_dir_all(base).unwrap();
     }
 
@@ -2183,6 +2292,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn failed_start_reports_app_status_and_connection_help() {
+        let (base, _, mut project) = project_fixture();
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        project.web_port = Some(listener.local_addr().unwrap().port());
+        let server = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+            for _ in 0..20 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0u8; 512];
+                assert!(socket.read(&mut request).await.unwrap() > 0);
+                socket
+                    .write_all(b"HTTP/1.1 500 Internal Server Error\r\n\r\n")
+                    .await
+                    .unwrap();
+            }
+        });
+        let error = health_check(&project).await.unwrap_err().to_string();
+        assert!(error.contains("demo returned HTTP 500"), "{error}");
+        assert!(error.contains("app's logs"), "{error}");
+        assert!(error.contains("localweb env demo"), "{error}");
+        server.await.unwrap();
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
     async fn probe_reads_a_fragmented_status_line() {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
@@ -2344,14 +2480,18 @@ mod tests {
     fn runtime_list_reports_bundled_components() {
         let checks = runtime_diagnostics();
         assert_eq!(checks.len(), 11);
-        assert_eq!(checks[0].check, "bundled runtime");
+        assert_eq!(checks[0].check, "runtime source");
         let names: Vec<_> = checks.iter().skip(1).map(|c| c.check.as_str()).collect();
         assert_eq!(
             names,
             [
                 "nginx",
                 "Apache",
-                "PHP 8.5 CLI/FPM",
+                if cfg!(windows) {
+                    "PHP 8.5 CLI/CGI"
+                } else {
+                    "PHP 8.5 CLI/FPM"
+                },
                 "Composer 2",
                 "Node.js + npm",
                 "MariaDB",

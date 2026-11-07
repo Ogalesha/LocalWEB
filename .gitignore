@@ -35,3 +35,6 @@ Thumbs.db
 *.key
 *.p12
 *.pfx
+
+# Python bytecode
+__pycache__/

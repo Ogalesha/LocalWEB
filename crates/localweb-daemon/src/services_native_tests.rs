@@ -40,11 +40,15 @@ fn spawn(executable: &Path, args: &[&str]) -> ManagedChild {
 }
 
 fn get(port: u16, path: &str) -> String {
+    get_with_host(port, path, "demo.test")
+}
+
+fn get_with_host(port: u16, path: &str, host: &str) -> String {
     let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
     stream
         .set_read_timeout(Some(Duration::from_secs(3)))
         .unwrap();
-    write!(stream, "GET {path} HTTP/1.0\r\nHost: demo.test\r\n\r\n").unwrap();
+    write!(stream, "GET {path} HTTP/1.0\r\nHost: {host}\r\n\r\n").unwrap();
     let mut response = String::new();
     stream.read_to_string(&mut response).unwrap();
     response
@@ -85,6 +89,11 @@ fn check_routing(with_spaces: bool) {
     fs::write(source.join(".env"), "private-token").unwrap();
     fs::write(source.join(".git/config"), "private-token").unwrap();
     fs::write(source.join(".well-known/check"), "public-check").unwrap();
+    fs::write(
+        source.join("server.php"),
+        "<?php echo json_encode(array_intersect_key($_SERVER, array_flip(['REMOTE_ADDR', 'REMOTE_PORT', 'SERVER_ADDR', 'SERVER_PORT', 'GATEWAY_INTERFACE'])));",
+    )
+    .unwrap();
     let input = serde_json::from_value(serde_json::json!({
         "path": source, "name": "demo", "hostname": "demo.test",
         "autostart": false, "php": "8.5", "database": "none"
@@ -157,6 +166,39 @@ fn check_redis(services: &Services<'_>, project: &Project) {
 }
 
 fn check_responses(web: WebServer, port: u16) {
+    for host in [
+        "attacker.invalid",
+        "demo.test.attacker.invalid",
+        "localhost.attacker.invalid",
+    ] {
+        let response = get_with_host(port, "/index.php", host);
+        assert!(
+            response.starts_with("HTTP/1.1 4") || response.starts_with("HTTP/1.0 4"),
+            "{web:?} accepted unrelated host {host}: {response}"
+        );
+    }
+    for host in ["127.0.0.1", "localhost"] {
+        assert!(
+            get_with_host(port, "/index.php", host).ends_with("index.php"),
+            "{web:?} rejected direct loopback host {host}"
+        );
+    }
+    let response = get(port, "/server.php");
+    let (_, body) = response.split_once("\r\n\r\n").unwrap();
+    let server: serde_json::Value = serde_json::from_str(body).unwrap();
+    assert_eq!(server["REMOTE_ADDR"], "127.0.0.1", "{web:?}");
+    assert_eq!(server["SERVER_ADDR"], "127.0.0.1", "{web:?}");
+    assert_eq!(server["SERVER_PORT"], port.to_string(), "{web:?}");
+    assert_eq!(server["GATEWAY_INTERFACE"], "CGI/1.1", "{web:?}");
+    assert!(
+        server["REMOTE_PORT"]
+            .as_str()
+            .unwrap()
+            .parse::<u16>()
+            .unwrap()
+            > 0,
+        "{web:?}"
+    );
     for (path, script) in [
         ("/index.php", "index.php"),
         ("/sub/other.php", "other.php"),
