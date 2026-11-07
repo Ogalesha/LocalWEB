@@ -12,6 +12,7 @@ All notable changes to this project are documented here. The format follows
 
 - Protect MariaDB and MySQL administration with private credentials; reject passwordless root access without changing app database credentials or data.
 - Reject unrelated Host headers on direct web ports, cancel command trees on stop/timeout, and verify native process identity before termination.
+- Restrict Windows daemon pipes to the native account and verify the server's SID before exchanging data.
 
 ### Fixed
 

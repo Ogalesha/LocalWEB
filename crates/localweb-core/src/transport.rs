@@ -90,18 +90,10 @@ impl DaemonListener {
         }
         #[cfg(windows)]
         {
-            use tokio::net::windows::named_pipe::{ClientOptions, ServerOptions};
             let name = path
                 .to_str()
                 .ok_or_else(|| LocalWebError::Config("non-UTF-8 pipe name".into()))?;
-            if ClientOptions::new().open(name).is_ok() {
-                return Err(LocalWebError::Service(format!(
-                    "localwebd is already running at {name}"
-                )));
-            }
-            let pending = ServerOptions::new()
-                .first_pipe_instance(true)
-                .create(name)?;
+            let pending = crate::windows_ipc::create_server(name, true)?;
             Ok(Self { path, pending })
         }
     }
@@ -125,13 +117,12 @@ impl DaemonListener {
         }
         #[cfg(windows)]
         {
-            use tokio::net::windows::named_pipe::ServerOptions;
             self.pending.connect().await?;
             let name = self
                 .path
                 .to_str()
                 .ok_or_else(|| LocalWebError::Config("non-UTF-8 pipe name".into()))?;
-            let next = ServerOptions::new().create(name)?;
+            let next = crate::windows_ipc::create_server(name, false)?;
             let connected = std::mem::replace(&mut self.pending, next);
             Ok(connected)
         }
@@ -170,11 +161,10 @@ pub async fn connect(paths: &Paths) -> Result<ClientStream> {
     }
     #[cfg(windows)]
     {
-        use tokio::net::windows::named_pipe::ClientOptions;
         let name = path
             .to_str()
             .ok_or_else(|| LocalWebError::Config("non-UTF-8 pipe name".into()))?;
-        Ok(ClientOptions::new().open(name)?)
+        Ok(crate::windows_ipc::connect(name).await?)
     }
 }
 

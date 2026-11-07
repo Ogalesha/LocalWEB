@@ -23,6 +23,8 @@ pub mod process;
 pub mod runtime;
 pub mod service;
 pub mod transport;
+#[cfg(windows)]
+pub(crate) mod windows_ipc;
 
 /// Version of the daemon wire protocol; peers must match exactly.
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -216,12 +218,10 @@ impl Paths {
         }
         #[cfg(windows)]
         {
-            let user = std::env::var("USERNAME").unwrap_or_else(|_| "user".into());
-            let user = user
-                .chars()
-                .filter(char::is_ascii_alphanumeric)
-                .collect::<String>();
-            PathBuf::from(format!(r"\\.\pipe\localweb-{user}"))
+            // Binding and connecting fail closed if native identity cannot be
+            // read. Keep a displayable path for diagnostics in that case.
+            windows_ipc::pipe_name()
+                .unwrap_or_else(|_| PathBuf::from(r"\\.\pipe\localweb-identity-unavailable"))
         }
     }
 
