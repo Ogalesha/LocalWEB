@@ -116,12 +116,112 @@ enum View {
     Settings,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Connection {
+/// Reachability and in-flight lifecycle of the local daemon.
+///
+/// This used to be spread across `Connection`, a parallel `daemon_online`
+/// boolean and an `Option<DaemonTransition>`, which allowed contradictory
+/// combinations. Every transition now goes through the reducer below.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DaemonState {
+    /// The first status probe has not answered yet.
     Checking,
-    Connected,
+    /// The last status probe succeeded.
+    Running,
+    /// The last status probe failed and the daemon was not explicitly stopped.
     Unavailable,
+    /// The user stopped the daemon and shutdown was confirmed.
     Stopped,
+    /// `localweb setup` is running.
+    SettingUp,
+    /// `localweb start` is running.
+    Starting,
+    /// A shutdown request is in flight.
+    Stopping,
+}
+
+impl DaemonState {
+    /// Whether the daemon is reachable for interactive requests.
+    ///
+    /// A shutdown in flight still counts as online: the process is alive until
+    /// the request completes.
+    fn is_online(self) -> bool {
+        matches!(self, Self::Running | Self::Stopping)
+    }
+
+    /// Whether a lifecycle command is already in flight.
+    fn is_busy(self) -> bool {
+        matches!(self, Self::SettingUp | Self::Starting | Self::Stopping)
+    }
+
+    /// Applies a successful status probe.
+    fn after_status_ok(self) -> Self {
+        match self {
+            Self::Stopping => Self::Stopping,
+            _ => Self::Running,
+        }
+    }
+
+    /// Applies a failed status probe without cancelling an explicit stop.
+    fn after_status_error(self) -> Self {
+        match self {
+            Self::Stopped | Self::SettingUp | Self::Starting | Self::Stopping => self,
+            Self::Checking | Self::Running | Self::Unavailable => Self::Unavailable,
+        }
+    }
+
+    /// Applies the result of the `localweb start` command.
+    fn after_start_ok(self) -> Self {
+        if self == Self::Starting {
+            Self::Checking
+        } else {
+            self
+        }
+    }
+
+    /// Applies a failed `localweb start` command.
+    fn after_start_error(self) -> Self {
+        if self == Self::Starting {
+            Self::Unavailable
+        } else {
+            self
+        }
+    }
+
+    /// Applies a failed `localweb setup` command.
+    fn after_setup_error(self) -> Self {
+        if self == Self::SettingUp {
+            Self::Unavailable
+        } else {
+            self
+        }
+    }
+
+    /// Applies a successful shutdown reply.
+    fn after_stop_ok(self) -> Self {
+        if self == Self::Stopping {
+            Self::Stopped
+        } else {
+            self
+        }
+    }
+
+    /// Applies a shutdown reply that reached the daemon but was rejected.
+    fn after_stop_rejected(self) -> Self {
+        if self == Self::Stopping {
+            Self::Running
+        } else {
+            self
+        }
+    }
+
+    /// Applies a transport failure while shutting down.
+    fn after_stop_error(self) -> Self {
+        if self == Self::Stopping {
+            Self::Unavailable
+        } else {
+            self
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -130,13 +230,6 @@ enum EnvironmentState {
     Ready,
     Unavailable,
     Stopped,
-}
-
-#[derive(Clone, Copy)]
-enum DaemonTransition {
-    Setup,
-    Starting,
-    Stopping,
 }
 
 #[derive(Clone, Copy)]
@@ -195,8 +288,7 @@ struct LocalWebApp {
     receiver: Receiver<GuiEvent>,
     view: View,
     lang: Lang,
-    daemon_online: bool,
-    connection: Connection,
+    daemon: DaemonState,
     status: Option<Status>,
     ca: Option<CaStatus>,
     projects: Vec<ProjectStatus>,
@@ -217,7 +309,6 @@ struct LocalWebApp {
     notice: Option<Notice>,
     pending: usize,
     background_pending: usize,
-    daemon_transition: Option<DaemonTransition>,
     project_transition: Option<(String, ProjectTransition)>,
     last_refresh: Instant,
     last_view: View,
@@ -259,8 +350,7 @@ impl LocalWebApp {
             sender,
             receiver,
             view: View::Dashboard,
-            daemon_online: false,
-            connection: Connection::Checking,
+            daemon: DaemonState::Checking,
             status: None,
             ca: None,
             projects: Vec::new(),
@@ -281,7 +371,6 @@ impl LocalWebApp {
             notice,
             pending: 0,
             background_pending: 0,
-            daemon_transition: None,
             project_transition: None,
             last_refresh: Instant::now(),
             last_view: View::Dashboard,
@@ -295,6 +384,10 @@ impl LocalWebApp {
             brand_texture: None,
             logo_texture: None,
         }
+    }
+
+    fn daemon_online(&self) -> bool {
+        self.daemon.is_online()
     }
 
     fn refresh_all(&mut self) {
@@ -395,18 +488,16 @@ impl LocalWebApp {
         {
             self.project_transition = None;
         }
-        if matches!(&action, Action::Shutdown) {
-            self.daemon_transition = None;
-        }
         let response = match result {
             Ok(response) => response,
             Err(error) => {
                 match action {
                     Action::RefreshStatus => {
-                        if self.connection != Connection::Stopped {
-                            self.connection = Connection::Unavailable;
-                        }
-                        self.daemon_online = false;
+                        self.daemon = self.daemon.after_status_error();
+                    }
+                    Action::Shutdown => {
+                        self.daemon = self.daemon.after_stop_error();
+                        self.notice = Some(Notice::error(error));
                     }
                     Action::LoadProjects => self.projects_error = Some(error),
                     Action::LoadCa => self.ca_error = Some(error),
@@ -423,6 +514,9 @@ impl LocalWebApp {
         };
         if let Response::Error { code, message } = response {
             self.project_transition = None;
+            if matches!(&action, Action::Shutdown) {
+                self.daemon = self.daemon.after_stop_rejected();
+            }
             let error = format!("{code}: {message}");
             match action {
                 Action::LoadProjects => self.projects_error = Some(error),
@@ -437,10 +531,10 @@ impl LocalWebApp {
             }
             return;
         }
+        let shutdown = matches!(&action, Action::Shutdown);
         match (action, response) {
             (Action::RefreshStatus, Response::Status(status)) => {
-                self.connection = Connection::Connected;
-                self.daemon_online = true;
+                self.daemon = self.daemon.after_status_ok();
                 self.status = Some(status);
                 if let Some(request) = self.queued_add.take() {
                     self.request(Action::AddProject, Request::ProjectAdd(request));
@@ -465,8 +559,7 @@ impl LocalWebApp {
                 }
             }
             (Action::Shutdown, Response::Message(_)) => {
-                self.connection = Connection::Stopped;
-                self.daemon_online = false;
+                self.daemon = self.daemon.after_stop_ok();
                 self.status = None;
                 self.stop_confirmation = false;
                 self.projects
@@ -513,6 +606,9 @@ impl LocalWebApp {
                 self.sync_hosts();
             }
             (_, unexpected) => {
+                if shutdown {
+                    self.daemon = self.daemon.after_stop_rejected();
+                }
                 self.notice = Some(Notice::error(
                     self.lang.notice_unexpected(&format!("{unexpected:?}")),
                 ));
@@ -521,14 +617,18 @@ impl LocalWebApp {
     }
 
     fn handle_command(&mut self, action: Action, result: Result<String, String>) {
-        if matches!(&action, Action::StartDaemon) {
-            self.daemon_transition = None;
-        }
-        if matches!(&action, Action::Setup) && result.is_err() {
-            self.daemon_transition = None;
-        }
-        if matches!(&action, Action::StartDaemon | Action::Setup) && result.is_err() {
-            self.queued_add = None;
+        if result.is_err() {
+            match &action {
+                Action::StartDaemon => {
+                    self.queued_add = None;
+                    self.daemon = self.daemon.after_start_error();
+                }
+                Action::Setup => {
+                    self.queued_add = None;
+                    self.daemon = self.daemon.after_setup_error();
+                }
+                _ => {}
+            }
         }
         match (action, result) {
             (Action::Setup, Ok(_)) => {
@@ -540,6 +640,7 @@ impl LocalWebApp {
                 self.request(Action::LoadCa, Request::CaStatus);
             }
             (Action::StartDaemon, Ok(_)) => {
+                self.daemon = self.daemon.after_start_ok();
                 self.notice = Some(Notice::success(self.lang.notice_started()));
                 // The start command returns before the daemon binds its socket.
                 // Send a queued project only after a status reply proves it is
@@ -579,25 +680,35 @@ impl LocalWebApp {
     }
 
     fn start_daemon(&mut self) {
-        self.daemon_transition = Some(DaemonTransition::Starting);
+        let previous = match self.daemon {
+            DaemonState::SettingUp => DaemonState::Unavailable,
+            state => state,
+        };
+        self.daemon = DaemonState::Starting;
         match localweb_cli_path() {
             Ok(program) => self.run_command(Action::StartDaemon, program, vec!["start".into()]),
             Err(error) => {
-                self.daemon_transition = None;
+                self.daemon = previous;
                 self.notice = Some(Notice::error(error));
             }
         }
     }
 
     fn setup(&mut self) {
-        self.daemon_transition = Some(DaemonTransition::Setup);
+        let previous = self.daemon;
+        self.daemon = DaemonState::SettingUp;
         match localweb_cli_path() {
             Ok(program) => self.run_command(Action::Setup, program, vec!["setup".into()]),
             Err(error) => {
-                self.daemon_transition = None;
+                self.daemon = previous;
                 self.notice = Some(Notice::error(error));
             }
         }
+    }
+
+    fn begin_stop(&mut self) {
+        self.daemon = DaemonState::Stopping;
+        self.request(Action::Shutdown, Request::Shutdown);
     }
 
     fn install_ca(&mut self) {
@@ -749,14 +860,14 @@ impl LocalWebApp {
                         ui.horizontal(|ui| {
                             status_mark(
                                 ui,
-                                if self.daemon_online {
+                                if self.daemon_online() {
                                     SUCCESS
                                 } else {
                                     STATUS_OFF
                                 },
                             );
                             ui.label(medium(status_label).size(SMALL_SIZE).color(
-                                if self.daemon_online {
+                                if self.daemon_online() {
                                     Color32::WHITE
                                 } else {
                                     NAV_MUTED
@@ -778,8 +889,8 @@ impl LocalWebApp {
 
     fn daemon_action(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang;
-        if self.daemon_online {
-            let stopping = matches!(self.daemon_transition, Some(DaemonTransition::Stopping));
+        if self.daemon_online() {
+            let stopping = self.daemon == DaemonState::Stopping;
             let response = Pill::new(
                 if stopping {
                     lang.op_stopping()
@@ -798,26 +909,25 @@ impl LocalWebApp {
                 if self.projects.iter().any(|project| project.running) {
                     self.stop_confirmation = true;
                 } else {
-                    self.daemon_transition = Some(DaemonTransition::Stopping);
-                    self.request(Action::Shutdown, Request::Shutdown);
+                    self.begin_stop();
                 }
             }
         } else {
-            let (label, icon) = match self.daemon_transition {
-                Some(DaemonTransition::Setup) => (lang.op_setup(), Icon::Settings),
-                Some(DaemonTransition::Starting) => (lang.op_starting(), Icon::Play),
-                Some(DaemonTransition::Stopping) => (lang.op_stopping(), Icon::Stop),
-                None if self.setup_complete() => (lang.start_localweb(), Icon::Play),
-                None => (lang.configure_localweb(), Icon::Settings),
+            let (label, icon) = match self.daemon {
+                DaemonState::SettingUp => (lang.op_setup(), Icon::Settings),
+                DaemonState::Starting => (lang.op_starting(), Icon::Play),
+                DaemonState::Stopping => (lang.op_stopping(), Icon::Stop),
+                _ if self.setup_complete() => (lang.start_localweb(), Icon::Play),
+                _ => (lang.configure_localweb(), Icon::Settings),
             };
             let response = Pill::new(label, PillKind::Primary)
                 .icon(icon)
                 .min_width(158.0)
                 .height(theme::COMMAND_HEIGHT)
                 .enabled(
-                    self.connection != Connection::Checking
+                    self.daemon != DaemonState::Checking
                         && self.pending == 0
-                        && self.daemon_transition.is_none(),
+                        && !self.daemon.is_busy(),
                 )
                 .show(ui);
             if response.clicked() {
@@ -848,7 +958,7 @@ impl LocalWebApp {
                         if show_add_project {
                             open_add |= Pill::new(
                                 lang.nav_add(),
-                                if self.daemon_online {
+                                if self.daemon_online() {
                                     PillKind::Primary
                                 } else {
                                     PillKind::Secondary
@@ -875,7 +985,7 @@ impl LocalWebApp {
                         ui.add_space(8.0);
                         open_add |= Pill::new(
                             lang.nav_add(),
-                            if self.daemon_online {
+                            if self.daemon_online() {
                                 PillKind::Primary
                             } else {
                                 PillKind::Secondary
@@ -895,7 +1005,7 @@ impl LocalWebApp {
 
     fn dashboard(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang;
-        self.page_toolbar(ui, lang.dash_title(), false, self.daemon_online);
+        self.page_toolbar(ui, lang.dash_title(), false, self.daemon_online());
         ui.add_space(22.0);
 
         self.environment_overview(ui);
@@ -908,7 +1018,7 @@ impl LocalWebApp {
         );
         ui.add_space(12.0);
         if !self.projects_loaded {
-            ui.label(if self.daemon_online {
+            ui.label(if self.daemon_online() {
                 lang.loading_projects()
             } else {
                 lang.projects_offline()
@@ -918,7 +1028,7 @@ impl LocalWebApp {
                 ui,
                 Icon::Folder,
                 lang.empty_title(),
-                if self.daemon_online {
+                if self.daemon_online() {
                     lang.empty_online()
                 } else {
                     lang.empty_offline()
@@ -941,7 +1051,7 @@ impl LocalWebApp {
             }
         }
 
-        if self.daemon_online
+        if self.daemon_online()
             && let Some(error) = &self.ca_error
         {
             ui.colored_label(DANGER, lang.ca_load_failed());
@@ -953,13 +1063,15 @@ impl LocalWebApp {
 
     fn environment_overview(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang;
-        let state = match self.connection {
-            Connection::Checking => EnvironmentState::Checking,
-            Connection::Unavailable => EnvironmentState::Unavailable,
-            Connection::Stopped => EnvironmentState::Stopped,
-            Connection::Connected => EnvironmentState::Ready,
+        let state = match self.daemon {
+            DaemonState::Checking => EnvironmentState::Checking,
+            DaemonState::Running | DaemonState::Stopping => EnvironmentState::Ready,
+            DaemonState::Stopped => EnvironmentState::Stopped,
+            DaemonState::Unavailable | DaemonState::SettingUp | DaemonState::Starting => {
+                EnvironmentState::Unavailable
+            }
         };
-        let ca_untrusted = self.daemon_online
+        let ca_untrusted = self.daemon_online()
             && matches!(state, EnvironmentState::Ready)
             && self.ca.as_ref().is_some_and(|ca| !ca.trusted);
         let (mark_icon, mark_bg, mark_text) = if ca_untrusted {
@@ -974,8 +1086,8 @@ impl LocalWebApp {
             }
         };
         let ca_installable =
-            self.daemon_online && self.ca.as_ref().is_some_and(|ca| ca.exists && !ca.trusted);
-        let (title, body) = if !self.daemon_online
+            self.daemon_online() && self.ca.as_ref().is_some_and(|ca| ca.exists && !ca.trusted);
+        let (title, body) = if !self.daemon_online()
             && self.needs_setup()
             && state != EnvironmentState::Checking
         {
@@ -996,7 +1108,7 @@ impl LocalWebApp {
                 ui.horizontal(|ui| {
                     icon_tile(ui, mark_icon, mark_bg, mark_text, 52.0);
                     ui.add_space(4.0);
-                    let has_action = !self.daemon_online || ca_installable;
+                    let has_action = !self.daemon_online() || ca_installable;
                     let right_width = if has_action { 190.0 } else { 0.0 };
                     let text_width = (ui.available_width() - right_width).max(200.0);
                     ui.allocate_ui(Vec2::new(text_width, 0.0), |ui| {
@@ -1011,7 +1123,7 @@ impl LocalWebApp {
                             );
                         });
                     });
-                    if !self.daemon_online {
+                    if !self.daemon_online() {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             self.daemon_action(ui);
                         });
@@ -1044,17 +1156,14 @@ impl LocalWebApp {
             true,
         );
         ui.add_space(22.0);
-        if !self.daemon_online {
+        if !self.daemon_online() {
             callout(ui, CalloutKind::Warning, Icon::Warning, |ui| {
                 ui.vertical(|ui| {
-                    ui.label(strong(if self.connection == Connection::Checking {
-                        lang.checking_status()
-                    } else if self.needs_setup() {
-                        lang.setup_required()
-                    } else if self.connection == Connection::Stopped {
-                        lang.stopped_title()
-                    } else {
-                        lang.daemon_unavailable()
+                    ui.label(strong(match self.daemon {
+                        DaemonState::Checking => lang.checking_status(),
+                        _ if self.needs_setup() => lang.setup_required(),
+                        DaemonState::Stopped => lang.stopped_title(),
+                        _ => lang.daemon_unavailable(),
                     }));
                     ui.label(RichText::new(self.offline_help()).color(INK_MUTED));
                 });
@@ -1062,7 +1171,7 @@ impl LocalWebApp {
             ui.add_space(14.0);
         }
         if !self.projects_loaded {
-            if self.daemon_online {
+            if self.daemon_online() {
                 if let Some(error) = &self.projects_error {
                     ui.colored_label(DANGER, lang.projects_load_failed());
                     ui.collapsing(lang.technical_details(), |ui| {
@@ -1118,7 +1227,7 @@ impl LocalWebApp {
                 ui,
                 Icon::Folder,
                 lang.empty_title(),
-                if self.daemon_online {
+                if self.daemon_online() {
                     lang.empty_online()
                 } else {
                     lang.empty_offline()
@@ -1166,7 +1275,7 @@ impl LocalWebApp {
 
     fn settings(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang;
-        self.page_toolbar(ui, lang.nav_settings(), false, self.daemon_online);
+        self.page_toolbar(ui, lang.nav_settings(), false, self.daemon_online());
         ui.add_space(22.0);
         self.settings_mcp(ui);
         ui.add_space(24.0);
@@ -1429,7 +1538,7 @@ impl LocalWebApp {
                             ui.label(strong(&item.project.name).size(BODY_SIZE).color(INK));
                             if let Some(transition) = transition {
                                 transition_status(ui, lang, transition);
-                            } else if self.daemon_online {
+                            } else if self.daemon_online() {
                                 state_chip(
                                     ui,
                                     item.running,
@@ -1590,7 +1699,7 @@ impl LocalWebApp {
                                 .map(|(_, transition)| *transition);
                             if let Some(transition) = transition {
                                 transition_status(ui, lang, transition);
-                            } else if self.daemon_online {
+                            } else if self.daemon_online() {
                                 state_chip(
                                     ui,
                                     item.running,
@@ -1676,7 +1785,7 @@ impl LocalWebApp {
 
     fn project_edit_action(&mut self, ui: &mut egui::Ui, item: &ProjectStatus, wide: bool) {
         let lang = self.lang;
-        let enabled = self.daemon_online && self.pending == 0;
+        let enabled = self.daemon_online() && self.pending == 0;
         let edit = if wide {
             Pill::new("", PillKind::Ghost)
                 .icon_only(Icon::Pencil, lang.action_edit())
@@ -1698,7 +1807,7 @@ impl LocalWebApp {
 
     fn project_delete_action(&mut self, ui: &mut egui::Ui, item: &ProjectStatus, wide: bool) {
         let lang = self.lang;
-        let enabled = self.daemon_online && self.pending == 0;
+        let enabled = self.daemon_online() && self.pending == 0;
         let delete = if wide {
             Pill::new("", PillKind::GhostDanger)
                 .icon_only(Icon::Trash, lang.action_delete())
@@ -1720,7 +1829,7 @@ impl LocalWebApp {
 
     fn project_lifecycle_actions(&mut self, ui: &mut egui::Ui, item: &ProjectStatus, wide: bool) {
         let lang = self.lang;
-        if !self.daemon_online {
+        if !self.daemon_online() {
             return;
         }
         if let Some((name, _)) = &self.project_transition
@@ -1906,7 +2015,7 @@ impl LocalWebApp {
         if self.environment.is_none() && self.environment_error.is_none() {
             if Pill::new(lang.reveal_environment(), PillKind::Secondary)
                 .height(36.0)
-                .enabled(self.daemon_online && self.background_pending == 0)
+                .enabled(self.daemon_online() && self.background_pending == 0)
                 .show(ui)
                 .clicked()
             {
@@ -1989,21 +2098,16 @@ impl LocalWebApp {
             true,
         );
         ui.add_space(22.0);
-        if !self.daemon_online {
+        if !self.daemon_online() {
             callout(ui, CalloutKind::Warning, Icon::Warning, |ui| {
                 ui.vertical(|ui| {
                     ui.add(
-                        egui::Label::new(strong(if self.connection == Connection::Checking {
-                            lang.checking_status()
-                        } else if matches!(self.daemon_transition, Some(DaemonTransition::Starting))
-                        {
-                            lang.op_starting()
-                        } else if matches!(self.daemon_transition, Some(DaemonTransition::Setup)) {
-                            lang.op_setup()
-                        } else if self.connection == Connection::Stopped {
-                            lang.stopped_title()
-                        } else {
-                            lang.daemon_unavailable()
+                        egui::Label::new(strong(match self.daemon {
+                            DaemonState::Checking => lang.checking_status(),
+                            DaemonState::Starting => lang.op_starting(),
+                            DaemonState::SettingUp => lang.op_setup(),
+                            DaemonState::Stopped => lang.stopped_title(),
+                            _ => lang.daemon_unavailable(),
                         }))
                         .wrap(),
                     );
@@ -2076,11 +2180,11 @@ impl LocalWebApp {
                                 input: request,
                             },
                         );
-                    } else if self.daemon_online {
+                    } else if self.daemon_online() {
                         self.request(Action::AddProject, Request::ProjectAdd(request));
                     } else {
                         self.queued_add = Some(request);
-                        if self.daemon_transition.is_none() {
+                        if !self.daemon.is_busy() {
                             if self.setup_complete() {
                                 self.start_daemon();
                             } else {
@@ -2542,8 +2646,7 @@ impl LocalWebApp {
                     .clicked()
                 {
                     self.stop_confirmation = false;
-                    self.daemon_transition = Some(DaemonTransition::Stopping);
-                    self.request(Action::Shutdown, Request::Shutdown);
+                    self.begin_stop();
                 }
             });
         });
@@ -2563,16 +2666,21 @@ impl LocalWebApp {
     }
 
     fn connection_label(&self) -> &'static str {
-        if self.connection == Connection::Checking {
-            self.lang.checking_status()
-        } else if self.daemon_online {
-            self.lang.nav_running()
-        } else if self.needs_setup() {
-            self.lang.setup_required()
-        } else if self.connection == Connection::Stopped {
-            self.lang.nav_stopped()
-        } else {
-            self.lang.daemon_unavailable()
+        match self.daemon {
+            DaemonState::Checking => self.lang.checking_status(),
+            DaemonState::Running | DaemonState::Stopping => self.lang.nav_running(),
+            DaemonState::SettingUp
+            | DaemonState::Starting
+            | DaemonState::Stopped
+            | DaemonState::Unavailable
+                if self.needs_setup() =>
+            {
+                self.lang.setup_required()
+            }
+            DaemonState::SettingUp => self.lang.op_setup(),
+            DaemonState::Starting => self.lang.op_starting(),
+            DaemonState::Stopped => self.lang.nav_stopped(),
+            DaemonState::Unavailable => self.lang.daemon_unavailable(),
         }
     }
 
@@ -2663,7 +2771,7 @@ impl eframe::App for LocalWebApp {
             && self.background_pending == 0
             && self.last_refresh.elapsed() > REFRESH_INTERVAL
         {
-            if self.daemon_online {
+            if self.daemon_online() {
                 self.request(Action::RefreshStatus, Request::Status);
                 self.request(Action::LoadProjects, Request::ProjectList);
             } else {
@@ -3555,7 +3663,7 @@ mod tests {
             ..Default::default()
         };
         let mut app = LocalWebApp::state(None, Lang::English, None);
-        app.connection = Connection::Stopped;
+        app.daemon = DaemonState::Stopped;
         app.view = View::AddProject;
         app.form = form;
         assert_view_fits(
@@ -3575,7 +3683,7 @@ mod tests {
             ..Default::default()
         };
         let mut app = LocalWebApp::state(None, Lang::English, None);
-        app.connection = Connection::Stopped;
+        app.daemon = DaemonState::Stopped;
         app.queued_add = Some(form.to_request(Lang::English).unwrap());
         app.handle_command(Action::StartDaemon, Ok("started".into()));
         assert!(
@@ -3605,9 +3713,131 @@ mod tests {
             app.queued_add.is_none(),
             "the project is sent once the daemon answers"
         );
-        assert!(app.daemon_online);
-        assert!(app.connection == Connection::Connected);
+        assert!(app.daemon_online());
+        assert_eq!(app.daemon, DaemonState::Running);
         fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn daemon_state_reducer_keeps_explicit_and_in_flight_states() {
+        assert_eq!(
+            DaemonState::Stopped.after_status_error(),
+            DaemonState::Stopped
+        );
+        assert_eq!(
+            DaemonState::Starting.after_status_error(),
+            DaemonState::Starting
+        );
+        assert_eq!(
+            DaemonState::SettingUp.after_status_error(),
+            DaemonState::SettingUp
+        );
+        assert_eq!(
+            DaemonState::Stopping.after_status_error(),
+            DaemonState::Stopping
+        );
+        assert_eq!(
+            DaemonState::Checking.after_status_error(),
+            DaemonState::Unavailable
+        );
+        assert_eq!(
+            DaemonState::Running.after_status_error(),
+            DaemonState::Unavailable
+        );
+        assert_eq!(
+            DaemonState::Stopping.after_status_ok(),
+            DaemonState::Stopping
+        );
+        assert_eq!(DaemonState::Stopped.after_status_ok(), DaemonState::Running);
+    }
+
+    #[test]
+    fn daemon_state_reducer_completes_lifecycle_commands() {
+        assert_eq!(
+            DaemonState::Starting.after_start_ok(),
+            DaemonState::Checking
+        );
+        assert_eq!(
+            DaemonState::Starting.after_start_error(),
+            DaemonState::Unavailable
+        );
+        assert_eq!(
+            DaemonState::SettingUp.after_setup_error(),
+            DaemonState::Unavailable
+        );
+        assert_eq!(DaemonState::Stopping.after_stop_ok(), DaemonState::Stopped);
+        assert_eq!(
+            DaemonState::Stopping.after_stop_rejected(),
+            DaemonState::Running
+        );
+        assert_eq!(
+            DaemonState::Stopping.after_stop_error(),
+            DaemonState::Unavailable
+        );
+    }
+
+    #[test]
+    fn start_command_waits_for_a_status_probe_before_reporting_online() {
+        let mut app = LocalWebApp::state(None, Lang::English, None);
+        app.daemon = DaemonState::Starting;
+        app.handle_command(Action::StartDaemon, Ok("started".into()));
+        assert_eq!(app.daemon, DaemonState::Checking);
+        assert!(!app.daemon_online());
+        app.handle_response(Action::RefreshStatus, Err("not ready".into()));
+        assert_eq!(app.daemon, DaemonState::Unavailable);
+        assert!(!app.daemon_online());
+    }
+
+    #[test]
+    fn status_probe_does_not_cancel_a_shutdown_in_flight() {
+        let mut app = LocalWebApp::state(None, Lang::English, None);
+        app.daemon = DaemonState::Stopping;
+        app.handle_response(
+            Action::RefreshStatus,
+            Ok(Response::Status(Status {
+                daemon_running: true,
+                gateway_running: false,
+                gateway_bind_address: None,
+                gateway_https_port: None,
+                project_count: 0,
+                active_projects: 0,
+            })),
+        );
+        assert_eq!(app.daemon, DaemonState::Stopping);
+        assert!(app.daemon_online());
+    }
+
+    #[test]
+    fn rejected_shutdown_returns_to_running() {
+        let mut app = LocalWebApp::state(None, Lang::English, None);
+        app.daemon = DaemonState::Stopping;
+        app.handle_response(
+            Action::Shutdown,
+            Ok(Response::Error {
+                code: "daemon_busy".into(),
+                message: "daemon busy".into(),
+            }),
+        );
+        assert_eq!(app.daemon, DaemonState::Running);
+        assert!(app.daemon_online());
+    }
+
+    #[test]
+    fn unreachable_shutdown_reports_unavailable() {
+        let mut app = LocalWebApp::state(None, Lang::English, None);
+        app.daemon = DaemonState::Stopping;
+        app.handle_response(Action::Shutdown, Err("connection reset".into()));
+        assert_eq!(app.daemon, DaemonState::Unavailable);
+        assert!(!app.daemon_online());
+    }
+
+    #[test]
+    fn confirmed_shutdown_marks_the_daemon_stopped() {
+        let mut app = LocalWebApp::state(None, Lang::English, None);
+        app.daemon = DaemonState::Stopping;
+        app.handle_response(Action::Shutdown, Ok(Response::Message("stopped".into())));
+        assert_eq!(app.daemon, DaemonState::Stopped);
+        assert!(!app.daemon_online());
     }
 
     #[test]
@@ -3747,8 +3977,7 @@ mod tests {
         )
         .unwrap();
         let mut app = LocalWebApp::state(None, Lang::English, None);
-        app.connection = Connection::Connected;
-        app.daemon_online = true;
+        app.daemon = DaemonState::Running;
         app.projects.push(ProjectStatus {
             project,
             running: true,
@@ -3757,8 +3986,8 @@ mod tests {
         });
         app.handle_response(Action::RefreshStatus, Err("socket unavailable".into()));
         assert!(app.projects[0].running);
-        assert!(app.connection == Connection::Unavailable);
-        assert!(!app.daemon_online);
+        assert_eq!(app.daemon, DaemonState::Unavailable);
+        assert!(!app.daemon_online());
         fs::remove_dir_all(path).unwrap();
     }
 
@@ -3885,8 +4114,7 @@ mod tests {
         .unwrap();
         for lang in Lang::ALL {
             let mut app = LocalWebApp::state(None, lang, None);
-            app.connection = Connection::Connected;
-            app.daemon_online = true;
+            app.daemon = DaemonState::Running;
             app.projects_loaded = true;
             app.projects.push(ProjectStatus {
                 project: project.clone(),
