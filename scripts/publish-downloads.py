@@ -106,8 +106,10 @@ def publish(destination, notes_path, repository, sha):
     assets = [str(destination / name) for name in sorted(CURRENT_ASSETS)]
     gh("release", "upload", "rolling", *assets, "--clobber")
     # Keep the rolling source archives aligned with the installers, too.
-    gh("api", "--method", "PATCH", f"repos/{repository}/git/refs/tags/rolling",
-       "-f", f"sha={sha}", "-F", "force=true")
+    ref = json.loads(gh("api", f"repos/{repository}/git/ref/tags/rolling"))
+    if ref["object"]["sha"] != sha:
+        gh("api", "--method", "PATCH", f"repos/{repository}/git/refs/tags/rolling",
+           "-f", f"sha={sha}", "-F", "force=true")
     gh("release", "edit", "rolling", "--prerelease", "--latest=false",
        "--title", "LocalWeb — latest verified build", "--notes-file", str(notes_path))
     release = json.loads(gh("release", "view", "rolling", "--json", "assets"))

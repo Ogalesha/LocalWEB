@@ -196,3 +196,38 @@ jobs:
             gh release create "$TAG" --verify-tag --title "LocalWeb $version" --notes-file CHANGELOG.md
           fi
           gh release upload "$TAG" release-files/*/*.deb release-files/*/*.pkg.tar.zst release-files/*/*.pkg release-files/*/*.zip SHA256SUMS
+
+  rolling:
+    name: Publish latest verified downloads
+    if: github.ref == 'refs/heads/main'
+    needs: [hygiene, linux, windows-wine, macos-package]
+    runs-on: ubuntu-latest
+    concurrency:
+      group: publish-latest-downloads
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v5
+        with:
+          name: localweb-ubuntu-amd64
+          path: release-files/ubuntu
+      - uses: actions/download-artifact@v5
+        with:
+          name: localweb-arch-omarchy-amd64
+          path: release-files/arch
+      - uses: actions/download-artifact@v5
+        with:
+          name: localweb-macos-universal
+          path: release-files/macos
+      - uses: actions/download-artifact@v5
+        with:
+          name: localweb-windows-amd64
+          path: release-files/windows
+      - name: Publish installers and matching source archives
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_SHA: ${{ github.sha }}
+          BUILD_RUN_ID: ${{ github.run_id }}
+        run: python3 scripts/publish-downloads.py publish

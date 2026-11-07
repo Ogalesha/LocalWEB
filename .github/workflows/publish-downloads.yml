@@ -1,10 +1,6 @@
 name: Publish latest downloads
 
 on:
-  workflow_run:
-    workflows: [Native packages and acceptance]
-    branches: [main]
-    types: [completed]
   push:
     branches: [main]
     paths:
@@ -24,12 +20,6 @@ permissions:
 
 jobs:
   publish:
-    if: >-
-      github.event_name != 'workflow_run' ||
-      (github.event.workflow_run.conclusion == 'success' &&
-       github.event.workflow_run.event == 'push' &&
-       github.event.workflow_run.head_branch == 'main' &&
-       github.event.workflow_run.head_repository.full_name == github.repository)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:

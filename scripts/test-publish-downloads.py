@@ -92,6 +92,24 @@ class DownloadsTest(unittest.TestCase):
             self.assertEqual(gh.call_count, 1)
             self.assertEqual(gh.call_args.args[:3], ("release", "upload", "rolling"))
 
+    def test_publication_keeps_aligned_source_and_cleans_only_old_installers(self):
+        calls = []
+        def gh(*args):
+            calls.append(args)
+            if args[:2] == ("api", f"repos/{REPOSITORY}/git/ref/tags/rolling"):
+                return json.dumps({"object": {"sha": SHA}})
+            if args[:3] == ("release", "view", "rolling"):
+                return json.dumps({"assets": [{"name": name} for name in
+                    ["localweb_0.1.2_amd64.deb", "notes.txt", *publisher.CURRENT_ASSETS]]})
+            return ""
+        with patch.object(publisher.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)), \
+             patch.object(publisher, "gh", side_effect=gh):
+            publisher.publish(Path("output"), Path("notes.md"), REPOSITORY, SHA)
+        deletes = [args for args in calls if args[:2] == ("release", "delete-asset")]
+        self.assertEqual(deletes, [("release", "delete-asset", "rolling", "localweb_0.1.2_amd64.deb", "--yes")])
+        self.assertEqual(calls[0][:2], ("release", "upload"))
+        self.assertFalse(any("PATCH" in args for args in calls))
+
 
 if __name__ == "__main__":
     unittest.main()
