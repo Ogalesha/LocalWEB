@@ -73,6 +73,7 @@ fn main() -> Result<()> {
         "sync-hosts" => sync_hosts(input_file.as_deref()),
         "install-ca" => install_ca(input_file.as_deref()),
         "remove-ca" => remove_ca(input_file.as_deref()),
+        #[cfg(all(unix, not(target_os = "macos")))]
         "set-gateway-cap" => set_gateway_cap(),
         "register-paths" => register_paths(input_file.as_deref()),
         "remove-integration" => remove_system_integration(),
@@ -202,7 +203,7 @@ fn runtime_parent(uid: u32, _runtime: &Path) -> PathBuf {
 fn runtime_parent(uid: u32, runtime: &Path) -> Result<PathBuf> {
     let reported =
         std::env::var_os("LOCALWEB_RUNTIME_DIR").context("LOCALWEB_RUNTIME_DIR is required")?;
-    if PathBuf::from(reported) != runtime {
+    if Path::new(&reported) != runtime {
         bail!("runtime directory does not match the registration request");
     }
     let parent = runtime
@@ -380,11 +381,6 @@ fn remove_ca(input: Option<&Path>) -> Result<()> {
     }
     fs::remove_file(&trust)?;
     store.untrust_certificate()?;
-    Ok(())
-}
-
-#[cfg(any(target_os = "macos", windows))]
-fn set_gateway_cap() -> Result<()> {
     Ok(())
 }
 
