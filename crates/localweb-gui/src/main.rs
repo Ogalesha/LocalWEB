@@ -330,12 +330,14 @@ impl LocalWebApp {
                             DAEMON_REQUEST_TIMEOUT
                         };
                         tokio::time::timeout(reply_timeout, send_request(&paths, request))
-                        .await
-                        .map_err(|_elapsed| {
-                            "The daemon did not reply in time. Refresh the state before retrying."
-                                .to_owned()
-                        })?
-                        .map_err(|error| error.to_string())
+                            .await
+                            .map_err(|_elapsed| {
+                                format!(
+                                    "{}. Refresh before trying again.",
+                                    localweb_core::copy::NO_RESPONSE
+                                )
+                            })?
+                            .map_err(|error| error.to_string())
                     })
                 });
             let _ = sender.send(GuiEvent::Response {
@@ -626,15 +628,7 @@ impl LocalWebApp {
     )]
     fn sidebar(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang;
-        let status_label = if self.connection == Connection::Checking {
-            lang.checking_status()
-        } else if self.daemon_online {
-            lang.nav_running()
-        } else if self.connection != Connection::Stopped {
-            lang.daemon_unavailable()
-        } else {
-            lang.nav_stopped()
-        };
+        let status_label = self.connection_label();
         egui::Panel::left("navigation")
             .exact_size(RAIL_WIDTH)
             .resizable(false)
@@ -917,7 +911,7 @@ impl LocalWebApp {
             ui.label(if self.daemon_online {
                 lang.loading_projects()
             } else {
-                lang.stopped_body()
+                lang.projects_offline()
             });
         } else if self.projects.is_empty() {
             if empty_card(
@@ -981,7 +975,12 @@ impl LocalWebApp {
         };
         let ca_installable =
             self.daemon_online && self.ca.as_ref().is_some_and(|ca| ca.exists && !ca.trusted);
-        let (title, body) = if ca_untrusted {
+        let (title, body) = if !self.daemon_online
+            && self.needs_setup()
+            && state != EnvironmentState::Checking
+        {
+            (lang.setup_required(), lang.setup_body())
+        } else if ca_untrusted {
             (lang.ca_callout_title(), lang.ca_callout_body())
         } else {
             match state {
@@ -1050,12 +1049,14 @@ impl LocalWebApp {
                 ui.vertical(|ui| {
                     ui.label(strong(if self.connection == Connection::Checking {
                         lang.checking_status()
+                    } else if self.needs_setup() {
+                        lang.setup_required()
                     } else if self.connection == Connection::Stopped {
                         lang.stopped_title()
                     } else {
                         lang.daemon_unavailable()
                     }));
-                    ui.label(RichText::new(lang.stopped_body()).color(INK_MUTED));
+                    ui.label(RichText::new(self.offline_help()).color(INK_MUTED));
                 });
             });
             ui.add_space(14.0);
@@ -1509,7 +1510,7 @@ impl LocalWebApp {
             format!(
                 "{} · {}",
                 lang.cache_name(item.project.cache),
-                Lang::supervisor_tag()
+                lang.supervisor_tag()
             )
         } else {
             lang.cache_name(item.project.cache).to_owned()
@@ -2555,6 +2556,32 @@ impl LocalWebApp {
         self.paths
             .as_ref()
             .is_some_and(|paths| paths.config.join("config.toml").is_file())
+    }
+
+    fn needs_setup(&self) -> bool {
+        self.paths.is_some() && !self.setup_complete()
+    }
+
+    fn connection_label(&self) -> &'static str {
+        if self.connection == Connection::Checking {
+            self.lang.checking_status()
+        } else if self.daemon_online {
+            self.lang.nav_running()
+        } else if self.needs_setup() {
+            self.lang.setup_required()
+        } else if self.connection == Connection::Stopped {
+            self.lang.nav_stopped()
+        } else {
+            self.lang.daemon_unavailable()
+        }
+    }
+
+    fn offline_help(&self) -> &'static str {
+        if self.needs_setup() {
+            self.lang.setup_body()
+        } else {
+            self.lang.stopped_body()
+        }
     }
 
     fn domain_suffix(&self) -> String {

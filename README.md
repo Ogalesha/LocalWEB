@@ -102,7 +102,7 @@ sudo apt install ./localweb_0.1.3_amd64.deb          # Ubuntu
 sudo pacman -U ./localweb-0.1.3-1-x86_64.pkg.tar.zst # Arch / Omarchy
 ```
 
-Open the desktop app and choose **Set up LocalWeb**, then **Install CA**.
+Open the desktop app and choose **Set up LocalWeb**, then **Trust certificate**.
 Or use the same workflow from a terminal:
 
 ```bash
@@ -131,10 +131,10 @@ CLI:
 | Create | **Add project** | `localweb project add <path>` |
 | Read | **Details** on the project row, or `localweb project list` | `localweb project info <name>` |
 | Update | **Edit** on the project row | `localweb project update <name>` |
-| Delete | **Delete** on the project row | `localweb project remove <name>` |
+| Delete | **Remove** on the project row | `localweb project remove <name>` |
 
 The row actions are always visible, including in the narrow stacked layout.
-**Edit** opens the full settings form; **Delete** asks for confirmation.
+**Edit** opens the full settings form; **Remove** asks for confirmation.
 Deleting an active project stops it first, then removes its LocalWeb
 configuration, local domain and project-owned runtime artifacts. The source
 folder and database data are always retained.
@@ -235,8 +235,8 @@ localweb shutdown
 ```
 
 Closing the desktop window keeps LocalWeb running in the system tray on
-Linux, macOS and Windows. Clicking the tray icon shows **Open** and **Quit**:
-**Open** restores the window, while **Quit** closes the desktop app only.
+Linux, macOS and Windows. Clicking the tray icon shows **Open** and **Quit desktop app**:
+**Open** restores the window, while **Quit desktop app** closes the desktop app only.
 The daemon and running projects keep working, so **Stop LocalWeb** remains
 the way to stop the managed environment; **Stop** on a project affects that
 project. On a Linux desktop without a StatusNotifier watcher, closing the

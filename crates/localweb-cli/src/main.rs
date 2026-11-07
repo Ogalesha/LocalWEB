@@ -2,7 +2,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use localweb_core::{
     Cache, Database, ExecutionSpec, NewProject, Paths, Profile, Project, Request, Response,
-    SupervisorConfig, WebServer, certificate::CaPaths, hosts::HostsSync, send_request,
+    SupervisorConfig, WebServer, certificate::CaPaths, copy, hosts::HostsSync, send_request,
 };
 use std::{
     ffi::OsString,
@@ -16,11 +16,7 @@ use std::{
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 #[derive(Parser)]
-#[command(
-    name = "localweb",
-    version,
-    about = "Native Linux local web development manager"
-)]
+#[command(name = "localweb", version, about = "Run local web projects")]
 struct Cli {
     #[command(subcommand)]
     command: CommandKind,
@@ -32,72 +28,89 @@ struct Cli {
 )]
 #[derive(Subcommand)]
 enum CommandKind {
+    #[command(about = "Set up LocalWeb")]
     Setup,
+    #[command(about = "Start LocalWeb")]
     Start,
+    #[command(about = "Stop LocalWeb and running projects")]
     Shutdown,
+    #[command(about = "Show LocalWeb status")]
     Status {
         #[arg(long)]
         json: bool,
     },
+    /// Check setup and suggest fixes.
     Doctor,
+    /// Run the project's PHP.
     Php {
         name: String,
         #[arg(last = true)]
         args: Vec<OsString>,
     },
+    /// Run Composer with the project's PHP.
     Composer {
         name: String,
         #[arg(last = true)]
         args: Vec<OsString>,
     },
+    /// Run the project's Node.js.
     Node {
         name: String,
         #[arg(last = true)]
         args: Vec<OsString>,
     },
+    /// Run the project's npm.
     Npm {
         name: String,
         #[arg(last = true)]
         args: Vec<OsString>,
     },
+    /// Run the project's npx.
     Npx {
         name: String,
         #[arg(last = true)]
         args: Vec<OsString>,
     },
+    /// Run a command in a project.
     Exec {
         name: String,
         #[arg(last = true, required = true)]
         command: Vec<OsString>,
     },
-    Shell {
-        name: String,
-    },
+    /// Open a project shell.
+    Shell { name: String },
+    /// Show project connection settings.
     Env {
         name: String,
         #[arg(long, value_enum, default_value_t = EnvFormat::Human)]
         format: EnvFormat,
     },
+    /// Manage HTTPS certificates.
     Ca {
         #[command(subcommand)]
         command: CaCommand,
     },
+    /// Sync local domains.
     Hosts {
         #[command(subcommand)]
         command: HostsCommand,
     },
+    /// Add and manage projects.
     Project {
         #[command(subcommand)]
         command: ProjectCommand,
     },
+    #[command(about = "Start LocalWeb at login")]
     Autostart {
         #[command(subcommand)]
         command: Toggle,
     },
+    /// List available runtimes.
     Runtime {
         #[command(subcommand)]
         command: RuntimeCommand,
     },
+    #[command(about = "Manage this account's LocalWeb data")]
     Data {
         #[command(subcommand)]
         command: DataCommand,
@@ -106,7 +119,7 @@ enum CommandKind {
 
 #[derive(Subcommand)]
 enum DataCommand {
-    /// Permanently delete this account's `LocalWeb` data after confirmation.
+    #[command(about = "Permanently delete this account's LocalWeb data")]
     Purge {
         #[arg(long)]
         dry_run: bool,
@@ -123,8 +136,11 @@ enum Toggle {
 
 #[derive(Subcommand)]
 enum CaCommand {
+    /// Check HTTPS certificate trust.
     Status,
+    #[command(about = "Trust the LocalWeb HTTPS certificate")]
     Install,
+    /// Remove HTTPS certificate trust.
     Remove,
 }
 
@@ -140,10 +156,12 @@ enum RuntimeCommand {
 
 #[derive(Subcommand)]
 enum ProjectCommand {
+    /// List projects and their status.
     List {
         #[arg(long)]
         json: bool,
     },
+    /// Add an existing source folder.
     #[command(visible_alias = "create")]
     Add {
         path: PathBuf,
@@ -158,23 +176,23 @@ enum ProjectCommand {
         /// PHP version for both CLI and FPM.
         #[arg(long, value_parser = localweb_core::PHP_VERSIONS)]
         php: Option<String>,
-        /// Node.js version; 24 is included, 20/22 need a matching installation.
+        /// Node.js version. Includes 24; 20/22 need a matching installation.
         #[arg(long, value_parser = ["20", "22", "24"])]
         node: Option<String>,
         #[arg(long = "db")]
         database: Option<DbArg>,
         #[arg(long)]
         cache: Option<CacheArg>,
-        /// Composer major version (currently 2 only).
+        /// Composer version (2 only).
         #[arg(long, value_parser = ["2"])]
         composer: Option<String>,
-        /// Enable the detected Laravel or Symfony worker preset (other apps need a custom command).
+        /// Run the Laravel/Symfony worker preset. Other apps need a custom command.
         #[arg(long)]
         supervisor: bool,
-        /// Worker executable. Use @php for the project's selected PHP CLI.
+        /// Worker executable. Use @php for project PHP.
         #[arg(long = "supervisor-command")]
         supervisor_command: Option<String>,
-        /// One literal worker argument; repeat for multiple arguments.
+        /// One worker argument. Repeat for more.
         #[arg(
             long = "supervisor-arg",
             allow_hyphen_values = true,
@@ -185,27 +203,29 @@ enum ProjectCommand {
         /// repeat for multiple tasks. Runs while the project is active.
         #[arg(long = "cron")]
         cron: Vec<String>,
-        /// Use the framework's conventional schedule when no --cron is given.
+        /// Use the app preset when --cron is omitted.
         #[arg(long = "cron-preset")]
         cron_preset: bool,
-        /// Run a private Mailpit instance for this project (dev email).
+        /// Capture test email with Mailpit.
         #[arg(long)]
         mail: bool,
-        /// Fixed loopback web port; a free port is assigned when omitted.
+        /// Local HTTP port. Assigned automatically if omitted.
         #[arg(long = "web-port", value_parser = clap::value_parser!(u16).range(1024..))]
         web_port: Option<u16>,
-        /// Fixed loopback database port; a free port is assigned when omitted.
+        /// Local database port. Assigned automatically if omitted.
         #[arg(long = "db-port", value_parser = clap::value_parser!(u16).range(1024..))]
         database_port: Option<u16>,
-        #[arg(long)]
+        #[arg(long, help = "Start this project when LocalWeb starts")]
         autostart: bool,
     },
+    /// Show project settings and status.
     #[command(visible_alias = "show")]
     Info {
         name: String,
         #[arg(long)]
         json: bool,
     },
+    /// Change project settings.
     #[command(visible_alias = "edit")]
     Update {
         name: String,
@@ -218,14 +238,14 @@ enum ProjectCommand {
         /// PHP version for both CLI and FPM.
         #[arg(long, value_parser = localweb_core::PHP_VERSIONS)]
         php: Option<String>,
-        /// Node.js version; 24 is included, 20/22 need a matching installation.
+        /// Node.js version. Includes 24; 20/22 need a matching installation.
         #[arg(long, value_parser = ["20", "22", "24"])]
         node: Option<String>,
         #[arg(long = "db")]
         database: Option<DbArg>,
         #[arg(long)]
         cache: Option<CacheArg>,
-        /// Composer major version (currently 2 only).
+        /// Composer version (2 only).
         #[arg(long, value_parser = ["2"])]
         composer: Option<String>,
         /// Enable the detected Laravel or Symfony worker preset.
@@ -237,7 +257,7 @@ enum ProjectCommand {
         /// Replace the worker executable; implies --supervisor.
         #[arg(long = "supervisor-command", conflicts_with = "no_supervisor")]
         supervisor_command: Option<String>,
-        /// One literal worker argument; repeat for multiple arguments.
+        /// One worker argument. Repeat for more.
         #[arg(
             long = "supervisor-arg",
             allow_hyphen_values = true,
@@ -247,40 +267,42 @@ enum ProjectCommand {
         /// Replace the enabled scheduled tasks; repeat for multiple tasks.
         #[arg(long = "cron", conflicts_with = "clear_cron")]
         cron: Vec<String>,
-        /// Use the framework's conventional schedule when no --cron is given.
+        /// Use the app preset when --cron is omitted.
         #[arg(long = "cron-preset", conflicts_with = "clear_cron")]
         cron_preset: bool,
         /// Remove every scheduled task, including disabled ones.
         #[arg(long = "clear-cron", conflicts_with_all = ["cron", "cron_preset"])]
         clear_cron: bool,
-        /// Run a private Mailpit instance for this project.
+        /// Capture test email with Mailpit.
         #[arg(long, conflicts_with = "no_mail")]
         mail: bool,
         /// Disable Mailpit for this project.
         #[arg(long = "no-mail", conflicts_with = "mail")]
         no_mail: bool,
-        /// Start the project on login.
-        #[arg(long, conflicts_with = "no_autostart")]
+        #[arg(
+            long,
+            conflicts_with = "no_autostart",
+            help = "Start the project when LocalWeb starts"
+        )]
         autostart: bool,
-        /// Do not start the project on login.
-        #[arg(long = "no-autostart", conflicts_with = "autostart")]
+        #[arg(
+            long = "no-autostart",
+            conflicts_with = "autostart",
+            help = "Keep the project stopped when LocalWeb starts"
+        )]
         no_autostart: bool,
         #[arg(long)]
         json: bool,
     },
-    Start {
-        name: String,
-    },
-    Stop {
-        name: String,
-    },
-    Restart {
-        name: String,
-    },
+    /// Start a project.
+    Start { name: String },
+    /// Stop a project.
+    Stop { name: String },
+    /// Restart a project.
+    Restart { name: String },
+    /// Remove a project. Keep source files and databases.
     #[command(visible_alias = "delete")]
-    Remove {
-        name: String,
-    },
+    Remove { name: String },
 }
 
 #[derive(Clone, Debug, Default)]
@@ -371,11 +393,11 @@ async fn project_status(paths: &Paths, name: &str) -> Result<localweb_core::Proj
         },
     )
     .await
-    .context("cannot reach localwebd; run `localweb start` first")?;
+    .context("Can't reach LocalWeb. Run `localweb start`.")?;
     match response {
         Response::Project(status) => Ok(status),
         Response::Error { code, message } => bail!("{code}: {message}"),
-        _ => bail!("unexpected daemon response"),
+        _ => bail!(copy::UNEXPECTED_RESPONSE),
     }
 }
 
@@ -720,12 +742,14 @@ async fn main() -> Result<()> {
     };
     let response = send_request(&paths, request)
         .await
-        .context("cannot reach localwebd; run `localweb start` first")?;
+        .context("Can't reach LocalWeb. Run `localweb start`.")?;
     if let Response::Error { code, message } = &response {
         bail!("{code}: {message}");
     }
     if sync_after {
-        sync_hosts(&paths).await.context("project configuration saved, but /etc/hosts synchronization failed; run `localweb hosts sync`")?;
+        sync_hosts(&paths)
+            .await
+            .context("Project saved, but domain sync failed. Run `localweb hosts sync`.")?;
     }
     match response {
         other if json => println!("{}", serde_json::to_string_pretty(&other)?),
@@ -742,7 +766,7 @@ async fn main() -> Result<()> {
                 "stopped".to_owned()
             };
             println!(
-                "Daemon: running\nGateway: {gateway}\nProjects: {} total, {} active",
+                "LocalWeb: running\nHTTPS gateway: {gateway}\nProjects: {} total, {} running",
                 status.project_count, status.active_projects
             );
         }
@@ -763,7 +787,7 @@ async fn main() -> Result<()> {
                 .web_port
                 .map_or_else(|| "-".to_owned(), |port| format!("http://127.0.0.1:{port}"));
             println!(
-                "{} ({})\nPath: {}\nDocument root: {}\nPHP: {}\nWeb: {:?}\nPublic URL: {}\nDirect URL: {}\nDatabase: {:?}\nDatabase URL: {}\nCache: {:?}\nSupervisor: {}\nState: {}",
+                "{} ({})\nSource folder: {}\nDocument root: {}\nPHP: {}\nWeb server: {:?}\nHTTPS URL: {}\nHTTP URL: {}\nDatabase: {:?}\nDatabase address: {}\nCache: {:?}\nWorker: {}\nStatus: {}",
                 item.project.name,
                 item.project.hostname,
                 item.project.path.display(),
@@ -787,17 +811,21 @@ async fn main() -> Result<()> {
         }
         Response::Message(message) => println!("{message}"),
         Response::Ca(status) => println!(
-            "CA: {}\nSystem trust: {}\nBrave/Chromium trust: {}\nCertificate: {}",
-            if status.exists { "present" } else { "missing" },
-            if status.system_trusted {
-                "installed"
+            "HTTPS certificate: {}\nSystem trust: {}\nBrowser trust: {}\nCertificate file: {}",
+            if status.exists {
+                "available"
             } else {
-                "not installed"
+                "missing"
+            },
+            if status.system_trusted {
+                "trusted"
+            } else {
+                "not trusted"
             },
             if status.browser_trusted {
-                "installed"
+                "trusted"
             } else {
-                "not installed"
+                "not trusted"
             },
             status.certificate.display()
         ),
@@ -827,7 +855,7 @@ async fn start_daemon(paths: &Paths) -> Result<()> {
     // Restart so a stale daemon left behind by a package upgrade is replaced.
     localweb_core::service::restart_daemon()?;
     wait_for_daemon(paths).await?;
-    println!("LocalWeb daemon started");
+    println!("{}", copy::LOCALWEB_STARTED);
     Ok(())
 }
 
@@ -842,10 +870,10 @@ async fn wait_for_daemon(paths: &Paths) -> Result<()> {
         {
             Ok(Ok(_)) => return Ok(()),
             Ok(Err(error)) => error.to_string(),
-            Err(_) => "the daemon did not reply in time".to_owned(),
+            Err(_) => copy::NO_RESPONSE.to_owned(),
         };
         if tokio::time::Instant::now() >= deadline {
-            bail!("LocalWeb daemon did not become ready: {error}");
+            bail!("LocalWeb didn't start: {error}");
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
@@ -859,11 +887,11 @@ fn setup(paths: &Paths) -> Result<()> {
     localweb_core::service::write_user_units(paths)?;
     if cfg!(target_os = "macos") {
         println!(
-            "LocalWeb directories, CA, and launch agents installed. Run `localweb ca install`, then `localweb start`. Login autostart is enabled; disable it with `localweb autostart disable`."
+            "Setup complete. Run `localweb ca install`, then `localweb start`. Login autostart is on; turn it off with `localweb autostart disable`."
         );
     } else {
         println!(
-            "LocalWeb directories, CA, and user service installed. Run `localweb ca install`, then `localweb start`. Login autostart remains disabled."
+            "Setup complete. Run `localweb ca install`, then `localweb start`. Login autostart is off."
         );
     }
     Ok(())
@@ -892,11 +920,11 @@ enum ExecutionKind {
 async fn execute_project(paths: &Paths, name: &str, kind: ExecutionKind) -> Result<()> {
     let response = send_request(paths, Request::ResolveExecution { name: name.into() })
         .await
-        .context("cannot resolve project runtime; start localwebd first")?;
+        .context("Can't load the project runtime. Run `localweb start`.")?;
     let spec = match response {
         Response::Execution(spec) => spec,
         Response::Error { code, message } => bail!("{code}: {message}"),
-        _ => bail!("unexpected daemon response"),
+        _ => bail!(copy::UNEXPECTED_RESPONSE),
     };
     let status = run_execution(name, spec, kind)?;
     if !status.success() {
@@ -1025,16 +1053,14 @@ async fn data_purge(paths: &Paths, dry_run: bool, yes: bool) -> Result<()> {
         .await
         .is_ok()
     {
-        bail!("the LocalWeb daemon is running; run `localweb shutdown` before purging data");
+        bail!("LocalWeb is running. Run `localweb shutdown` before purging data.");
     }
     #[cfg(unix)]
     if localweb_core::current_uid() == 0 {
         bail!("run `localweb data purge` as the account that owns the data, not as root");
     }
     if CaPaths::new(paths).cert.is_file() {
-        println!(
-            "note: the LocalWeb CA is still installed in the system trust store; run `localweb ca remove` first if you want to revoke it"
-        );
+        println!("Run `localweb ca remove` before purging to revoke HTTPS trust.");
     }
     let targets = [
         ("configuration", paths.config.clone()),
@@ -1080,7 +1106,7 @@ async fn data_purge(paths: &Paths, dry_run: bool, yes: bool) -> Result<()> {
         existing.push((label, path, size));
     }
     if existing.is_empty() {
-        println!("No LocalWeb data directories exist for this account");
+        println!("No LocalWeb data found for this account.");
         return Ok(());
     }
     println!("LocalWeb data for this account:");
@@ -1088,7 +1114,7 @@ async fn data_purge(paths: &Paths, dry_run: bool, yes: bool) -> Result<()> {
         println!("  {label:14} {:>10}  {}", human_size(*size), path.display());
     }
     if dry_run {
-        println!("Dry run: nothing was deleted");
+        println!("Dry run. No files deleted.");
         return Ok(());
     }
     if !yes {
@@ -1108,7 +1134,7 @@ async fn data_purge(paths: &Paths, dry_run: bool, yes: bool) -> Result<()> {
             .with_context(|| format!("cannot remove {label} directory {}", path.display()))?;
         println!("Removed {label}: {}", path.display());
     }
-    println!("LocalWeb data for this account was purged");
+    println!("LocalWeb data deleted for this account.");
     Ok(())
 }
 
@@ -1155,18 +1181,18 @@ fn install_ca(paths: &Paths) -> Result<()> {
     ca.ensure_ca()?;
     run_helper("install-ca", &std::fs::read(&ca.cert)?)?;
     localweb_core::platform::install_browser_ca(&ca.cert)?;
-    println!("LocalWeb Development CA installed for the system and Chromium-family browsers");
+    println!("{}", copy::HTTPS_TRUSTED);
     Ok(())
 }
 
 fn remove_ca(paths: &Paths) -> Result<()> {
     let ca = CaPaths::new(paths);
     if !ca.cert.is_file() {
-        bail!("this account has no LocalWeb CA");
+        bail!("No LocalWeb HTTPS certificate found for this account.");
     }
     localweb_core::platform::remove_browser_ca()?;
     run_helper("remove-ca", &std::fs::read(&ca.cert)?)?;
-    println!("LocalWeb Development CA removed from system and browser trust stores");
+    println!("{}", copy::HTTPS_TRUST_REMOVED);
     Ok(())
 }
 
@@ -1174,7 +1200,7 @@ async fn sync_hosts(paths: &Paths) -> Result<()> {
     let projects = match send_request(paths, Request::ProjectList).await? {
         Response::Projects(items) => items,
         Response::Error { code, message } => bail!("{code}: {message}"),
-        _ => bail!("unexpected daemon response"),
+        _ => bail!(copy::UNEXPECTED_RESPONSE),
     };
     let names: Vec<_> = projects
         .into_iter()
@@ -1185,17 +1211,14 @@ async fn sync_hosts(paths: &Paths) -> Result<()> {
             .gateway_bind_address
             .unwrap_or(localweb_core::hosts::DEFAULT_GATEWAY_ADDRESS),
         Response::Error { code, message } => bail!("{code}: {message}"),
-        _ => bail!("unexpected daemon response"),
+        _ => bail!(copy::UNEXPECTED_RESPONSE),
     };
     let request = HostsSync {
         address,
         domains: names,
     };
     run_helper("sync-hosts", &serde_json::to_vec(&request)?)?;
-    println!(
-        "Synchronized {} exact LocalWeb hostnames to {address}",
-        request.domains.len()
-    );
+    println!("{}", copy::domains_synced(request.domains.len(), address));
     Ok(())
 }
 

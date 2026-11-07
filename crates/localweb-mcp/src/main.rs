@@ -85,7 +85,7 @@ fn initialize(params: &Value) -> Value {
             "title": "LocalWeb",
             "version": env!("CARGO_PKG_VERSION"),
         },
-        "instructions": "LocalWeb manages local development projects (PHP, Node.js, nginx, Apache, MariaDB, MySQL, PostgreSQL, Redis, Mailpit). Every project is served directly over HTTP on a fixed loopback port and can also answer on its HTTPS hostname when port 443 is free. Typical flow: call localweb_status; if the daemon is down call localweb_daemon_start; register a folder with localweb_project_add; call localweb_project_start; run framework commands such as composer install or automated tests with localweb_project_exec.",
+        "instructions": "Check localweb_status first. If needed, start LocalWeb with localweb_daemon_start. Add a folder with localweb_project_add, start it with localweb_project_start, and run commands with localweb_project_exec. Use the returned project URLs for HTTP and HTTPS.",
     })
 }
 

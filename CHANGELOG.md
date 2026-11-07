@@ -8,7 +8,7 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
-- Explicit **Details**, **Edit** and **Delete** actions on every desktop project row, with 44 px targets, tooltips, accessible names and labeled controls in the stacked layout.
+- Explicit **Details**, **Edit** and **Remove** actions on every desktop project row, with 44 px targets, tooltips, accessible names and labeled controls in the stacked layout.
 - `localweb project update <name>` changes only the supplied settings and preserves the project identity, path, hostname, environment, resources and creation time; `create`, `show`, `edit` and `delete` are accepted as CRUD aliases.
 - A Linux, macOS and Windows system tray with localized **Open** and **Quit** actions; closing the window keeps LocalWeb available in the tray.
 - Adding a project while LocalWeb is stopped queues the request, starts the daemon, then creates the project automatically.
@@ -18,9 +18,23 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- Shorter English copy with shared terminology across desktop, CLI, MCP and browser errors; first launch distinguishes missing setup from an unavailable service.
+- Updated h2, rustls, rustls-webpki and Tokio to address RustSec advisories.
 - Deleting a running project stops it first, then removes its configuration, local domain and project-owned runtime artifacts while retaining source files and database data.
 - The interface palette now derives from the logo: brand blue for actions, navy for text and navigation, cyan-tinted surfaces, and darker green, amber and red state colors that keep WCAG AA contrast.
 - Native packages install the PNG desktop icon on Linux, build the macOS `.icns` from the same PNG, and include the multi-size ICO in the Windows ZIP.
+
+### Fixed
+
+- Linux service stop cancels pending worker restarts; recreating transient units applies changed commands and preserves literal arguments.
+- nginx, Apache and Redis support paths with spaces. Web servers deny hidden project files while allowing `.well-known`.
+- Enabling Redis or Mailpit on an existing project allocates missing ports without replacing credentials; concurrent requests share the same secrets.
+- Failed shutdown keeps the daemon available for retry; a disconnected client cannot prevent a successful shutdown.
+- Database proxy stop closes established connections. Protocol responses and MCP command output use bounded memory.
+- Project loading validates saved settings, daemon startup locks its endpoint, and port migration avoids collisions across web and database ranges.
+- Cron matching handles Sunday ranges, field-relative steps and alternative day restrictions correctly.
+- The repository hygiene check detects private-key headers beginning with a dash. Native regression and dependency-security checks now run in CI.
+- MCP project commands build a platform-correct PATH on Windows.
 
 ## [0.1.3] - 2026-10-26
 

@@ -212,15 +212,15 @@ async fn route_request(
     let Some(route) = app.routes.get(&hostname) else {
         return page(
             StatusCode::NOT_FOUND,
-            "Unknown LocalWeb project",
-            "No LocalWeb project owns this hostname.",
+            "Project not found",
+            "No project uses this local domain.",
         );
     };
     let Some(port) = route.upstream_port else {
         return page(
             StatusCode::SERVICE_UNAVAILABLE,
             "Project stopped",
-            "Start this project with `localweb project start`.",
+            "Start the project with `localweb project start NAME`.",
         );
     };
     if request.method() == Method::CONNECT {
@@ -264,13 +264,13 @@ async fn route_request(
         }),
         Ok(Err(_)) => page(
             StatusCode::BAD_GATEWAY,
-            "LocalWeb upstream error",
-            "The project web server did not respond.",
+            "Project unavailable",
+            "The web server didn't respond. Restart the project and check its logs.",
         ),
         Err(_) => page(
             StatusCode::GATEWAY_TIMEOUT,
-            "LocalWeb timeout",
-            "The project web server took too long to respond.",
+            "Project timed out",
+            "The web server took too long to respond. Check the project logs.",
         ),
     }
 }

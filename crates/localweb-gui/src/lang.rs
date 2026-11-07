@@ -4,7 +4,7 @@
 //! Language codes persist in a plain text file so no new dependencies are needed. Persian and
 //! Urdu wait until the text engine supports RTL/bidi layout.
 
-use localweb_core::{Cache, Database, Profile};
+use localweb_core::{Cache, Database, Profile, copy};
 use std::{fs, path::Path};
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
@@ -132,6 +132,52 @@ impl Lang {
 
     // Navigation rail.
 
+    pub fn setup_required(self) -> &'static str {
+        if self == Self::English {
+            "Setup required"
+        } else {
+            self.configure_localweb()
+        }
+    }
+
+    pub fn setup_body(self) -> &'static str {
+        match self {
+            Self::English => "Set up LocalWeb to run your projects.",
+            Self::Italiano => "Configura LocalWeb per avviare i progetti.",
+            Self::Shqip => "Konfiguro LocalWeb për të nisur projektet.",
+            Self::Spanish => "Configura LocalWeb para ejecutar tus proyectos.",
+            Self::French => "Configurez LocalWeb pour lancer vos projets.",
+            Self::Portuguese => "Configure o LocalWeb para executar os seus projetos.",
+            Self::Russian => "Настройте LocalWeb, чтобы запускать проекты.",
+            Self::Polish => "Skonfiguruj LocalWeb, aby uruchamiać projekty.",
+            Self::Ukrainian => "Налаштуйте LocalWeb, щоб запускати проєкти.",
+            Self::Turkish => "Projeleri çalıştırmak için LocalWeb’i kurun.",
+            Self::Greek => "Ρυθμίστε το LocalWeb για να εκτελέσετε έργα.",
+            Self::Hindi => "प्रोजेक्ट चलाने के लिए LocalWeb सेट अप करें।",
+            Self::Chinese => "设置 LocalWeb 以运行项目。",
+            Self::Swedish => "Konfigurera LocalWeb för att köra projekt.",
+        }
+    }
+
+    pub fn projects_offline(self) -> &'static str {
+        match self {
+            Self::English => "Projects appear when LocalWeb is running.",
+            Self::Italiano => "I progetti compaiono quando LocalWeb è avviato.",
+            Self::Shqip => "Projektet shfaqen kur LocalWeb është aktiv.",
+            Self::Spanish => "Los proyectos aparecen cuando LocalWeb está en ejecución.",
+            Self::French => "Les projets apparaissent lorsque LocalWeb fonctionne.",
+            Self::Portuguese => "Os projetos aparecem quando o LocalWeb está em execução.",
+            Self::Russian => "Проекты появятся после запуска LocalWeb.",
+            Self::Polish => "Projekty pojawią się po uruchomieniu LocalWeb.",
+            Self::Ukrainian => "Проєкти з’являться після запуску LocalWeb.",
+            Self::Turkish => "Projeler LocalWeb çalışırken görünür.",
+            Self::Greek => "Τα έργα εμφανίζονται όταν εκτελείται το LocalWeb.",
+            Self::Hindi => "LocalWeb चलने पर प्रोजेक्ट दिखाई देंगे।",
+            Self::Chinese => "运行 LocalWeb 后将显示项目。",
+            Self::Swedish => "Projekt visas när LocalWeb körs.",
+        }
+    }
+
     pub fn nav_dashboard(self) -> &'static str {
         match self {
             Self::English => "Overview",
@@ -210,7 +256,7 @@ impl Lang {
 
     pub fn nav_close_note(self) -> &'static str {
         match self {
-            Self::English => "Closing this window keeps sites running.",
+            Self::English => "Closing the window keeps projects running.",
             Self::Italiano => "Chiudendo questa finestra i siti restano attivi.",
             Self::Shqip => "Mbyllja e kësaj dritareje i lë faqet aktive.",
             Self::Spanish => "Cerrar esta ventana mantiene los sitios activos.",
@@ -229,7 +275,7 @@ impl Lang {
 
     pub fn nav_running(self) -> &'static str {
         match self {
-            Self::English => "LocalWeb connected",
+            Self::English => copy::RUNNING,
             Self::Italiano => "LocalWeb connesso",
             Self::Shqip => "LocalWeb i lidhur",
             Self::Spanish => "LocalWeb conectado",
@@ -248,7 +294,7 @@ impl Lang {
 
     pub fn nav_stopped(self) -> &'static str {
         match self {
-            Self::English => "LocalWeb stopped",
+            Self::English => copy::STOPPED,
             Self::Italiano => "LocalWeb fermo",
             Self::Shqip => "LocalWeb i ndaluar",
             Self::Spanish => "LocalWeb detenido",
@@ -388,7 +434,7 @@ impl Lang {
 
     pub fn ca_callout_title(self) -> &'static str {
         match self {
-            Self::English => "HTTPS needs one more step",
+            Self::English => "Local HTTPS",
             Self::Italiano => "HTTPS richiede ancora un passaggio",
             Self::Shqip => "HTTPS kërkon ende një hap",
             Self::Spanish => "HTTPS requiere un paso más",
@@ -408,7 +454,7 @@ impl Lang {
     pub fn ca_callout_body(self) -> &'static str {
         match self {
             Self::English => {
-                "Trust the LocalWeb development certificate. Your system may ask for authorization."
+                "Trust LocalWeb's certificate for HTTPS. Your system may ask for permission."
             }
             Self::Italiano => {
                 "Rendi attendibile il certificato di sviluppo LocalWeb. Il sistema può chiedere l'autorizzazione."
@@ -450,7 +496,7 @@ impl Lang {
 
     pub fn install_ca(self) -> &'static str {
         match self {
-            Self::English => "Install CA",
+            Self::English => "Trust certificate",
             Self::Italiano => "Installa CA",
             Self::Shqip => "Instalo CA",
             Self::Spanish => "Instalar CA",
@@ -471,7 +517,7 @@ impl Lang {
 
     pub fn env_on(self) -> &'static str {
         match self {
-            Self::English => "Environment ready",
+            Self::English => "LocalWeb running",
             Self::Italiano => "Ambiente operativo",
             Self::Shqip => "Mjedisi gati",
             Self::Spanish => "Entorno listo",
@@ -490,7 +536,7 @@ impl Lang {
 
     pub fn env_off(self) -> &'static str {
         match self {
-            Self::English => "Environment stopped",
+            Self::English => copy::LOCALWEB_STOPPED,
             Self::Italiano => "Ambiente fermo",
             Self::Shqip => "Mjedisi i ndaluar",
             Self::Spanish => "Entorno detenido",
@@ -509,9 +555,7 @@ impl Lang {
 
     pub fn env_on_body(self) -> &'static str {
         match self {
-            Self::English => {
-                "LocalWeb is connected; direct HTTP ports are ready. HTTPS is available when the gateway holds port 443."
-            }
+            Self::English => "Start a project to open its local site.",
             Self::Italiano => {
                 "LocalWeb è connesso; le porte HTTP dirette sono pronte. HTTPS è disponibile quando il gateway occupa la porta 443."
             }
@@ -556,7 +600,7 @@ impl Lang {
 
     pub fn env_off_body(self) -> &'static str {
         match self {
-            Self::English => "Start LocalWeb to make projects available.",
+            Self::English => "Start LocalWeb to run your projects.",
             Self::Italiano => "Avvia LocalWeb per rendere disponibili i progetti.",
             Self::Shqip => "Nis LocalWeb për t'i bërë projektet të disponueshme.",
             Self::Spanish => "Inicia LocalWeb para que los proyectos estén disponibles.",
@@ -575,7 +619,7 @@ impl Lang {
 
     pub fn projects_summary(self, active: usize, total: usize) -> String {
         match self {
-            Self::English => format!("{active} of {total} active"),
+            Self::English => format!("{active} of {total} running"),
             Self::Italiano => format!("{active} attivi su {total}"),
             Self::Shqip => format!("{active} aktive nga {total}"),
             Self::Spanish => format!("{active} de {total} activos"),
@@ -600,7 +644,7 @@ impl Lang {
 
     pub fn stopped_title(self) -> &'static str {
         match self {
-            Self::English => "LocalWeb is stopped",
+            Self::English => copy::LOCALWEB_STOPPED,
             Self::Italiano => "LocalWeb è fermo",
             Self::Shqip => "LocalWeb është i ndaluar",
             Self::Spanish => "LocalWeb está detenido",
@@ -619,9 +663,7 @@ impl Lang {
 
     pub fn stopped_body(self) -> &'static str {
         match self {
-            Self::English => {
-                "Connect to LocalWeb to manage projects. Start it or refresh the status."
-            }
+            Self::English => "Start LocalWeb to manage projects, or refresh to check again.",
             Self::Italiano => {
                 "Connettiti a LocalWeb per gestire i progetti. Avvialo o aggiorna lo stato."
             }
@@ -662,7 +704,7 @@ impl Lang {
 
     pub fn stopped_add_body(self) -> &'static str {
         match self {
-            Self::English => "LocalWeb starts automatically when you create the project.",
+            Self::English => "Adding a project starts LocalWeb.",
             Self::Italiano => "LocalWeb si avvia automaticamente quando crei il progetto.",
             Self::Shqip => "LocalWeb niset automatikisht kur krijon projektin.",
             Self::Spanish => "LocalWeb se inicia automáticamente al crear el proyecto.",
@@ -681,7 +723,7 @@ impl Lang {
 
     pub fn search_hint(self) -> &'static str {
         match self {
-            Self::English => "Search by name, domain, or path",
+            Self::English => "Search name, domain or path",
             Self::Italiano => "Cerca per nome, dominio o percorso",
             Self::Shqip => "Kërko sipas emrit, domain-it ose shtegut",
             Self::Spanish => "Buscar por nombre, dominio o ruta",
@@ -809,7 +851,7 @@ impl Lang {
 
     pub fn empty_online(self) -> &'static str {
         match self {
-            Self::English => "Add a source folder to get started.",
+            Self::English => "Add a source folder.",
             Self::Italiano => "Aggiungi una cartella di codice sorgente per iniziare.",
             Self::Shqip => "Shto një dosje burimore për të filluar.",
             Self::Spanish => "Añade una carpeta de código fuente para empezar.",
@@ -828,7 +870,7 @@ impl Lang {
 
     pub fn empty_offline(self) -> &'static str {
         match self {
-            Self::English => "Add the first project; LocalWeb starts automatically.",
+            Self::English => "Add a project to start LocalWeb.",
             Self::Italiano => "Aggiungi il primo progetto: LocalWeb si avvia automaticamente.",
             Self::Shqip => "Shto projektin e parë; LocalWeb niset automatikisht.",
             Self::Spanish => "Añade el primer proyecto; LocalWeb se inicia automáticamente.",
@@ -904,7 +946,7 @@ impl Lang {
 
     pub fn badge_active(self) -> &'static str {
         match self {
-            Self::English => "Active",
+            Self::English => copy::RUNNING,
             Self::Italiano => "Attivo",
             Self::Shqip | Self::Swedish => "Aktiv",
             Self::Spanish => "Activo",
@@ -922,7 +964,7 @@ impl Lang {
 
     pub fn badge_stopped(self) -> &'static str {
         match self {
-            Self::English => "Stopped",
+            Self::English => copy::STOPPED,
             Self::Italiano => "Fermo",
             Self::Shqip => "I ndaluar",
             Self::Spanish => "Detenido",
@@ -996,7 +1038,7 @@ impl Lang {
 
     pub fn action_delete(self) -> &'static str {
         match self {
-            Self::English => "Delete",
+            Self::English => "Remove",
             Self::Italiano => "Elimina",
             Self::Shqip => "Fshi",
             Self::Spanish => "Eliminar",
@@ -1033,7 +1075,7 @@ impl Lang {
 
     pub fn tray_quit(self) -> &'static str {
         match self {
-            Self::English => "Quit",
+            Self::English => "Quit desktop app",
             Self::Italiano => "Esci",
             Self::Shqip => "Dil",
             Self::Spanish => "Salir",
@@ -1068,8 +1110,12 @@ impl Lang {
         }
     }
 
-    pub fn supervisor_tag() -> &'static str {
-        "Supervisor"
+    pub fn supervisor_tag(self) -> &'static str {
+        if self == Self::English {
+            copy::WORKER
+        } else {
+            self.supervisor_title()
+        }
     }
 
     // Add-project view.
@@ -1174,9 +1220,7 @@ impl Lang {
 
     pub fn edit_identity_note(self) -> &'static str {
         match self {
-            Self::English => {
-                "Path, name and domain stay fixed. Change the runtime and services here."
-            }
+            Self::English => "Edit runtime and services. Name, domain and folder stay fixed.",
             Self::Italiano => {
                 "Percorso, nome e dominio restano fissi. Qui puoi cambiare runtime e servizi."
             }
@@ -1215,7 +1259,7 @@ impl Lang {
 
     pub fn edit_restart_note(self) -> &'static str {
         match self {
-            Self::English => "Saving restarts the project if it is running.",
+            Self::English => "Running projects restart when you save.",
             Self::Italiano => "Il salvataggio riavvia il progetto se è in esecuzione.",
             Self::Shqip => "Ruajtja e rinis projektin nëse është duke u ekzekutuar.",
             Self::Spanish => "Guardar reinicia el proyecto si está en ejecución.",
@@ -1272,7 +1316,7 @@ impl Lang {
 
     pub fn source_body(self) -> &'static str {
         match self {
-            Self::English => "The folder stays yours; LocalWeb never deletes it.",
+            Self::English => "Your source files stay in this folder.",
             Self::Italiano => {
                 "La cartella resta di tua proprietà e non verrà mai eliminata da LocalWeb."
             }
@@ -1386,7 +1430,7 @@ impl Lang {
 
     pub fn profile_label(self) -> &'static str {
         match self {
-            Self::English => "Application preset",
+            Self::English => "App preset",
             Self::Italiano => "Preset applicazione",
             Self::Shqip => "Paracaktimi i aplikacionit",
             Self::Spanish => "Preajuste de aplicación",
@@ -1424,9 +1468,7 @@ impl Lang {
 
     pub fn services_body(self) -> &'static str {
         match self {
-            Self::English => {
-                "Choose the runtime and optional services. Web servers, PHP and databases are shared; Redis, Mailpit and workers are per project."
-            }
+            Self::English => "Choose PHP and the services your app needs.",
             Self::Italiano => {
                 "Scegli runtime e servizi opzionali. Web server, PHP e database sono condivisi; Redis, Mailpit e worker sono per progetto."
             }
@@ -1487,7 +1529,7 @@ impl Lang {
 
     pub fn autostart_check(self) -> &'static str {
         match self {
-            Self::English => "Start on the next LocalWeb launch",
+            Self::English => "Start when LocalWeb starts",
             Self::Italiano => "Avvia al prossimo avvio di LocalWeb",
             Self::Shqip => "Nise në nisjen tjetër të LocalWeb",
             Self::Spanish => "Iniciar en el próximo arranque de LocalWeb",
@@ -1544,8 +1586,8 @@ impl Lang {
 
     pub fn supervisor_title(self) -> &'static str {
         match self {
-            Self::English
-            | Self::Italiano
+            Self::English => copy::BACKGROUND_WORKER,
+            Self::Italiano
             | Self::Shqip
             | Self::Spanish
             | Self::French
@@ -1563,7 +1605,7 @@ impl Lang {
 
     pub fn supervisor_check(self) -> &'static str {
         match self {
-            Self::English => "Enable Supervisor for this project",
+            Self::English => "Run a background worker",
             Self::Italiano => "Attiva Supervisor per questo progetto",
             Self::Shqip => "Aktivizo Supervisor për këtë projekt",
             Self::Spanish => "Activar Supervisor para este proyecto",
@@ -1695,7 +1737,7 @@ impl Lang {
 
     pub fn supervisor_args_note(self) -> &'static str {
         match self {
-            Self::English => "Each line is a separate argument. No shell is used.",
+            Self::English => "One literal argument per line; no shell expansion.",
             Self::Italiano => "Ogni riga è un argomento separato. Non viene usata una shell.",
             Self::Shqip => "Secila rresht është argument më vete. Nuk përdoret shell.",
             Self::Spanish => "Cada línea es un argumento separado. No se usa shell.",
@@ -1733,7 +1775,7 @@ impl Lang {
 
     pub fn cron_check(self) -> &'static str {
         match self {
-            Self::English => "Run scheduled tasks with the project",
+            Self::English => "Run with the project",
             Self::Italiano => "Esegui attività pianificate con il progetto",
             Self::Shqip => "Ekzekuto detyrat e planifikuara me projektin",
             Self::Spanish => "Ejecutar tareas programadas con el proyecto",
@@ -1772,7 +1814,7 @@ impl Lang {
     pub fn cron_note(self) -> &'static str {
         match self {
             Self::English => {
-                "One per line: minutes hours day month weekday + command. @php is the project PHP. Empty uses the profile default where one exists."
+                "One per line: minute hour day month weekday command. @php uses project PHP. Blank uses the preset, if available."
             }
             Self::Italiano => {
                 "Una per riga: minuti ore giorno mese settimana + comando. @php indica il PHP del progetto. Se vuota, vale la pianificazione del profilo dove prevista."
@@ -1818,7 +1860,7 @@ impl Lang {
 
     pub fn mail_title(self) -> &'static str {
         match self {
-            Self::English => "Dev email",
+            Self::English => "Test email",
             Self::Italiano => "Email di sviluppo",
             Self::Shqip => "Email zhvillimi",
             Self::Spanish => "Email de desarrollo",
@@ -1837,7 +1879,7 @@ impl Lang {
 
     pub fn mail_check(self) -> &'static str {
         match self {
-            Self::English => "Enable Mailpit for this project",
+            Self::English => "Capture email with Mailpit",
             Self::Italiano => "Attiva Mailpit per questo progetto",
             Self::Shqip => "Aktivizo Mailpit për këtë projekt",
             Self::Spanish => "Activar Mailpit para este proyecto",
@@ -1877,7 +1919,7 @@ impl Lang {
 
     pub fn error_no_executable(self) -> &'static str {
         match self {
-            Self::English => "Provide the supervisor worker executable",
+            Self::English => "Enter a worker executable, such as @php.",
             Self::Italiano => "Indica l'eseguibile del worker supervisor",
             Self::Shqip => "Jep ekzekutuesin e worker-it supervisor",
             Self::Spanish => "Indica el ejecutable del worker supervisor",
@@ -1955,7 +1997,7 @@ impl Lang {
 
     pub fn picker_empty(self) -> &'static str {
         match self {
-            Self::English => "No subfolders. You can select this folder.",
+            Self::English => "No subfolders.",
             Self::Italiano => "Nessuna sottocartella. Puoi selezionare questa cartella.",
             Self::Shqip => "Asnjë nëndosje. Mund të zgjedhësh këtë dosje.",
             Self::Spanish => "No hay subcarpetas. Puedes seleccionar esta carpeta.",
@@ -2105,7 +2147,7 @@ impl Lang {
 
     pub fn delete_title(self) -> &'static str {
         match self {
-            Self::English => "Delete project",
+            Self::English => "Remove project",
             Self::Italiano => "Elimina progetto",
             Self::Shqip => "Fshi projektin",
             Self::Spanish => "Eliminar proyecto",
@@ -2124,11 +2166,7 @@ impl Lang {
 
     pub fn delete_body(self, name: &str) -> String {
         match self {
-            Self::English => {
-                format!(
-                    "Delete {name} from LocalWeb? If it is running, it is stopped first. The source folder and database data are kept. The local domain and project configuration are removed."
-                )
-            }
+            Self::English => copy::remove_project_prompt(name),
             Self::Italiano => {
                 format!(
                     "Eliminare {name} da LocalWeb? Se è attivo, viene prima fermato. La cartella sorgente e i dati del database restano. Il dominio locale e la configurazione del progetto vengono rimossi."
@@ -2205,7 +2243,7 @@ impl Lang {
 
     pub fn notice_setup(self) -> &'static str {
         match self {
-            Self::English => "Initial setup complete",
+            Self::English => "Setup complete",
             Self::Italiano => "Configurazione iniziale completata",
             Self::Shqip => "Konfigurimi fillestar u përfundua",
             Self::Spanish => "Configuración inicial completada",
@@ -2224,7 +2262,7 @@ impl Lang {
 
     pub fn notice_ca(self) -> &'static str {
         match self {
-            Self::English => "HTTPS CA installed on the system",
+            Self::English => copy::HTTPS_TRUSTED,
             Self::Italiano => "CA HTTPS installata nel sistema",
             Self::Shqip => "CA HTTPS u instalua në sistem",
             Self::Spanish => "CA HTTPS instalada en el sistema",
@@ -2243,7 +2281,7 @@ impl Lang {
 
     pub fn notice_started(self) -> &'static str {
         match self {
-            Self::English => "LocalWeb started",
+            Self::English => copy::LOCALWEB_STARTED,
             Self::Italiano => "LocalWeb è stato avviato",
             Self::Shqip => "LocalWeb u nis",
             Self::Spanish | Self::Portuguese => "LocalWeb iniciado",
@@ -2261,7 +2299,7 @@ impl Lang {
 
     pub fn notice_hosts(self) -> &'static str {
         match self {
-            Self::English => "Local domains synced",
+            Self::English => copy::DOMAINS_SYNCED,
             Self::Italiano => "Domini locali sincronizzati",
             Self::Shqip => "Domain-et lokale u sinkronizuan",
             Self::Spanish => "Dominios locales sincronizados",
@@ -2280,7 +2318,7 @@ impl Lang {
 
     pub fn notice_project_added(self, name: &str) -> String {
         match self {
-            Self::English => format!("Project {name} added. Syncing the local domain…"),
+            Self::English => format!("{name} added. Syncing its domain…"),
             Self::Italiano => {
                 format!("Progetto {name} aggiunto. Sincronizzo il dominio locale…")
             }
@@ -2319,7 +2357,7 @@ impl Lang {
 
     pub fn notice_project_updated(self, name: &str) -> String {
         match self {
-            Self::English => format!("Settings updated for {name}."),
+            Self::English => format!("{name} settings saved."),
             Self::Italiano => format!("Impostazioni aggiornate per {name}."),
             Self::Shqip => format!("Cilësimet u përditësuan për {name}."),
             Self::Spanish => format!("Ajustes actualizados para {name}."),
@@ -2338,7 +2376,7 @@ impl Lang {
 
     pub fn notice_unexpected(self, detail: &str) -> String {
         match self {
-            Self::English => format!("Unexpected LocalWeb response: {detail}"),
+            Self::English => format!("{}: {detail}", copy::UNEXPECTED_RESPONSE),
             Self::Italiano => format!("Risposta inattesa da LocalWeb: {detail}"),
             Self::Shqip => format!("Përgjigje e papritur nga LocalWeb: {detail}"),
             Self::Spanish => format!("Respuesta inesperada de LocalWeb: {detail}"),
@@ -2357,7 +2395,7 @@ impl Lang {
 
     pub fn notice_browser(self, error: &str) -> String {
         match self {
-            Self::English => format!("Cannot open the browser: {error}"),
+            Self::English => format!("Couldn't open the browser: {error}"),
             Self::Italiano => format!("Impossibile aprire il browser: {error}"),
             Self::Shqip => format!("Nuk hapet dot shfletuesi: {error}"),
             Self::Spanish => format!("No se puede abrir el navegador: {error}"),
@@ -2630,9 +2668,7 @@ impl Lang {
 
     pub fn maintenance_body(self) -> &'static str {
         match self {
-            Self::English => {
-                "Refresh project data, synchronize local domains, or repair the LocalWeb setup."
-            }
+            Self::English => "Refresh projects, sync domains or repair setup.",
             Self::Italiano => {
                 "Aggiorna i dati dei progetti, sincronizza i domini locali o ripara la configurazione di LocalWeb."
             }
@@ -2673,7 +2709,7 @@ impl Lang {
 
     pub fn settings_mcp_title(self) -> &'static str {
         match self {
-            Self::English => "MCP for AI assistants",
+            Self::English => "AI assistants",
             Self::Italiano => "MCP per assistenti AI",
             Self::Shqip => "MCP për asistentët AI",
             Self::Spanish => "MCP para asistentes de IA",
@@ -2692,9 +2728,7 @@ impl Lang {
 
     pub fn settings_mcp_body(self) -> &'static str {
         match self {
-            Self::English => {
-                "Connect Claude Desktop, Cursor, or another MCP client to manage projects from a conversation."
-            }
+            Self::English => "Manage projects with Claude, Cursor or another MCP client.",
             Self::Italiano => {
                 "Collega Claude Desktop, Cursor o un altro client MCP per gestire i progetti da una conversazione."
             }
@@ -2740,7 +2774,7 @@ impl Lang {
     pub fn settings_mcp_missing(self) -> &'static str {
         match self {
             Self::English => {
-                "The localweb-mcp binary was not found. Install the LocalWeb package or add it to PATH."
+                "MCP server not found. Reinstall LocalWeb or add localweb-mcp to PATH."
             }
             Self::Italiano => {
                 "Il binario localweb-mcp non è stato trovato. Installa il pacchetto LocalWeb o aggiungilo al PATH."
@@ -2803,7 +2837,7 @@ impl Lang {
 
     pub fn settings_copied(self) -> &'static str {
         match self {
-            Self::English => "MCP configuration copied.",
+            Self::English => "Configuration copied",
             Self::Italiano => "Configurazione MCP copiata.",
             Self::Shqip => "Konfigurimi MCP u kopjua.",
             Self::Spanish => "Configuración MCP copiada.",
@@ -2916,9 +2950,7 @@ impl Lang {
 
     pub fn settings_read_only(self) -> &'static str {
         match self {
-            Self::English => {
-                "Read from config.toml. Edit the file and restart LocalWeb to apply changes."
-            }
+            Self::English => "Edit config.toml, then restart LocalWeb to apply changes.",
             Self::Italiano => {
                 "Letto da config.toml. Modifica il file e riavvia LocalWeb per applicare le modifiche."
             }
@@ -2980,7 +3012,7 @@ impl Lang {
 
     pub fn operation_failed(self) -> &'static str {
         match self {
-            Self::English => "Operation failed. Review the details and retry.",
+            Self::English => "Action failed. Check the details below.",
             Self::Italiano => "Operazione non riuscita. Consulta i dettagli e riprova.",
             Self::Shqip => "Veprimi dështoi. Kontrollo hollësitë dhe provo përsëri.",
             Self::Spanish => "La operación falló. Revisa los detalles y vuelve a intentarlo.",
@@ -2998,7 +3030,7 @@ impl Lang {
     }
     pub fn ca_load_failed(self) -> &'static str {
         match self {
-            Self::English => "Certificate status unavailable. Refresh to retry.",
+            Self::English => "Couldn't check the certificate. Refresh to try again.",
             Self::Italiano => "Stato del certificato non disponibile. Aggiorna per riprovare.",
             Self::Shqip => {
                 "Statusi i certifikatës i padisponueshëm. Rifresko për të provuar përsëri."
@@ -3022,7 +3054,7 @@ impl Lang {
     }
     pub fn projects_load_failed(self) -> &'static str {
         match self {
-            Self::English => "Project list could not be refreshed. Showing the last loaded list.",
+            Self::English => "Couldn't refresh projects. Showing the previous list.",
             Self::Italiano => {
                 "Impossibile aggiornare i progetti. È mostrato l'ultimo elenco caricato."
             }
@@ -3059,7 +3091,7 @@ impl Lang {
     pub fn stop_hint(self) -> &'static str {
         match self {
             Self::English => {
-                "Stops LocalWeb and all active projects. Source files and database data are kept."
+                "Stops LocalWeb and all projects. Source files and databases are kept."
             }
             Self::Italiano => {
                 "Ferma LocalWeb e tutti i progetti attivi. Sorgenti e dati dei database restano."
@@ -3155,7 +3187,7 @@ impl Lang {
     pub fn no_search_results(self, query: &str) -> String {
         match self {
             Self::English => {
-                format!("No projects match “{query}”. Clear the search to see all projects.")
+                format!("No matches for “{query}”. Clear the search to see all projects.")
             }
             Self::Italiano => format!(
                 "Nessun progetto corrisponde a “{query}”. Azzera la ricerca per vedere tutti i progetti."
@@ -3237,7 +3269,7 @@ impl Lang {
     pub fn environment_help(self) -> &'static str {
         match self {
             Self::English => {
-                "Use these values in your app's configuration. LocalWeb does not edit your .env file."
+                "Use these values in your app's config. LocalWeb won't edit your files."
             }
             Self::Italiano => {
                 "Usa questi valori nella configurazione dell'app. LocalWeb non modifica il file .env."
@@ -3297,7 +3329,7 @@ impl Lang {
     }
     pub fn environment_failed(self) -> &'static str {
         match self {
-            Self::English => "Connection settings could not be loaded. Retry after refreshing.",
+            Self::English => "Couldn't load connection settings. Refresh and try again.",
             Self::Italiano => {
                 "Impossibile caricare i dati di connessione. Riprova dopo aver aggiornato."
             }
@@ -3402,7 +3434,7 @@ impl Lang {
             }
         } else {
             match self {
-                Self::English => "needs CLI/FPM",
+                Self::English => "CLI/FPM missing",
                 Self::Italiano => "richiede CLI/FPM",
                 Self::Shqip => "kërkon CLI/FPM",
                 Self::Spanish => "requiere CLI/FPM",
@@ -3442,7 +3474,7 @@ impl Lang {
     }
     pub fn notice_stopped(self) -> &'static str {
         match self {
-            Self::English => "LocalWeb stopped",
+            Self::English => copy::LOCALWEB_STOPPED,
             Self::Italiano => "LocalWeb fermato",
             Self::Shqip => "LocalWeb u ndalua",
             Self::Spanish => "LocalWeb detenido",
@@ -3514,7 +3546,7 @@ impl Lang {
     }
     pub fn notice_project_removed(self) -> &'static str {
         match self {
-            Self::English => "Project configuration removed",
+            Self::English => "Project removed",
             Self::Italiano => "Configurazione del progetto rimossa",
             Self::Shqip => "Konfigurimi i projektit u hoq",
             Self::Spanish => "Configuración del proyecto eliminada",
@@ -3532,7 +3564,7 @@ impl Lang {
     }
     pub fn project_options(self, worker: bool, cron: usize, mail: bool, autostart: bool) -> String {
         let yes = match self {
-            Self::English => "on",
+            Self::English => "enabled",
             Self::Italiano => "attivo",
             Self::Shqip => "aktiv",
             Self::Spanish => "activo",
@@ -3548,7 +3580,7 @@ impl Lang {
             Self::Swedish => "på",
         };
         let no = match self {
-            Self::English => "off",
+            Self::English => "disabled",
             Self::Italiano => "disattivo",
             Self::Shqip => "joaktiv",
             Self::Spanish => "inactivo",
@@ -3563,6 +3595,15 @@ impl Lang {
             Self::Chinese => "关",
             Self::Swedish => "av",
         };
+        if self == Self::English {
+            return format!(
+                "{}: {} · Scheduled tasks: {cron} · Mailpit: {} · Autostart: {}",
+                copy::WORKER,
+                if worker { yes } else { no },
+                if mail { yes } else { no },
+                if autostart { yes } else { no }
+            );
+        }
         format!(
             "{}: {} · Cron: {cron} · Mailpit: {} · {}: {}",
             self.supervisor_title(),
