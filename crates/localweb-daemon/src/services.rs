@@ -20,6 +20,10 @@ use uuid::Uuid;
 
 use crate::backend;
 
+#[cfg(all(test, target_os = "linux"))]
+#[path = "services_native_tests.rs"]
+mod native_tests;
+
 /// Port for the shared MariaDB service on the loopback interface.
 const MARIADB_PORT: u16 = 33_071;
 /// Port for the shared MySQL service on the loopback interface.
@@ -506,7 +510,7 @@ impl Services<'_> {
                 LocalWebError::Config(format!("{} has no direct web port", project.name))
             })?;
             write!(servers,
-                "server {{\n listen 127.0.0.1:{port};\n server_name {host};\n root \"{root}\";\n index index.php index.html;\n location / {{ try_files $uri $uri/ /index.php?$query_string; }}\n location ~ \\.php$ {{\n  try_files $uri =404;\n  fastcgi_pass {upstream};\n  fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;\n  fastcgi_param SCRIPT_NAME $fastcgi_script_name;\n  fastcgi_param QUERY_STRING $query_string;\n  fastcgi_param REQUEST_METHOD $request_method;\n  fastcgi_param CONTENT_TYPE $content_type;\n  fastcgi_param CONTENT_LENGTH $content_length;\n  fastcgi_param REQUEST_URI $request_uri;\n  fastcgi_param DOCUMENT_URI $document_uri;\n  fastcgi_param DOCUMENT_ROOT $document_root;\n  fastcgi_param SERVER_PROTOCOL $server_protocol;\n  fastcgi_param SERVER_NAME $server_name;\n  fastcgi_param HTTP_HOST $http_host;\n  fastcgi_param HTTPS $fastcgi_https;\n }}\n}}\n",
+                "server {{\n listen 127.0.0.1:{port};\n server_name {host};\n root \"{root}\";\n index index.php index.html;\n location / {{ try_files $uri $uri/ /index.php?$query_string; }}\n location ~ /\\.(?!well-known(?:/|$)) {{ deny all; }}\n location ~ \\.php$ {{\n  try_files $uri =404;\n  fastcgi_pass \"{upstream}\";\n  fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;\n  fastcgi_param SCRIPT_NAME $fastcgi_script_name;\n  fastcgi_param QUERY_STRING $query_string;\n  fastcgi_param REQUEST_METHOD $request_method;\n  fastcgi_param CONTENT_TYPE $content_type;\n  fastcgi_param CONTENT_LENGTH $content_length;\n  fastcgi_param REQUEST_URI $request_uri;\n  fastcgi_param DOCUMENT_URI $document_uri;\n  fastcgi_param DOCUMENT_ROOT $document_root;\n  fastcgi_param SERVER_PROTOCOL $server_protocol;\n  fastcgi_param SERVER_NAME $server_name;\n  fastcgi_param HTTP_HOST $http_host;\n  fastcgi_param HTTPS $fastcgi_https;\n }}\n}}\n",
                 host = project.hostname, root = config_path(&root), upstream = upstream,
             ).map_err(|error| LocalWebError::Config(format!("cannot render nginx server: {error}")))?;
         }
@@ -515,7 +519,7 @@ impl Services<'_> {
             fs::create_dir_all(tmp.join(sub))?;
         }
         let config = format!(
-            "pid {pid};\nerror_log {error};\nevents {{ worker_connections 256; }}\nhttp {{\n include \"{mime}\";\n access_log {access};\n map $http_x_forwarded_proto $fastcgi_https {{\n default off;\n https on;\n }}\n client_body_temp_path {tmp}/client-body;\n proxy_temp_path {tmp}/proxy;\n fastcgi_temp_path {tmp}/fastcgi;\n uwsgi_temp_path {tmp}/uwsgi;\n scgi_temp_path {tmp}/scgi;\n{servers}\n}}\n",
+            "pid \"{pid}\";\nerror_log \"{error}\";\nevents {{ worker_connections 256; }}\nhttp {{\n include \"{mime}\";\n access_log \"{access}\";\n map $http_x_forwarded_proto $fastcgi_https {{\n default off;\n https on;\n }}\n client_body_temp_path \"{tmp}/client-body\";\n proxy_temp_path \"{tmp}/proxy\";\n fastcgi_temp_path \"{tmp}/fastcgi\";\n uwsgi_temp_path \"{tmp}/uwsgi\";\n scgi_temp_path \"{tmp}/scgi\";\n{servers}\n}}\n",
             mime = config_path(&RuntimeLayout::discover().nginx_mime_types()),
             pid = config_path(&self.paths.runtime.join("services/nginx.pid")),
             error = config_path(&self.paths.state.join("logs/nginx-error.log")),
@@ -581,7 +585,7 @@ impl Services<'_> {
             })?;
             listens.insert(port);
             write!(vhosts,
-                "<VirtualHost 127.0.0.1:{port}>\n ServerName {host}\n DocumentRoot \"{root}\"\n DirectoryIndex index.php index.html\n SetEnvIf X-Forwarded-Proto \"^https$\" HTTPS=on\n <Directory \"{root}\">\n  AllowOverride None\n  Require all granted\n  RewriteEngine On\n  RewriteCond %{{REQUEST_FILENAME}} !-f\n  RewriteCond %{{REQUEST_FILENAME}} !-d\n  RewriteRule ^ index.php [QSA]\n </Directory>\n ProxyPassMatch ^/(.*\\.php(/.*)?)$ {fcgi}{root}\n</VirtualHost>\n",
+                "<VirtualHost 127.0.0.1:{port}>\n ServerName {host}\n DocumentRoot \"{root}\"\n DirectoryIndex index.php index.html\n SetEnvIf X-Forwarded-Proto \"^https$\" HTTPS=on\n <Directory \"{root}\">\n  AllowOverride None\n  Require all granted\n  RewriteEngine On\n  RewriteCond %{{REQUEST_URI}} !\\.php(?:/|$) [NC]\n  RewriteCond %{{REQUEST_FILENAME}} !-f\n  RewriteCond %{{REQUEST_FILENAME}} !-d\n  RewriteRule ^ index.php [QSA]\n </Directory>\n <LocationMatch \"/\\.(?!well-known(?:/|$))\">\n  Require all denied\n </LocationMatch>\n <FilesMatch \"^\\.(?!well-known$)\">\n  Require all denied\n </FilesMatch>\n <FilesMatch \"\\.php$\">\n  SetHandler \"proxy:{fcgi}\"\n </FilesMatch>\n</VirtualHost>\n",
                 host = project.hostname, root = config_path(&root), fcgi = fcgi,
             ).map_err(|error| LocalWebError::Config(format!("cannot render Apache vhost: {error}")))?;
         }
@@ -1033,7 +1037,8 @@ impl Services<'_> {
     }
 
     fn allocate_mail_port(&self) -> Result<u16> {
-        let used = self.used_mail_ports()?;
+        let mut used = self.used_mail_ports()?;
+        used.extend(self.used_redis_ports()?);
         for port in MAIL_SMTP_START..=MAIL_SMTP_END {
             if !used.contains(&port)
                 && TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port)).is_ok()
@@ -1064,8 +1069,7 @@ impl Services<'_> {
                 .extension()
                 .is_some_and(|extension| extension == "toml")
             {
-                let secrets: ProjectSecrets = toml::from_str(&fs::read_to_string(entry.path())?)
-                    .map_err(|error| LocalWebError::Config(error.to_string()))?;
+                let secrets = Self::load_project_secrets(&entry.path())?;
                 if let Some(smtp) = secrets.mail_smtp_port {
                     ports.insert(smtp);
                     ports.insert(smtp + MAIL_HTTP_OFFSET);
@@ -1091,7 +1095,7 @@ impl Services<'_> {
             };
             let executable = candidate.canonicalize().map_err(|error| {
                 LocalWebError::Config(format!(
-                    "cannot resolve supervisor executable {}: {error}",
+                    "Couldn't find worker executable {}: {error}",
                     candidate.display()
                 ))
             })?;
@@ -1099,7 +1103,7 @@ impl Services<'_> {
                 && !executable.starts_with(&project.path)
             {
                 return Err(LocalWebError::Config(
-                    "relative supervisor executable escapes the project directory".into(),
+                    "Relative worker executable must stay inside the project folder.".into(),
                 ));
             }
             executable
@@ -1193,12 +1197,35 @@ impl Services<'_> {
     }
 
     fn project_secrets(&self, project: &Project) -> Result<ProjectSecrets> {
+        // Environment requests and startup run on different daemon tasks.
+        // Serialize read/allocate/write so neither credentials nor port
+        // reservations can be overwritten by a concurrent request.
+        static SECRETS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = SECRETS_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let directory = self.paths.data.join("databases/projects");
         fs::create_dir_all(&directory)?;
         let file = directory.join(format!("{}.toml", project.id));
         if file.is_file() {
-            return toml::from_str(&fs::read_to_string(file)?)
-                .map_err(|error| LocalWebError::Config(error.to_string()));
+            let mut secrets = Self::load_project_secrets(&file)?;
+            let mut changed = false;
+            if project.mail && secrets.mail_smtp_port.is_none() {
+                secrets.mail_smtp_port = Some(self.allocate_mail_port()?);
+                changed = true;
+            }
+            if project.cache == Cache::Redis && secrets.redis_port.is_none() {
+                let mut used = self.used_mail_ports()?;
+                if let Some(smtp) = secrets.mail_smtp_port {
+                    used.extend([smtp, smtp + MAIL_HTTP_OFFSET]);
+                }
+                secrets.redis_port = Some(self.allocate_redis_port_excluding(&used)?);
+                changed = true;
+            }
+            if changed {
+                Self::save_project_secrets(&file, &secrets)?;
+            }
+            return Ok(secrets);
         }
         let database_name = project.name.replace('-', "_");
         validate_sql_identifier(&database_name)?;
@@ -1208,12 +1235,16 @@ impl Services<'_> {
             &project.id.simple().to_string()[..8]
         );
         let database_password = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
-        let redis_port = (project.cache == Cache::Redis)
-            .then(|| self.allocate_redis_port())
-            .transpose()?;
         let mail_smtp_port = project
             .mail
             .then(|| self.allocate_mail_port())
+            .transpose()?;
+        let mut used = BTreeSet::new();
+        if let Some(smtp) = mail_smtp_port {
+            used.extend([smtp, smtp + MAIL_HTTP_OFFSET]);
+        }
+        let redis_port = (project.cache == Cache::Redis)
+            .then(|| self.allocate_redis_port_excluding(&used))
             .transpose()?;
         let secrets = ProjectSecrets {
             schema_version: 1,
@@ -1223,15 +1254,39 @@ impl Services<'_> {
             redis_port,
             mail_smtp_port,
         };
-        let encoded = toml::to_string_pretty(&secrets)
-            .map_err(|error| LocalWebError::Config(error.to_string()))?;
-        atomic_write(&file, encoded.as_bytes(), 0o600)?;
+        Self::save_project_secrets(&file, &secrets)?;
         Ok(secrets)
     }
 
-    fn allocate_redis_port(&self) -> Result<u16> {
+    fn save_project_secrets(file: &Path, secrets: &ProjectSecrets) -> Result<()> {
+        let encoded = toml::to_string_pretty(secrets)
+            .map_err(|error| LocalWebError::Config(error.to_string()))?;
+        atomic_write(file, encoded.as_bytes(), 0o600)
+    }
+
+    fn load_project_secrets(file: &Path) -> Result<ProjectSecrets> {
+        let secrets: ProjectSecrets = toml::from_str(&fs::read_to_string(file)?)
+            .map_err(|error| LocalWebError::Config(error.to_string()))?;
+        if secrets.schema_version != 1
+            || secrets
+                .redis_port
+                .is_some_and(|port| !(REDIS_PORT_START..=REDIS_PORT_END).contains(&port))
+            || secrets
+                .mail_smtp_port
+                .is_some_and(|port| !(MAIL_SMTP_START..=MAIL_SMTP_END).contains(&port))
+        {
+            return Err(LocalWebError::Config(format!(
+                "invalid project secrets schema or service port: {}",
+                file.display()
+            )));
+        }
+        Ok(secrets)
+    }
+
+    fn allocate_redis_port_excluding(&self, reserved: &BTreeSet<u16>) -> Result<u16> {
         let mut used = self.used_redis_ports()?;
         used.extend(self.used_mail_ports()?);
+        used.extend(reserved);
         for port in REDIS_PORT_START..=REDIS_PORT_END {
             if !used.contains(&port)
                 && TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port)).is_ok()
@@ -1257,8 +1312,7 @@ impl Services<'_> {
                 .extension()
                 .is_some_and(|extension| extension == "toml")
             {
-                let secrets: ProjectSecrets = toml::from_str(&fs::read_to_string(entry.path())?)
-                    .map_err(|error| LocalWebError::Config(error.to_string()))?;
+                let secrets = Self::load_project_secrets(&entry.path())?;
                 ports.extend(secrets.redis_port);
             }
         }
@@ -1310,7 +1364,7 @@ impl Services<'_> {
             .join(format!("redis-{}", project.name));
         fs::create_dir_all(&working)?;
         let config = format!(
-            "bind 127.0.0.1\nprotected-mode yes\nport {port}\ndaemonize no\nsupervised no\nsave \"\"\nappendonly no\nmaxmemory {memory}mb\nmaxmemory-policy allkeys-lru\ndir {working}\npidfile {pid}\nlogfile {log}\n",
+            "bind 127.0.0.1\nprotected-mode yes\nport {port}\ndaemonize no\nsupervised no\nsave \"\"\nappendonly no\nmaxmemory {memory}mb\nmaxmemory-policy allkeys-lru\ndir \"{working}\"\npidfile \"{pid}\"\nlogfile \"{log}\"\n",
             memory = project.resources.cache_memory_mb,
             working = config_path(&working),
             pid = config_path(&working.join("redis.pid")),
@@ -1545,6 +1599,97 @@ fn safe_config_path(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fixture() -> (PathBuf, Paths, Project) {
+        let base = std::env::temp_dir().join(format!("localweb-services-{}", Uuid::new_v4()));
+        let paths = Paths {
+            config: base.join("config"),
+            data: base.join("data"),
+            state: base.join("state"),
+            runtime: base.join("runtime"),
+        };
+        paths.create().unwrap();
+        let source = base.join("source");
+        fs::create_dir_all(&source).unwrap();
+        let input = serde_json::from_value(serde_json::json!({
+            "path": source, "name": "demo", "hostname": "demo.test",
+            "autostart": false, "database": "mariadb"
+        }))
+        .unwrap();
+        let project = Project::from_new(input, &localweb_core::GlobalConfig::default()).unwrap();
+        (base, paths, project)
+    }
+
+    #[test]
+    fn enabling_services_allocates_missing_ports_without_changing_credentials() {
+        let (base, paths, mut project) = fixture();
+        let services = Services { paths: &paths };
+        let original = services.project_secrets(&project).unwrap();
+        assert!(original.redis_port.is_none());
+        assert!(original.mail_smtp_port.is_none());
+        project.cache = Cache::Redis;
+        project.mail = true;
+        let updated = services.project_secrets(&project).unwrap();
+        assert!(updated.redis_port.is_some());
+        assert!(updated.mail_smtp_port.is_some());
+        assert_ne!(updated.redis_port, updated.mail_smtp_port);
+        assert_eq!(updated.database_password, original.database_password);
+        assert_eq!(updated.database_user, original.database_user);
+        assert_eq!(updated.database_name, original.database_name);
+        let persisted = services.project_secrets(&project).unwrap();
+        assert_eq!(persisted.redis_port, updated.redis_port);
+        assert_eq!(persisted.mail_smtp_port, updated.mail_smtp_port);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn invalid_persisted_mail_port_is_reported_without_overflow() {
+        let (base, paths, project) = fixture();
+        let services = Services { paths: &paths };
+        let mut secrets = services.project_secrets(&project).unwrap();
+        secrets.mail_smtp_port = Some(65_535);
+        Services::save_project_secrets(
+            &paths
+                .data
+                .join(format!("databases/projects/{}.toml", project.id)),
+            &secrets,
+        )
+        .unwrap();
+        services
+            .project_secrets(&project)
+            .err()
+            .expect("invalid port was accepted");
+        services.used_mail_ports().unwrap_err();
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn concurrent_environment_requests_keep_one_set_of_credentials() {
+        let (base, paths, mut project) = fixture();
+        project.cache = Cache::Redis;
+        project.mail = true;
+        let results = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        Services { paths: &paths }
+                            .project_secrets(&project)
+                            .unwrap()
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        for secrets in &results {
+            assert_eq!(secrets.database_password, results[0].database_password);
+            assert_eq!(secrets.redis_port, results[0].redis_port);
+            assert_eq!(secrets.mail_smtp_port, results[0].mail_smtp_port);
+        }
+        fs::remove_dir_all(base).unwrap();
+    }
 
     #[test]
     fn detects_composer_packages_without_string_matching() {

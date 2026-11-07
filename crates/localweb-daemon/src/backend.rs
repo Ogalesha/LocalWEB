@@ -147,10 +147,9 @@ mod linux {
     };
 
     pub(super) fn start_or_restart(unit: &str, executable: &Path, args: &[&str]) -> Result<()> {
-        if is_active(unit) {
-            run_command("systemctl", &["--user", "restart", unit])?;
-            return Ok(());
-        }
+        // A restart keeps the old transient ExecStart and environment. Recreate
+        // the unit so changed executable paths and gateway arguments apply.
+        stop(unit)?;
         let name = format!("--unit={unit}");
         let executable = executable
             .to_str()
@@ -162,6 +161,7 @@ mod linux {
         );
         command.args([
             "--user",
+            "--expand-environment=no",
             &name,
             "--collect",
             "--property=StartLimitIntervalSec=0",
@@ -221,14 +221,25 @@ mod linux {
                 String::from_utf8_lossy(&output.stderr)
             )));
         }
-        wait_active(unit, "project supervisor")
+        wait_active(unit, "background worker")
     }
 
     pub(super) fn stop(unit: &str) -> Result<()> {
-        if is_active(unit) {
-            run_command("systemctl", &["--user", "stop", unit])?;
+        let output = Command::new("systemctl")
+            .args(["--user", "show", "--property=LoadState", "--value", unit])
+            .output()?;
+        if String::from_utf8_lossy(&output.stdout).trim() == "not-found" {
+            return Ok(());
         }
-        Ok(())
+        if !output.status.success() {
+            return Err(LocalWebError::Service(format!(
+                "cannot inspect systemd unit {unit}: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        // is-active is false during RestartSec, when a worker still has a
+        // pending restart. Stop every loaded unit to cancel that job as well.
+        run_command("systemctl", &["--user", "stop", unit])
     }
 
     pub(super) fn is_active(unit: &str) -> bool {
@@ -277,6 +288,7 @@ mod linux {
     ) -> Vec<OsString> {
         let mut arguments = vec![
             OsString::from("--user"),
+            OsString::from("--expand-environment=no"),
             OsString::from(format!("--unit={unit}")),
             OsString::from("--collect"),
             OsString::from(format!("--description=LocalWeb worker for {description}")),
@@ -303,6 +315,84 @@ mod linux {
     mod tests {
         use super::*;
 
+        struct TestUnit(String);
+
+        impl Drop for TestUnit {
+            fn drop(&mut self) {
+                let _ = stop(&self.0);
+            }
+        }
+
+        #[test]
+        #[ignore = "requires a systemd user session; creates only a temporary audit unit"]
+        fn native_systemd_replaces_arguments_and_preserves_dollar_literals() {
+            let unit = TestUnit(format!("localweb-audit-{}", uuid::Uuid::new_v4().simple()));
+            let root = std::env::current_dir()
+                .unwrap()
+                .join("target")
+                .join(&unit.0);
+            std::fs::create_dir_all(&root).unwrap();
+            let output = root.join("argv");
+            let script = "import pathlib,sys,time; pathlib.Path(sys.argv[1]).write_text(sys.argv[2]); time.sleep(30)";
+            for value in ["$HOME ${HOME} spaces; %literal", "updated arguments"] {
+                start_or_restart(
+                    &unit.0,
+                    Path::new("/usr/bin/python3"),
+                    &["-c", script, output.to_str().unwrap(), value],
+                )
+                .unwrap();
+                for _ in 0..100 {
+                    if std::fs::read_to_string(&output).is_ok_and(|text| text == value) {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(20));
+                }
+                assert_eq!(std::fs::read_to_string(&output).unwrap(), value);
+            }
+            stop(&unit.0).unwrap();
+            std::fs::remove_dir_all(root).unwrap();
+        }
+
+        #[test]
+        #[ignore = "requires a systemd user session; creates only a temporary audit unit"]
+        fn native_systemd_stop_cancels_a_pending_worker_restart() {
+            let unit = TestUnit(format!("localweb-audit-{}", uuid::Uuid::new_v4().simple()));
+            let output = Command::new("systemd-run")
+                .args([
+                    "--user",
+                    "--collect",
+                    &format!("--unit={}", unit.0),
+                    "--property=Restart=always",
+                    "--property=RestartSec=60s",
+                    "/bin/false",
+                ])
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let substate = || {
+                let output = Command::new("systemctl")
+                    .args(["--user", "show", "--property=SubState", "--value", &unit.0])
+                    .output()
+                    .unwrap();
+                String::from_utf8_lossy(&output.stdout).trim().to_owned()
+            };
+            for _ in 0..100 {
+                if substate() == "auto-restart" {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+            assert_eq!(substate(), "auto-restart");
+            assert!(!is_active(&unit.0));
+            stop(&unit.0).unwrap();
+            assert_ne!(substate(), "auto-restart");
+            assert!(!is_active(&unit.0));
+        }
+
         #[test]
         fn supervisor_arguments_never_pass_through_a_shell() {
             let arguments = supervisor_systemd_args(
@@ -315,6 +405,11 @@ mod linux {
             );
             assert!(!arguments.iter().any(|argument| argument == "sh"));
             assert!(!arguments.iter().any(|argument| argument == "-c"));
+            assert!(
+                arguments
+                    .iter()
+                    .any(|argument| argument == "--expand-environment=no")
+            );
             assert!(
                 arguments
                     .iter()
@@ -410,7 +505,7 @@ mod windows {
                 thread::sleep(Duration::from_secs(2));
             }
         });
-        wait_active(unit, "project supervisor")
+        wait_active(unit, "background worker")
     }
 
     pub(super) fn stop(unit: &str) -> Result<()> {
@@ -573,7 +668,7 @@ mod macos {
         stop(unit)?;
         let arguments: Vec<OsString> = worker_args.iter().map(OsString::from).collect();
         spawn(unit, executable, &arguments, Some(working_directory), true)?;
-        wait_active(unit, "project supervisor")
+        wait_active(unit, "background worker")
     }
 
     pub(super) fn stop(unit: &str) -> Result<()> {

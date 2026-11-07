@@ -16,4 +16,4 @@ The private runtime uses native inputs, checksum-verified official PHP source ar
 
 No user-controlled project value is ever interpolated into a shell command. Native processes start from executable paths with argument arrays. Supervisor arguments are stored as an array, capped and validated as non-empty single-line values, and passed straight to `systemd-run`; `sh -c` is never involved. Relative supervisor executables must resolve inside the project directory.
 
-Uninstall stops owned `localweb-*` services and executables below `/usr/lib/localweb`, then removes registered paths and the CA trust copy. Cleanup affects only LocalWeb-owned state and integration; source folders remain outside this boundary.
+Uninstall stops owned `localweb-*` services and executables below `/usr/lib/localweb`, then removes system integration and the CA trust copy. Per-user configuration, databases and private CA keys are preserved. `localweb data purge` deletes that account's data after confirmation.

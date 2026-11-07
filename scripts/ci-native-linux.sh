@@ -146,6 +146,7 @@ run_step verify-runtime python3 scripts/verify-runtime.py packaging/runtime-root
 run_step cargo-fmt cargo fmt --all --check
 run_step cargo-clippy cargo clippy --workspace --all-targets -- -D warnings
 run_step cargo-test cargo test --workspace
+run_step native-unit-tests env LOCALWEB_RUNTIME_ROOT="$PWD/packaging/runtime-root" cargo test -p localweb-daemon -- --ignored
 run_step gui-smoke gui_smoke
 run_step wayland-smoke wayland_smoke
 run_step wlroots-smoke wlroots_smoke

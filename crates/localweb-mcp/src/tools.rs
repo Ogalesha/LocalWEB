@@ -6,7 +6,7 @@
 
 use localweb_core::{
     Cache, Database, ExecutionSpec, NewProject, Paths, Request, Response, SupervisorConfig,
-    WebServer, certificate::CaPaths, hosts::HostsSync, parse_cron_line, send_request,
+    WebServer, certificate::CaPaths, copy, hosts::HostsSync, parse_cron_line, send_request,
     validate_php_version,
 };
 use serde::Serialize;
@@ -44,37 +44,37 @@ pub(crate) fn definitions() -> Value {
     json!([
         {
             "name": "localweb_status",
-            "description": "Reports whether the LocalWeb daemon and HTTPS gateway are running, plus configured and active project counts.",
+            "description": "Show LocalWeb, HTTPS gateway and project status.",
             "inputSchema": { "type": "object", "properties": {} },
         },
         {
             "name": "localweb_daemon_start",
-            "description": "Starts or restarts the LocalWeb user daemon and waits until it answers. Call this when other tools report that the daemon is unreachable.",
+            "description": "Start or restart LocalWeb and wait until it responds.",
             "inputSchema": { "type": "object", "properties": {} },
         },
         {
             "name": "localweb_daemon_shutdown",
-            "description": "Stops the LocalWeb daemon and every service it manages.",
+            "description": "Stop LocalWeb and its services.",
             "inputSchema": { "type": "object", "properties": {} },
         },
         {
             "name": "localweb_doctor",
-            "description": "Runs LocalWeb environment diagnostics and returns findings with suggested fixes.",
+            "description": "Check the local setup and suggest fixes.",
             "inputSchema": { "type": "object", "properties": {} },
         },
         {
             "name": "localweb_runtime_list",
-            "description": "Lists the bundled runtime components (PHP, Node.js, web servers, databases, cache, Mailpit) and whether each is available.",
+            "description": "List runtimes and their availability.",
             "inputSchema": { "type": "object", "properties": {} },
         },
         {
             "name": "localweb_projects_list",
-            "description": "Lists every configured project with hostname, path, configuration, and live running state.",
+            "description": "List projects with settings, URLs and running state.",
             "inputSchema": { "type": "object", "properties": {} },
         },
         {
             "name": "localweb_project_info",
-            "description": "Returns one project with its full configuration and live state.",
+            "description": "Show a project's settings, URLs and running state.",
             "inputSchema": {
                 "type": "object",
                 "properties": { "name": name_property },
@@ -83,13 +83,13 @@ pub(crate) fn definitions() -> Value {
         },
         {
             "name": "localweb_project_add",
-            "description": "Registers an existing folder as a LocalWeb project. Unset options use detected or global defaults. Every project receives a fixed direct HTTP port and, for network databases, a fixed loopback database port; HTTPS hostnames work when the gateway can bind port 443. After creation the system hosts file is synchronized so the hostname resolves.",
+            "description": "Add an existing folder with detected or default settings. Assign local HTTP and any required database port, then sync its domain. HTTPS needs the gateway. Domain sync may ask for administrator approval.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "Absolute path of the project folder to adopt",
+                        "description": "Absolute project folder path",
                     },
                     "name": {
                         "type": "string",
@@ -97,28 +97,28 @@ pub(crate) fn definitions() -> Value {
                     },
                     "hostname": {
                         "type": "string",
-                        "description": "Hostname served over HTTPS when the gateway is available; defaults to <name>.<domain suffix>",
+                        "description": "Local domain for HTTPS. Default: <name>.<domain suffix>",
                     },
                     "web_port": {
                         "type": "integer",
                         "minimum": 1024,
                         "maximum": 65535,
-                        "description": "Fixed loopback HTTP port; a free port from 18000-18999 is assigned when omitted",
+                        "description": "Local HTTP port. Auto-assigned from 18000-18999 if omitted",
                     },
                     "database_port": {
                         "type": "integer",
                         "minimum": 1024,
                         "maximum": 65535,
-                        "description": "Fixed loopback database port forwarded to the shared database engine; a free port from 19000-19999 is assigned when omitted",
+                        "description": "Local database proxy port. Auto-assigned from 19000-19999 if omitted",
                     },
                     "document_root": {
                         "type": "string",
-                        "description": "Document root relative to the project; defaults to the detected public folder",
+                        "description": "Document root relative to the project. Auto-detected if omitted",
                     },
                     "web": {
                         "type": "string",
                         "enum": ["nginx", "apache"],
-                        "description": "Web server; defaults to the global default",
+                        "description": "Web server. Uses the configured default if omitted",
                     },
                     "php": {
                         "type": "string",
@@ -138,26 +138,26 @@ pub(crate) fn definitions() -> Value {
                     "database": {
                         "type": "string",
                         "enum": ["none", "mariadb", "mysql", "postgres", "sqlite"],
-                        "description": "Database engine to provision",
+                        "description": "Database engine",
                     },
                     "cache": {
                         "type": "string",
                         "enum": ["none", "redis"],
-                        "description": "In-memory cache to provision",
+                        "description": "Cache service",
                     },
                     "supervisor": {
                         "type": "boolean",
-                        "description": "Enable the framework worker preset (Laravel/Symfony) or the command given in supervisor_command",
+                        "description": "Run the Laravel/Symfony worker preset or supervisor_command",
                     },
                     "supervisor_command": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "Worker executable followed by literal arguments; use @php for the project PHP CLI",
+                        "description": "Worker executable and literal arguments. @php uses project PHP",
                     },
                     "supervisor_args": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "Extra literal worker arguments appended to supervisor_command",
+                        "description": "Extra literal arguments for supervisor_command",
                     },
                     "cron": {
                         "type": "array",
@@ -166,19 +166,19 @@ pub(crate) fn definitions() -> Value {
                     },
                     "cron_preset": {
                         "type": "boolean",
-                        "description": "Add the framework conventional schedule alongside explicit cron entries",
+                        "description": "Use the app preset when cron is empty",
                     },
                     "mail": {
                         "type": "boolean",
-                        "description": "Capture project email with a private Mailpit instance",
+                        "description": "Capture test email with Mailpit",
                     },
                     "autostart": {
                         "type": "boolean",
-                        "description": "Start the project when the daemon starts on login",
+                        "description": "Start the project when LocalWeb starts",
                     },
                     "sync_hosts": {
                         "type": "boolean",
-                        "description": "Synchronize the system hosts file after adding; defaults to true",
+                        "description": "Sync domains after adding. Default: true",
                     },
                 },
                 "required": ["path"],
@@ -186,14 +186,14 @@ pub(crate) fn definitions() -> Value {
         },
         {
             "name": "localweb_project_remove",
-            "description": "Deletes a project and its managed services, then synchronizes the system hosts file.",
+            "description": "Stop and remove a project from LocalWeb, then sync domains. Keep source files and databases.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "name": name_property,
                     "sync_hosts": {
                         "type": "boolean",
-                        "description": "Synchronize the system hosts file after removal; defaults to true",
+                        "description": "Sync domains after removal. Default: true",
                     },
                 },
                 "required": ["name"],
@@ -201,7 +201,7 @@ pub(crate) fn definitions() -> Value {
         },
         {
             "name": "localweb_project_start",
-            "description": "Starts the project services (web server, PHP-FPM, database proxy, cache, worker, mail) and makes the hostname answer over HTTPS when the gateway is available.",
+            "description": "Start the project's services. Return its local HTTP and available HTTPS URLs.",
             "inputSchema": {
                 "type": "object",
                 "properties": { "name": name_property },
@@ -210,7 +210,7 @@ pub(crate) fn definitions() -> Value {
         },
         {
             "name": "localweb_project_stop",
-            "description": "Stops the project services while keeping the configuration.",
+            "description": "Stop the project. Keep its settings and data.",
             "inputSchema": {
                 "type": "object",
                 "properties": { "name": name_property },
@@ -219,7 +219,7 @@ pub(crate) fn definitions() -> Value {
         },
         {
             "name": "localweb_project_restart",
-            "description": "Restarts the project services.",
+            "description": "Restart the project.",
             "inputSchema": {
                 "type": "object",
                 "properties": { "name": name_property },
@@ -228,7 +228,7 @@ pub(crate) fn definitions() -> Value {
         },
         {
             "name": "localweb_project_environment",
-            "description": "Returns the environment variables LocalWeb exports to commands run inside the project.",
+            "description": "Return database, cache and email settings for the app.",
             "inputSchema": {
                 "type": "object",
                 "properties": { "name": name_property },
@@ -237,7 +237,7 @@ pub(crate) fn definitions() -> Value {
         },
         {
             "name": "localweb_project_exec",
-            "description": "Runs a command inside the project's managed runtime and returns its exit code, stdout, and stderr. Use @php, @composer, @node, @npm, or @npx to run tools through the exact binaries the project serves with, for example [\"@composer\", \"install\"] or [\"@php\", \"artisan\", \"test\"].",
+            "description": "Run a project command and return its exit code and output. Use @php, @composer, @node, @npm or @npx for the selected runtime, e.g. [\"@php\", \"artisan\", \"test\"].",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -249,7 +249,7 @@ pub(crate) fn definitions() -> Value {
                     },
                     "timeout_seconds": {
                         "type": "integer",
-                        "description": "Wall-clock limit in seconds; defaults to 300, maximum 3600",
+                        "description": "Time limit in seconds. Default: 300; maximum: 3600",
                     },
                 },
                 "required": ["name", "command"],
@@ -257,22 +257,22 @@ pub(crate) fn definitions() -> Value {
         },
         {
             "name": "localweb_ca_status",
-            "description": "Reports whether the LocalWeb development certificate authority exists and is trusted by the system.",
+            "description": "Check HTTPS certificate files and trust status.",
             "inputSchema": { "type": "object", "properties": {} },
         },
         {
             "name": "localweb_ca_install",
-            "description": "Creates the development CA if needed and installs it into the system trust store. Requires an interactive administrator authentication.",
+            "description": "Trust LocalWeb's HTTPS certificate. Requires administrator approval.",
             "inputSchema": { "type": "object", "properties": {} },
         },
         {
             "name": "localweb_hosts_sync",
-            "description": "Rewrites the managed block of the system hosts file with the exact hostnames of every project. Requires an interactive administrator authentication.",
+            "description": "Sync project domains in the system hosts file. Requires administrator approval.",
             "inputSchema": { "type": "object", "properties": {} },
         },
         {
             "name": "localweb_login_autostart",
-            "description": "Enables or disables starting the LocalWeb daemon automatically at login.",
+            "description": "Turn LocalWeb login autostart on or off.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -286,17 +286,17 @@ pub(crate) fn definitions() -> Value {
         },
         {
             "name": "localweb_logs",
-            "description": "Lists the daemon log files, or returns the tail of one log file such as nginx-error.log, php-8.5.log, or <project>-cron.log.",
+            "description": "List log files, or read the last lines of one file.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "file": {
                         "type": "string",
-                        "description": "Bare log file name inside the LocalWeb log directory",
+                        "description": "Log filename, without a folder path",
                     },
                     "lines": {
                         "type": "integer",
-                        "description": "Number of trailing lines to return; defaults to 200, maximum 2000",
+                        "description": "Lines from the end. Default: 200; maximum: 2000",
                     },
                 },
             },
@@ -345,10 +345,8 @@ async fn daemon(request: Request) -> Result<Response, String> {
 async fn converse(paths: &Paths, request: Request) -> Result<Response, String> {
     let response = timeout(DAEMON_TIMEOUT, send_request(paths, request))
         .await
-        .map_err(|_elapsed| "the LocalWeb daemon did not answer in time".to_owned())?
-        .map_err(|error| {
-            format!("cannot reach the LocalWeb daemon ({error}); call localweb_daemon_start first")
-        })?;
+        .map_err(|_elapsed| copy::NO_RESPONSE.to_owned())?
+        .map_err(|error| format!("Can't reach LocalWeb ({error}). Call localweb_daemon_start."))?;
     if let Response::Error { code, message } = &response {
         return Err(format!("{code}: {message}"));
     }
@@ -362,7 +360,7 @@ fn render<T: Serialize>(value: &T) -> Result<String, String> {
 
 /// Fails when a daemon reply is not the expected variant.
 fn unexpected() -> String {
-    "the daemon returned an unexpected response".to_owned()
+    copy::UNEXPECTED_RESPONSE.to_owned()
 }
 
 /// Reports daemon and gateway health; stays useful while the daemon is down.
@@ -373,7 +371,7 @@ async fn status() -> Result<String, String> {
         Err(reason) => render(&json!({
             "daemon_running": false,
             "error": reason,
-            "hint": "call localweb_daemon_start to start the daemon",
+            "hint": "Call localweb_daemon_start to start LocalWeb.",
         })),
     }
 }
@@ -382,8 +380,8 @@ async fn status() -> Result<String, String> {
 async fn daemon_start() -> Result<String, String> {
     tokio::task::spawn_blocking(localweb_core::service::restart_daemon)
         .await
-        .map_err(|error| format!("cannot start the daemon: {error}"))?
-        .map_err(|error| format!("cannot start the daemon: {error}"))?;
+        .map_err(|error| format!("Couldn't start LocalWeb: {error}"))?
+        .map_err(|error| format!("Couldn't start LocalWeb: {error}"))?;
     let paths = paths()?;
     let mut last = String::new();
     for _ in 0..20 {
@@ -394,9 +392,7 @@ async fn daemon_start() -> Result<String, String> {
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
-    Err(format!(
-        "the daemon was started but does not answer yet ({last})"
-    ))
+    Err(format!("LocalWeb did not respond after startup: {last}"))
 }
 
 /// Stops the daemon and every managed service.
@@ -561,7 +557,7 @@ async fn project_action(arguments: &Value, action: &str) -> Result<String, Strin
     };
     let response = daemon(request).await.map_err(|error| {
         if action == "start" && error.contains("hosts") {
-            format!("{error}; call localweb_hosts_sync to synchronize the hostname")
+            format!("{error}; call localweb_hosts_sync to sync local domains")
         } else {
             error
         }
@@ -599,9 +595,10 @@ async fn project_exec(arguments: &Value) -> Result<String, String> {
     };
     let (program, prefix) = resolve_program(&spec, tool)?;
     let mut process = Command::new(&program);
-    let mut path = OsString::from(spec.shim_dir.as_os_str());
-    path.push(":");
-    path.push(std::env::var_os("PATH").unwrap_or_default());
+    let path = std::env::join_paths(std::iter::once(spec.shim_dir.clone()).chain(
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+    ))
+    .map_err(|error| format!("cannot build the project PATH: {error}"))?;
     process
         .args(prefix)
         .args(extra)
@@ -693,10 +690,18 @@ fn node_binary(spec: &ExecutionSpec) -> Result<PathBuf, String> {
         .ok_or_else(|| "Node.js is not available for this project".to_owned())
 }
 
-/// Reads one child stream to the end; unreadable streams count as empty.
+/// Drains a child stream, retaining only the output cap plus a truncation byte.
+/// Continuing to drain prevents a verbose child from blocking on a full pipe.
 async fn read_stream(stream: &mut (impl AsyncReadExt + Unpin)) -> Vec<u8> {
     let mut buffer = Vec::new();
-    let _ = stream.read_to_end(&mut buffer).await;
+    let mut chunk = [0; 4_096];
+    while let Ok(count) = stream.read(&mut chunk).await {
+        if count == 0 {
+            break;
+        }
+        let keep = count.min((OUTPUT_CAP + 1).saturating_sub(buffer.len()));
+        buffer.extend_from_slice(&chunk[..keep]);
+    }
     buffer
 }
 
@@ -729,10 +734,10 @@ async fn ca_install() -> Result<String, String> {
     ca.ensure_ca().map_err(|error| error.to_string())?;
     let certificate = tokio::fs::read(&ca.cert)
         .await
-        .map_err(|error| format!("cannot read the CA certificate: {error}"))?;
+        .map_err(|error| format!("Couldn't read the HTTPS certificate: {error}"))?;
     run_helper("install-ca", certificate).await?;
     localweb_core::platform::install_browser_ca(&ca.cert).map_err(|error| error.to_string())?;
-    Ok("LocalWeb Development CA installed for the system and Chromium-family browsers".to_owned())
+    Ok(copy::HTTPS_TRUSTED.to_owned())
 }
 
 /// Rewrites the managed hosts block with every project hostname.
@@ -751,10 +756,7 @@ async fn hosts_sync() -> Result<String, String> {
     };
     let payload = serde_json::to_vec(&request).map_err(|error| error.to_string())?;
     run_helper("sync-hosts", payload).await?;
-    Ok(format!(
-        "Synchronized {} LocalWeb hostnames to {address} in the system hosts file",
-        request.domains.len()
-    ))
+    Ok(copy::domains_synced(request.domains.len(), address))
 }
 
 /// Adds the hosts synchronization outcome to a project mutation result.
@@ -766,7 +768,7 @@ async fn append_hosts_outcome(output: &mut Value) {
         Err(error) => {
             output["hosts"] = json!(format!("not synchronized: {error}"));
             output["hint"] =
-                json!("call localweb_hosts_sync once administrator authentication is available");
+                json!("Call localweb_hosts_sync when administrator approval is available.");
         }
     }
 }
@@ -948,6 +950,23 @@ fn string_array(arguments: &Value, key: &str) -> Result<Vec<String>, String> {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn verbose_commands_are_drained_with_bounded_memory() {
+        use tokio::io::AsyncWriteExt as _;
+        let (mut reader, mut writer) = tokio::io::duplex(8_192);
+        let sender = tokio::spawn(async move {
+            for _ in 0..8 {
+                writer.write_all(&vec![b'x'; OUTPUT_CAP]).await.unwrap();
+            }
+        });
+        let output = tokio::time::timeout(Duration::from_secs(2), read_stream(&mut reader))
+            .await
+            .unwrap();
+        sender.await.unwrap();
+        assert_eq!(output.len(), OUTPUT_CAP + 1);
+        assert!(cap_output(&output).ends_with("(output truncated)"));
+    }
+
     fn spec() -> ExecutionSpec {
         ExecutionSpec {
             project_path: PathBuf::from("/tmp/example"),
@@ -972,7 +991,11 @@ mod tests {
                     .as_str()
                     .is_some_and(|n| n.starts_with("localweb_"))
             );
-            assert!(tool["description"].as_str().is_some_and(|d| d.len() > 20));
+            assert!(
+                tool["description"]
+                    .as_str()
+                    .is_some_and(|d| !d.trim().is_empty())
+            );
             assert_eq!(tool["inputSchema"]["type"], "object");
         }
     }

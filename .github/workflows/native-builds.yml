@@ -133,12 +133,19 @@ jobs:
           if-no-files-found: error
 
   hygiene:
-    name: Repository hygiene
+    name: Repository hygiene and dependency security
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
       - name: Check tracked files for personal data and credentials
-        run: bash scripts/check-hygiene.sh
+        run: |
+          bash scripts/test-hygiene.sh
+          bash scripts/check-hygiene.sh
+      - name: Check Rust dependencies against RustSec
+        run: |
+          cargo install cargo-audit --locked
+          cargo audit
 
   release:
     name: Publish verified installers

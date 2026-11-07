@@ -6,7 +6,7 @@ use tokio::{
     io::copy_bidirectional,
     net::{TcpListener, TcpStream},
     sync::oneshot,
-    task::JoinHandle,
+    task::{JoinHandle, JoinSet},
 };
 use tracing::{info, warn};
 
@@ -26,13 +26,15 @@ impl DbProxy {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, listen_port)).await?;
         let (shutdown, mut receiver) = oneshot::channel();
         let task = tokio::spawn(async move {
+            let mut connections = JoinSet::new();
             loop {
                 tokio::select! {
                     _ = &mut receiver => break,
+                    _ = connections.join_next(), if !connections.is_empty() => {},
                     accepted = listener.accept() => {
                         match accepted {
                             Ok((mut client, _)) => {
-                                tokio::spawn(async move {
+                                connections.spawn(async move {
                                     let target = SocketAddr::from((Ipv4Addr::LOCALHOST, target_port));
                                     match TcpStream::connect(target).await {
                                         Ok(mut upstream) => {
@@ -63,7 +65,15 @@ impl DbProxy {
     /// Stops accepting connections and waits for the listener task.
     pub async fn stop(mut self) {
         drop(self.shutdown.take());
-        let _ = self.task.await;
+        let _ = (&mut self.task).await;
+    }
+}
+
+impl Drop for DbProxy {
+    fn drop(&mut self) {
+        // Aborting the listener also drops its JoinSet and closes every
+        // established connection, including when startup is rolled back.
+        self.task.abort();
     }
 }
 
@@ -103,5 +113,41 @@ mod tests {
         assert_eq!(&buffer, b"ping");
         echo.await.unwrap();
         proxy.stop().await;
+    }
+
+    #[tokio::test]
+    async fn stop_closes_established_connections_and_releases_the_port() {
+        let upstream = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let reserved = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let port = reserved.local_addr().unwrap().port();
+        drop(reserved);
+        let proxy = DbProxy::start(port, upstream.local_addr().unwrap().port())
+            .await
+            .unwrap();
+        let mut client = TcpStream::connect((Ipv4Addr::LOCALHOST, port))
+            .await
+            .unwrap();
+        let (mut server, _) = upstream.accept().await.unwrap();
+        client.write_all(b"x").await.unwrap();
+        let mut byte = [0];
+        server.read_exact(&mut byte).await.unwrap();
+        proxy.stop().await;
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), client.read(&mut byte))
+                .await
+                .unwrap()
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), server.read(&mut byte))
+                .await
+                .unwrap()
+                .unwrap(),
+            0
+        );
+        let _rebound = TcpListener::bind((Ipv4Addr::LOCALHOST, port))
+            .await
+            .unwrap();
     }
 }

@@ -13,7 +13,7 @@ patterns=(
 
 status=0
 for pattern in "${patterns[@]}"; do
-    if matches=$(git grep -n -I -E "$pattern" -- . 2>/dev/null); then
+    if matches=$(git grep -n -I -E -e "$pattern" -- . 2>/dev/null); then
         echo "suspicious content matching '$pattern':" >&2
         printf '%s\n' "$matches" >&2
         status=1

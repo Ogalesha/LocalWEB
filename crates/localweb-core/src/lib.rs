@@ -11,10 +11,11 @@ use std::{
     path::{Path, PathBuf},
 };
 use thiserror::Error;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use uuid::Uuid;
 
 pub mod certificate;
+pub mod copy;
 pub mod hosts;
 pub mod platform;
 pub mod privilege;
@@ -40,19 +41,19 @@ pub const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 pub enum LocalWebError {
     #[error("I/O error: {0}")]
     Io(#[from] io::Error),
-    #[error("invalid configuration: {0}")]
+    #[error("Invalid settings: {0}")]
     Config(String),
-    #[error("project not found: {0}")]
+    #[error("Project not found: {0}")]
     ProjectNotFound(String),
-    #[error("hostname already assigned: {0}")]
+    #[error("Local domain already in use: {0}")]
     DomainConflict(String),
-    #[error("host mapping error: {0}")]
+    #[error("Local domain needs syncing: {0}")]
     HostMapping(String),
-    #[error("runtime is not installed: {0}")]
+    #[error("Runtime not installed: {0}")]
     RuntimeNotInstalled(String),
-    #[error("service failed: {0}")]
+    #[error("Service failed: {0}")]
     Service(String),
-    #[error("protocol error: {0}")]
+    #[error("LocalWeb connection error: {0}")]
     Protocol(String),
 }
 
@@ -716,7 +717,48 @@ impl Project {
                 .cron
                 .extend(existing.cron.iter().filter(|entry| !entry.enabled).cloned());
         }
+        updated.validate()?;
         Ok(updated)
+    }
+
+    /// Validates persisted settings without requiring the source folder to
+    /// exist, so an unavailable source can still be listed or removed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for unsupported schemas or invalid project settings.
+    pub fn validate(&self) -> Result<()> {
+        if self.schema_version != CONFIG_SCHEMA {
+            return Err(LocalWebError::Config(format!(
+                "unsupported project schema version {}",
+                self.schema_version
+            )));
+        }
+        validate_name(&self.name)?;
+        validate_domain(&self.hostname)?;
+        validate_php_version(&self.php)?;
+        validate_node_version(&self.node)?;
+        if self.composer != "2" {
+            return Err(LocalWebError::Config("only Composer 2 is supported".into()));
+        }
+        for port in [self.web_port, self.database_port].into_iter().flatten() {
+            validate_port(port)?;
+        }
+        if self.web_port.is_some() && self.web_port == self.database_port {
+            return Err(LocalWebError::Config(
+                "web and database ports must differ".into(),
+            ));
+        }
+        validate_supervisor(&self.supervisor)?;
+        if self.cron.len() > 64 {
+            return Err(LocalWebError::Config(
+                "a project may define at most 64 cron entries".into(),
+            ));
+        }
+        for entry in &self.cron {
+            validate_cron_entry(entry)?;
+        }
+        Ok(())
     }
 
     /// Resolves the validated absolute document root.
@@ -745,12 +787,12 @@ fn validate_supervisor(supervisor: &SupervisorConfig) -> Result<()> {
     }
     if supervisor.command.is_empty() {
         return Err(LocalWebError::Config(
-            "an enabled supervisor requires a command".into(),
+            "an enabled worker requires a command".into(),
         ));
     }
     if supervisor.command.len() > 64 {
         return Err(LocalWebError::Config(
-            "a supervisor command may contain at most 64 arguments".into(),
+            "a worker command may contain at most 64 arguments".into(),
         ));
     }
     if supervisor.command.iter().any(|argument| {
@@ -761,7 +803,7 @@ fn validate_supervisor(supervisor: &SupervisorConfig) -> Result<()> {
             || argument.contains('\r')
     }) {
         return Err(LocalWebError::Config(
-            "supervisor arguments must be non-empty single-line values".into(),
+            "worker arguments must be non-empty single-line values".into(),
         ));
     }
     Ok(())
@@ -818,40 +860,45 @@ pub fn validate_cron_schedule(schedule: &str) -> Result<()> {
 }
 
 fn validate_cron_field(field: &str, lo: u32, hi: u32) -> Result<()> {
-    let (base, step) = match field.split_once('/') {
+    for part in field.split(',') {
+        validate_cron_part(part, lo, hi)?;
+    }
+    Ok(())
+}
+
+fn validate_cron_part(field: &str, lo: u32, hi: u32) -> Result<()> {
+    let (part, step) = match field.split_once('/') {
         Some((base, step)) => {
             let amount: u32 = step.parse().map_err(|error| {
                 LocalWebError::Config(format!("invalid cron step in {field}: {error}"))
             })?;
-            if amount == 0 || amount > hi {
+            if amount == 0 || amount > hi - lo + 1 {
                 return Err(LocalWebError::Config(format!("invalid cron step: {field}")));
             }
             (base, true)
         }
         None => (field, false),
     };
-    for part in base.split(',') {
-        if part == "*" {
-            continue;
-        }
-        if step && !part.contains('-') {
-            return Err(LocalWebError::Config(format!(
-                "a cron step needs `*` or a range: {field}"
-            )));
-        }
-        match part.split_once('-') {
-            Some((from, to)) => {
-                let start = parse_cron_number(from, lo, hi, field)?;
-                let end = parse_cron_number(to, lo, hi, field)?;
-                if start > end {
-                    return Err(LocalWebError::Config(format!(
-                        "reversed cron range: {field}"
-                    )));
-                }
+    if part == "*" {
+        return Ok(());
+    }
+    if step && !part.contains('-') {
+        return Err(LocalWebError::Config(format!(
+            "a cron step needs `*` or a range: {field}"
+        )));
+    }
+    match part.split_once('-') {
+        Some((from, to)) => {
+            let start = parse_cron_number(from, lo, hi, field)?;
+            let end = parse_cron_number(to, lo, hi, field)?;
+            if start > end {
+                return Err(LocalWebError::Config(format!(
+                    "reversed cron range: {field}"
+                )));
             }
-            None => {
-                parse_cron_number(part, lo, hi, field)?;
-            }
+        }
+        None => {
+            parse_cron_number(part, lo, hi, field)?;
         }
     }
     Ok(())
@@ -905,38 +952,43 @@ pub fn parse_cron_line(line: &str) -> Result<CronEntry> {
 #[must_use]
 pub fn cron_matches(schedule: &str, moment: &chrono::DateTime<chrono::Local>) -> bool {
     use chrono::{Datelike, Timelike};
-    let fields: Vec<&str> = schedule.split_whitespace().collect();
-    if fields.len() != 5 {
+    if validate_cron_schedule(schedule).is_err() {
         return false;
     }
-    let values = [
-        moment.minute(),
-        moment.hour(),
-        moment.day(),
-        moment.month(),
-        moment.weekday().number_from_monday() % 7,
-    ];
-    fields
-        .iter()
-        .zip(values)
-        .all(|(field, value)| cron_field_matches(field, value))
+    let fields: Vec<&str> = schedule.split_whitespace().collect();
+    let day = cron_field_matches(fields[2], moment.day(), 1);
+    let weekday = moment.weekday().num_days_from_sunday();
+    let weekday_matches = cron_field_matches(fields[4], weekday, 0)
+        || (weekday == 0 && cron_field_matches(fields[4], 7, 0));
+    // Match Ubuntu cron semantics: restricted day fields are alternatives;
+    // when either begins with '*', both day fields must match.
+    let days_match = if fields[2].starts_with('*') || fields[4].starts_with('*') {
+        day && weekday_matches
+    } else {
+        day || weekday_matches
+    };
+    cron_field_matches(fields[0], moment.minute(), 0)
+        && cron_field_matches(fields[1], moment.hour(), 0)
+        && cron_field_matches(fields[3], moment.month(), 1)
+        && days_match
 }
 
-fn cron_field_matches(field: &str, value: u32) -> bool {
-    let (base, step) = match field.split_once('/') {
+fn cron_field_matches(field: &str, value: u32, minimum: u32) -> bool {
+    field
+        .split(',')
+        .any(|part| cron_part_matches(part, value, minimum))
+}
+
+fn cron_part_matches(part: &str, value: u32, minimum: u32) -> bool {
+    let (part, step) = match part.split_once('/') {
         Some((base, step)) => match step.parse::<u32>() {
             Ok(amount) if amount > 0 => (base, amount),
             _ => return false,
         },
-        None => (field, 0),
+        None => (part, 0),
     };
-    base.split(',')
-        .any(|part| cron_part_matches(part, value, step))
-}
-
-fn cron_part_matches(part: &str, value: u32, step: u32) -> bool {
     if part == "*" {
-        return step == 0 || value.is_multiple_of(step);
+        return step == 0 || (value - minimum).is_multiple_of(step);
     }
     if let Some((from, to)) = part.split_once('-') {
         let (Ok(start), Ok(end)) = (from.parse::<u32>(), to.parse::<u32>()) else {
@@ -951,8 +1003,7 @@ fn cron_part_matches(part: &str, value: u32, step: u32) -> bool {
         return false;
     }
     match part.parse::<u32>() {
-        // Sunday is both 0 and 7.
-        Ok(number) => number == value || (value == 0 && number == 7),
+        Ok(number) => number == value,
         Err(_) => false,
     }
 }
@@ -1027,7 +1078,9 @@ pub fn validate_domain(domain: &str) -> Result<()> {
         || domain.ends_with('.')
         || domain.split('.').any(|part| validate_name(part).is_err())
     {
-        return Err(LocalWebError::Config(format!("invalid hostname: {domain}")));
+        return Err(LocalWebError::Config(format!(
+            "invalid local domain: {domain}"
+        )));
     }
     Ok(())
 }
@@ -1422,15 +1475,22 @@ pub struct Diagnostic {
 ///
 /// Returns an error for socket failures, oversized messages, malformed JSON, or version mismatch.
 pub async fn send_request(paths: &Paths, request: Request) -> Result<Response> {
-    let mut socket = transport::connect(paths).await?;
     let mut data = serde_json::to_vec(&Envelope {
         version: PROTOCOL_VERSION,
         payload: request,
     })
     .map_err(|e| LocalWebError::Protocol(e.to_string()))?;
     data.push(b'\n');
+    if data.len() > MAX_MESSAGE_BYTES {
+        return Err(LocalWebError::Protocol("request too large".into()));
+    }
+    let mut socket = transport::connect(paths).await?;
     socket.write_all(&data).await?;
-    let mut reader = BufReader::new(socket);
+    read_response(socket).await
+}
+
+async fn read_response(socket: impl tokio::io::AsyncRead + Unpin) -> Result<Response> {
+    let mut reader = BufReader::new(socket).take((MAX_MESSAGE_BYTES + 1) as u64);
     let mut response = Vec::new();
     reader.read_until(b'\n', &mut response).await?;
     if response.len() > MAX_MESSAGE_BYTES {
@@ -1449,6 +1509,25 @@ pub async fn send_request(paths: &Paths, request: Request) -> Result<Response> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn oversized_response_is_rejected_before_eof() {
+        let (reader, mut writer) = tokio::io::duplex(8_192);
+        let sender = tokio::spawn(async move {
+            writer
+                .write_all(&vec![b'x'; MAX_MESSAGE_BYTES + 1])
+                .await
+                .unwrap();
+            // Keep the connection open: the size limit must end the read.
+            writer
+        });
+        let error = tokio::time::timeout(std::time::Duration::from_secs(2), read_response(reader))
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert!(error.to_string().contains("response too large"));
+        drop(sender.await.unwrap());
+    }
     #[test]
     fn names_and_domains() {
         assert_eq!(sanitize_name("My Cool_Project!"), "my-cool-project");
@@ -1686,6 +1765,21 @@ mod tests {
         assert!(!cron_matches("30 15 * * 1", &sunday));
         assert!(cron_matches("*/5 * * * *", &sunday));
         assert!(!cron_matches("31 15 * * *", &sunday));
+        let midnight = sunday
+            .with_time(chrono::NaiveTime::from_hms_opt(0, 0, 0).unwrap())
+            .single()
+            .unwrap();
+        assert!(!cron_matches("7 * * * *", &midnight));
+        assert!(!cron_matches("0 7 * * *", &midnight));
+        assert!(cron_matches("0 0 * * 1-7", &midnight));
+        assert!(cron_matches("0 0 */2 * *", &midnight));
+        assert!(!cron_matches("0 0 * */2 *", &midnight));
+        assert!(cron_matches("0 0 1 * 0", &midnight));
+        assert!(!cron_matches("0 0 1 * 1", &midnight));
+        validate_cron_schedule("0-10/2,20-30/5 * * * *").unwrap();
+        assert!(cron_matches("0-10/2,20-30/5 * * * *", &sunday));
+        validate_cron_schedule("*/60 * * * *").unwrap();
+        assert!(!cron_matches("*/61 * * * *", &midnight));
     }
 
     #[test]

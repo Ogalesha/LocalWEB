@@ -75,13 +75,13 @@ async fn main() -> Result<()> {
         .init();
     let paths = Paths::discover()?;
     paths.create()?;
+    let mut listener = localweb_core::transport::DaemonListener::bind(&paths)
+        .await
+        .context("bind daemon endpoint")?;
     let config = GlobalConfig::load_or_create(&paths)?;
     CaPaths::new(&paths).ensure_ca()?;
     ensure_project_ports(&paths)?;
     initialize_gateway_endpoint(&paths)?;
-    let mut listener = localweb_core::transport::DaemonListener::bind(&paths)
-        .await
-        .context("bind daemon endpoint")?;
     let mut restore = load_desired_running(&paths)?;
     restore.extend(
         load_projects(&paths)?
@@ -166,15 +166,31 @@ where
             },
         }
     };
+    reply(&mut stream, response, shutdown, &state.shutdown).await
+}
+
+async fn reply<S>(
+    stream: &mut S,
+    response: Response,
+    shutdown_requested: bool,
+    shutdown: &Notify,
+) -> Result<()>
+where
+    S: tokio::io::AsyncWrite + Unpin,
+{
+    // A failed shutdown leaves services and desired state available for a
+    // retry. A successful one must finish even if the client disconnected.
+    let stop = shutdown_requested && !matches!(&response, Response::Error { .. });
     let mut data = serde_json::to_vec(&Envelope {
         version: PROTOCOL_VERSION,
         payload: response,
     })?;
     data.push(b'\n');
-    stream.write_all(&data).await?;
-    if shutdown {
-        state.shutdown.notify_waiters();
+    let written = stream.write_all(&data).await;
+    if stop {
+        shutdown.notify_waiters();
     }
+    written?;
     Ok(())
 }
 
@@ -219,7 +235,9 @@ async fn execute(request: Request, state: &Arc<State>) -> localweb_core::Result<
                 Ok(()) => {
                     persist_running(&state.paths, &BTreeSet::new())?;
                     state.running.lock().await.clear();
-                    Ok(Response::Message("LocalWeb daemon stopped".into()))
+                    Ok(Response::Message(
+                        localweb_core::copy::LOCALWEB_STOPPED.into(),
+                    ))
                 }
                 Err(error) => {
                     error!(%error, "shutdown left services running; desired state was preserved");
@@ -374,13 +392,10 @@ async fn execute(request: Request, state: &Arc<State>) -> localweb_core::Result<
             stop_project_locked(state, &name).await?;
             fs::remove_file(state.paths.project_file(project.id))?;
             cleanup_project_runtime(&state.paths, &project);
-            Ok(Response::Message(if was_running {
-                format!(
-                    "Stopped and removed LocalWeb configuration for {name}; source files were retained"
-                )
-            } else {
-                format!("Removed LocalWeb configuration for {name}; source files were retained")
-            }))
+            Ok(Response::Message(localweb_core::copy::project_removed(
+                &name,
+                was_running,
+            )))
         }
         Request::ProjectStart { name } => {
             start_project(state, &name).await?;
@@ -681,7 +696,7 @@ fn rollback_start_services(
         }
         record(
             &mut failures,
-            "stop supervisor",
+            "stop worker",
             Services::stop_supervisor(project),
         );
     }
@@ -839,7 +854,7 @@ fn stop_project_owned_services(project: &Project) -> localweb_core::Result<()> {
     let mut failures = Vec::new();
     record(
         &mut failures,
-        "stop supervisor",
+        "stop worker",
         Services::stop_supervisor(project),
     );
     if project.cache == localweb_core::Cache::Redis {
@@ -1135,19 +1150,20 @@ fn ensure_project_ports(paths: &Paths) -> localweb_core::Result<()> {
             "a web port is also assigned as a database port; edit the project configuration".into(),
         ));
     }
+    let mut used: BTreeSet<u16> = used_web.union(&used_database).copied().collect();
     for mut project in projects {
         let mut changed = false;
         if project.web_port.is_none() {
-            let port = allocate_port(WEB_PORT_START, WEB_PORT_END, &used_web)?;
+            let port = allocate_port(WEB_PORT_START, WEB_PORT_END, &used)?;
             project.web_port = Some(port);
-            used_web.insert(port);
+            used.insert(port);
             changed = true;
         }
         if services::database_service_port(project.database).is_some() {
             if project.database_port.is_none() {
-                let port = allocate_port(DATABASE_PORT_START, DATABASE_PORT_END, &used_database)?;
+                let port = allocate_port(DATABASE_PORT_START, DATABASE_PORT_END, &used)?;
                 project.database_port = Some(port);
-                used_database.insert(port);
+                used.insert(port);
                 changed = true;
             }
         } else if project.database_port.take().is_some() {
@@ -1182,6 +1198,7 @@ fn assign_project_ports(projects: &[Project], project: &mut Project) -> localweb
                 "web port {port} is already in use"
             )));
         }
+        used.insert(port);
     } else {
         let port = allocate_port(WEB_PORT_START, WEB_PORT_END, &used)?;
         project.web_port = Some(port);
@@ -1669,11 +1686,26 @@ fn mail_web_url(paths: &Paths, project: &Project) -> Option<String> {
 
 fn load_projects(paths: &Paths) -> localweb_core::Result<Vec<Project>> {
     let mut projects = Vec::new();
+    let mut names = BTreeSet::new();
+    let mut hosts = BTreeSet::new();
     for entry in fs::read_dir(paths.config.join("projects"))? {
         let entry = entry?;
         if entry.path().extension().is_some_and(|e| e == "toml") {
             let project: Project = toml::from_str(&fs::read_to_string(entry.path())?)
                 .map_err(|e| LocalWebError::Config(e.to_string()))?;
+            project.validate()?;
+            if paths.project_file(project.id) != entry.path() {
+                return Err(LocalWebError::Config(format!(
+                    "project file {} must be named {}.toml",
+                    entry.path().display(),
+                    project.id
+                )));
+            }
+            if !names.insert(project.name.clone()) || !hosts.insert(project.hostname.clone()) {
+                return Err(LocalWebError::Config(
+                    "duplicate project name or hostname".into(),
+                ));
+            }
             projects.push(project);
         }
     }
@@ -1782,17 +1814,17 @@ fn doctor(state: &State) -> Vec<Diagnostic> {
     let ca_trusted = system_ca_trusted && browser_ca_trusted;
     checks.push(Diagnostic {
         level: if ca_trusted { "OK" } else { "WARNING" }.into(),
-        check: "HTTPS certificate authority".into(),
+        check: "HTTPS certificate".into(),
         detail: if ca_trusted {
-            "LocalWeb Development CA is trusted by the system and Chromium-family browsers".into()
+            "HTTPS certificate trusted by the system and Chromium browsers".into()
         } else if system_ca_trusted {
-            "CA is trusted by the operating system but not by Brave/Chromium".into()
+            "HTTPS certificate trusted by the system, but not Chromium browsers".into()
         } else if browser_ca_trusted {
-            "CA is trusted by Brave/Chromium but not by the operating system".into()
+            "HTTPS certificate trusted by Chromium browsers, but not the system".into()
         } else if ca_exists {
-            "CA exists but is not trusted by the system or Brave/Chromium".into()
+            "HTTPS certificate is not trusted".into()
         } else {
-            "LocalWeb Development CA is missing".into()
+            "HTTPS certificate is missing".into()
         },
         fix: (!ca_trusted).then(|| "Run `localweb ca install`".into()),
     });
@@ -1811,9 +1843,9 @@ fn doctor(state: &State) -> Vec<Diagnostic> {
             "WARNING"
         }
         .into(),
-        check: "exact host mappings".into(),
+        check: "Local domains".into(),
         detail: if missing_hosts.is_empty() {
-            format!("all configured project hostnames map to {expected_address}")
+            format!("All local domains point to {expected_address}")
         } else {
             format!("missing: {}", missing_hosts.join(", "))
         },
@@ -1893,6 +1925,116 @@ fn runtime_diagnostics() -> Vec<Diagnostic> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn project_fixture() -> (std::path::PathBuf, Paths, Project) {
+        let base = std::env::temp_dir().join(format!("lw-project-{}", uuid::Uuid::new_v4()));
+        let paths = Paths {
+            config: base.join("config"),
+            data: base.join("data"),
+            state: base.join("state"),
+            runtime: base.join("run"),
+        };
+        paths.create().unwrap();
+        let source = base.join("source");
+        fs::create_dir(&source).unwrap();
+        let input = serde_json::from_value(serde_json::json!({"path": source, "name": "demo", "hostname": "demo.test", "autostart": false})).unwrap();
+        let project = Project::from_new(input, &GlobalConfig::default()).unwrap();
+        (base, paths, project)
+    }
+
+    #[test]
+    fn persisted_projects_are_validated_without_requiring_the_source() {
+        let (base, paths, mut project) = project_fixture();
+        fs::remove_dir(&project.path).unwrap();
+        save_project(&paths, &project).unwrap();
+        assert_eq!(load_projects(&paths).unwrap().len(), 1);
+        project.name = "../../outside".into();
+        save_project(&paths, &project).unwrap();
+        load_projects(&paths).unwrap_err();
+        project.name = "demo".into();
+        project.schema_version = 999;
+        save_project(&paths, &project).unwrap();
+        load_projects(&paths).unwrap_err();
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn port_migration_respects_custom_database_ports_in_the_web_range() {
+        let (base, paths, mut project) = project_fixture();
+        project.web_port = Some(DATABASE_PORT_START);
+        project.database = localweb_core::Database::Mariadb;
+        project.database_port = Some(WEB_PORT_START);
+        save_project(&paths, &project).unwrap();
+        project.id = uuid::Uuid::new_v4();
+        project.name = "second".into();
+        project.hostname = "second.test".into();
+        project.web_port = None;
+        project.database_port = None;
+        project.database = localweb_core::Database::None;
+        save_project(&paths, &project).unwrap();
+        ensure_project_ports(&paths).unwrap();
+        assert_ne!(
+            find_project(&paths, "second").unwrap().web_port,
+            Some(WEB_PORT_START)
+        );
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn automatic_database_port_skips_the_explicit_web_port() {
+        let (base, _, mut project) = project_fixture();
+        project.web_port =
+            Some(allocate_port(DATABASE_PORT_START, DATABASE_PORT_END, &BTreeSet::new()).unwrap());
+        project.database = localweb_core::Database::Mariadb;
+        assign_project_ports(&[], &mut project).unwrap();
+        assert_ne!(project.web_port, project.database_port);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_shutdown_keeps_the_daemon_available() {
+        let shutdown = Notify::new();
+        let notified = shutdown.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        reply(
+            &mut tokio::io::sink(),
+            Response::Error {
+                code: "ServiceStartFailed".into(),
+                message: "service stop failed".into(),
+            },
+            true,
+            &shutdown,
+        )
+        .await
+        .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), notified)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_shutdown_finishes_when_the_client_disconnects() {
+        let shutdown = Notify::new();
+        let notified = shutdown.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        let (mut server, client) = tokio::io::duplex(64);
+        drop(client);
+        reply(
+            &mut server,
+            Response::Message("stopped".into()),
+            true,
+            &shutdown,
+        )
+        .await
+        .unwrap_err();
+        tokio::time::timeout(Duration::from_secs(1), notified)
+            .await
+            .unwrap();
+    }
 
     #[test]
     fn active_project_state_roundtrips_with_private_file() {
