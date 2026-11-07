@@ -30,7 +30,10 @@ jobs:
       - name: Workspace compiles on Darwin
         run: cargo check --workspace --all-targets
       - name: Check native code quality
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --color never --message-format=json -- -D warnings > "$RUNNER_TEMP/localweb-clippy.jsonl"
+      - name: Report native Rust diagnostics
+        if: always()
+        run: python3 .github/ci/report-rust-diagnostics.py "$RUNNER_TEMP/localweb-clippy.jsonl"
       - name: Workspace regression tests
         run: |
           set -o pipefail
@@ -38,6 +41,7 @@ jobs:
       - name: Report failing tests
         if: failure()
         run: |
+          test -f "$RUNNER_TEMP/localweb-tests.log" || exit 0
           grep -E '^(test .* FAILED|failures:|---- .* stdout ----|thread .* panicked|text .* overflows|assertion .* failed)' \
             "$RUNNER_TEMP/localweb-tests.log" | head -40 | while IFS= read -r line; do
             echo "::error title=macOS test failure::$line"
