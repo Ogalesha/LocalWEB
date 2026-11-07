@@ -71,6 +71,13 @@ pub struct Services<'a> {
 }
 
 impl Services<'_> {
+    #[cfg_attr(
+        windows,
+        expect(
+            clippy::unused_self,
+            reason = "Unix resolves per-user runtimes through this shared service API"
+        )
+    )]
     pub fn php_binaries(&self, version: &str) -> Result<(PathBuf, PathBuf)> {
         localweb_core::validate_php_version(version)?;
         #[cfg(windows)]
@@ -155,9 +162,9 @@ impl Services<'_> {
             {
                 return Ok((node, npm));
             }
-            return Err(LocalWebError::RuntimeNotInstalled(format!(
+            Err(LocalWebError::RuntimeNotInstalled(format!(
                 "Node.js {version} is not installed via Scoop or Chocolatey"
-            )));
+            )))
         }
         #[cfg(not(windows))]
         {
@@ -304,6 +311,13 @@ impl Services<'_> {
 
     /// Returns the `FastCGI` upstream for a project's PHP handler.
     #[must_use]
+    #[cfg_attr(
+        windows,
+        expect(
+            clippy::unused_self,
+            reason = "Unix resolves the project socket through this shared service API"
+        )
+    )]
     pub fn php_upstream(&self, project: &Project) -> String {
         #[cfg(windows)]
         {
@@ -380,14 +394,21 @@ impl Services<'_> {
         )))
     }
 
+    #[cfg_attr(
+        windows,
+        expect(
+            clippy::unused_self,
+            reason = "Unix resolves per-user configuration through this shared service API"
+        )
+    )]
     pub fn php_ini(&self, version: &str) -> Option<PathBuf> {
         #[cfg(windows)]
         {
             let (php, _) = RuntimeLayout::discover().php(version).ok()?;
             let directory = php.parent()?;
-            return [directory.join("php.ini"), directory.join("../php.ini")]
+            [directory.join("php.ini"), directory.join("../php.ini")]
                 .into_iter()
-                .find(|path| path.is_file());
+                .find(|path| path.is_file())
         }
         #[cfg(not(windows))]
         {

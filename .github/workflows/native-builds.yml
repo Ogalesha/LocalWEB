@@ -89,6 +89,7 @@ jobs:
       - name: Install cargo-xwin
         run: cargo install --locked cargo-xwin
       - name: Cross-build and exercise the Windows binaries under Wine
+        shell: bash
         run: |
           trap 'python3 .github/ci/report-failure.py windows-wine.log' ERR
           bash scripts/windows-wine-smoke.sh 2>&1 | tee windows-wine.log

@@ -14,6 +14,7 @@ macOS/Windows process ownership and public download publication. Ubuntu
 | High | macOS/Windows PID files could target a reused PID. macOS also accepted zero/negative process-group IDs. | Store PID plus native process creation time, reject unverifiable records and signal only a matching process. Windows retains a verified process handle during termination; macOS creates and checks a dedicated process group. Tests reject malformed/legacy records and mismatched creation times. |
 | High | Private MariaDB accepted passwordless root connections over TCP; MySQL also initialized with an empty administrator password. | Persist separate private administrator credentials, apply them through a restricted startup SQL file before accepting connections and use private client options for provisioning. Both real engines reject passwordless root and preserve data across restarts in isolated tests. |
 | High | Windows pipe names depended on a sanitized username, with default permissions and no verification of the server account. | Use the native account SID, an explicit protected DACL, and verify the server process token before sending requests. Native Windows tests cover ownership, peer verification and request exchange. |
+| Medium | Browser CA setup only used the legacy NSS directory and considered an imported CA trusted even without SSL trust flags. | Use Chromium's modern default on fresh installations, update both existing stores, and check the exact certificate plus SSL CA trust. A real NSS regression repairs missing trust flags and preserves unrelated certificates. |
 | High | Direct web ports served the default project for unrelated Host headers. | Add explicit rejecting default hosts for Nginx and Apache. Native requests reject foreign and suffix-spoofed hostnames while preserving project and loopback access. |
 | Medium | Windows could spawn a worker after stop had cancelled it; failed identity persistence left a child running. | Serialize worker ownership checks, spawn and identity persistence with cancellation. Reap children when recording ownership fails. |
 | Medium | Nginx omitted client address/port and server address/port from FastCGI. Apache reported port 80 on a high-port listener. | Supply standard CGI parameters and enable Apache's physical-port fallback. Real PHP requests verify metadata with both servers, including paths containing spaces. |
@@ -43,7 +44,7 @@ still own their configuration and data-import steps.
 ## Verification and limits
 
 - Local Ubuntu workspace regression suite, formatting and Clippy with
-  warnings denied: 113 tests passed; seven opt-in native service tests run separately, including isolated database authentication checks.
+  warnings denied: 114 tests passed; seven opt-in native service tests run separately, including isolated database authentication checks.
 - Native checks cover Nginx/Apache/PHP/Redis, request metadata, paths with
   spaces, literal systemd arguments, cancellation of pending restarts and
   worker restart after exit 0.
@@ -74,5 +75,8 @@ Source references:
 [Apache canonical port](https://httpd.apache.org/docs/2.4/en/mod/core.html#usecanonicalphysicalport),
 [Tokio process cancellation](https://docs.rs/tokio/latest/tokio/process/index.html),
 [artifact download contract](https://github.com/actions/download-artifact).
+
+Chromium's [Linux certificate documentation](https://chromium.googlesource.com/chromium/src/+/refs/heads/main/docs/linux/cert_management.md)
+describes the modern NSS directory and legacy fallback used by the browser fix.
 
 A fresh RustSec scan found no vulnerability advisories. Four unmaintained-crate notices and three yanked-version notices remain; no advisories were suppressed.

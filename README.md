@@ -130,6 +130,9 @@ localweb start
 
 System authorization is used for CA installation, cleanup registration and
 local-domain changes. Project services run as your desktop user.
+If a browser was already open during certificate setup, restart it to reload
+its trust store. Linux setup handles both current and legacy Chromium/Brave
+certificate databases.
 
 ## Add your first project
 

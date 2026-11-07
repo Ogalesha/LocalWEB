@@ -9,7 +9,7 @@ pub const LOCALWEB_STARTED: &str = "LocalWeb started";
 /// Successful application shutdown.
 pub const LOCALWEB_STOPPED: &str = "LocalWeb stopped";
 /// Successful trust installation for the development certificate.
-pub const HTTPS_TRUSTED: &str = "HTTPS certificate trusted";
+pub const HTTPS_TRUSTED: &str = "HTTPS certificate trusted. Restart open browsers if needed.";
 /// Successful removal of development certificate trust.
 pub const HTTPS_TRUST_REMOVED: &str = "HTTPS trust removed";
 /// Successful synchronization of local project domains.

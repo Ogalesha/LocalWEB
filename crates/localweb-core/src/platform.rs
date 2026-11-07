@@ -201,7 +201,10 @@ impl TrustStore {
 pub fn install_browser_ca(certificate: &Path) -> Result<()> {
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        install_linux_browser_ca(certificate, &browser_nss_database()?)
+        for database in browser_nss_databases()? {
+            install_linux_browser_ca(certificate, &database)?;
+        }
+        Ok(())
     }
     #[cfg(any(not(unix), target_os = "macos"))]
     {
@@ -217,7 +220,10 @@ pub fn install_browser_ca(certificate: &Path) -> Result<()> {
 pub fn remove_browser_ca() -> Result<()> {
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        remove_linux_browser_ca(&browser_nss_database()?)
+        for database in browser_nss_databases()? {
+            remove_linux_browser_ca(&database)?;
+        }
+        Ok(())
     }
     #[cfg(any(not(unix), target_os = "macos"))]
     {
@@ -230,8 +236,11 @@ pub fn remove_browser_ca() -> Result<()> {
 pub fn browser_ca_trusted(certificate: &Path) -> bool {
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        browser_nss_database()
-            .is_ok_and(|database| linux_browser_ca_trusted(certificate, &database))
+        browser_nss_databases().is_ok_and(|databases| {
+            databases
+                .iter()
+                .all(|database| linux_browser_ca_trusted(certificate, database))
+        })
     }
     #[cfg(any(not(unix), target_os = "macos"))]
     {
@@ -244,17 +253,29 @@ pub fn browser_ca_trusted(certificate: &Path) -> bool {
 const NSS_CERTUTIL: &str = "/usr/bin/certutil";
 
 #[cfg(all(unix, not(target_os = "macos")))]
-fn browser_nss_database() -> Result<PathBuf> {
+fn browser_nss_databases() -> Result<Vec<PathBuf>> {
     let user_home = std::env::var_os("HOME")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .ok_or_else(|| LocalWebError::Config("HOME is required for browser trust setup".into()))?;
-    Ok(nss_database_for_home(&user_home))
+    Ok(nss_databases_for_home(&user_home))
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
-fn nss_database_for_home(user_home: &Path) -> PathBuf {
-    user_home.join(".pki/nssdb")
+fn nss_databases_for_home(user_home: &Path) -> Vec<PathBuf> {
+    let legacy = user_home.join(".pki/nssdb");
+    let current = user_home.join(".local/share/pki/nssdb");
+    let mut databases = Vec::new();
+    if legacy.is_dir() {
+        databases.push(legacy);
+    }
+    // Chromium 146+ defaults to the new location, but falls back to an
+    // existing legacy database. A running browser can still have the newer
+    // database open when an older installer creates the legacy directory.
+    if current.is_dir() || databases.is_empty() {
+        databases.push(current);
+    }
+    databases
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -355,9 +376,31 @@ fn linux_browser_ca_trusted(certificate: &Path, database: &Path) -> bool {
     if !output.status.success() {
         return false;
     }
-    certificate_der(&expected).is_some_and(|expected| {
+    let matches = certificate_der(&expected).is_some_and(|expected| {
         certificate_der(&output.stdout).is_some_and(|actual| actual == expected)
-    })
+    });
+    if !matches {
+        return false;
+    }
+    let Ok(output) = Command::new(NSS_CERTUTIL)
+        .args(["-L", "-d"])
+        .arg(nss_database_argument(database))
+        .stdin(std::process::Stdio::null())
+        .output()
+    else {
+        return false;
+    };
+    output.status.success()
+        && String::from_utf8_lossy(&output.stdout).lines().any(|line| {
+            let Some((nickname, flags)) = line.trim_end().rsplit_once(char::is_whitespace) else {
+                return false;
+            };
+            nickname.trim_end() == CA_COMMON_NAME
+                && flags
+                    .split(',')
+                    .next()
+                    .is_some_and(|ssl| ssl.contains('C') && !ssl.contains('p'))
+        })
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -528,12 +571,74 @@ mod tests {
 
     #[cfg(not(target_os = "macos"))]
     #[test]
-    fn nss_database_path_and_argument_are_user_scoped() {
-        let database = nss_database_for_home(Path::new("/home/developer"));
-        assert_eq!(database, Path::new("/home/developer/.pki/nssdb"));
-        assert_eq!(
-            nss_database_argument(&database),
-            std::ffi::OsString::from("sql:/home/developer/.pki/nssdb")
-        );
+    fn nss_database_selection_handles_modern_legacy_and_existing_browsers() {
+        let home = std::env::temp_dir().join(format!("localweb nss {}", uuid::Uuid::new_v4()));
+        let current = home.join(".local/share/pki/nssdb");
+        let legacy = home.join(".pki/nssdb");
+        assert_eq!(nss_databases_for_home(&home), vec![current.clone()]);
+        fs::create_dir_all(&legacy).unwrap();
+        assert_eq!(nss_databases_for_home(&home), vec![legacy.clone()]);
+        fs::create_dir_all(&current).unwrap();
+        assert_eq!(nss_databases_for_home(&home), vec![legacy, current.clone()]);
+        let mut expected = std::ffi::OsString::from("sql:");
+        expected.push(&current);
+        assert_eq!(nss_database_argument(&current), expected);
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn browser_trust_repairs_missing_ssl_flags_and_preserves_other_entries() {
+        if !Path::new(NSS_CERTUTIL).is_file() {
+            eprintln!("NSS regression needs libnss3-tools or nss");
+            return;
+        }
+        let base = std::env::temp_dir().join(format!("localweb nss {}", uuid::Uuid::new_v4()));
+        let paths = crate::Paths {
+            config: base.join("config"),
+            data: base.join("data"),
+            state: base.join("state"),
+            runtime: base.join("runtime"),
+        };
+        let ca = crate::certificate::CaPaths::new(&paths);
+        ca.ensure_ca().unwrap();
+        let database = base.join("nssdb");
+        install_linux_browser_ca(&ca.cert, &database).unwrap();
+        assert!(linux_browser_ca_trusted(&ca.cert, &database));
+        let argument = nss_database_argument(&database);
+        let result = Command::new(NSS_CERTUTIL)
+            .args(["-M", "-d"])
+            .arg(&argument)
+            .args(["-n", CA_COMMON_NAME, "-t", ",,"])
+            .output()
+            .unwrap();
+        assert!(result.status.success(), "{result:?}");
+        assert!(!linux_browser_ca_trusted(&ca.cert, &database));
+        install_linux_browser_ca(&ca.cert, &database).unwrap();
+        assert!(linux_browser_ca_trusted(&ca.cert, &database));
+        let other_ca = crate::certificate::CaPaths::new(&crate::Paths {
+            data: base.join("other"),
+            ..paths
+        });
+        other_ca.ensure_ca().unwrap();
+        assert!(!linux_browser_ca_trusted(&other_ca.cert, &database));
+        let result = Command::new(NSS_CERTUTIL)
+            .args(["-A", "-d"])
+            .arg(&argument)
+            .args(["-n", "Unrelated CA", "-t", "C,,", "-a", "-i"])
+            .arg(&other_ca.cert)
+            .output()
+            .unwrap();
+        assert!(result.status.success(), "{result:?}");
+        remove_linux_browser_ca(&database).unwrap();
+        assert!(!linux_browser_ca_trusted(&ca.cert, &database));
+        let result = Command::new(NSS_CERTUTIL)
+            .args(["-L", "-d"])
+            .arg(&argument)
+            .args(["-n", "Unrelated CA"])
+            .output()
+            .unwrap();
+        assert!(result.status.success(), "{result:?}");
+        fs::remove_dir_all(base).unwrap();
     }
 }
