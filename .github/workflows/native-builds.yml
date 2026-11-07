@@ -89,7 +89,9 @@ jobs:
       - name: Install cargo-xwin
         run: cargo install --locked cargo-xwin
       - name: Cross-build and exercise the Windows binaries under Wine
-        run: bash scripts/windows-wine-smoke.sh
+        run: |
+          trap 'python3 .github/ci/report-failure.py windows-wine.log' ERR
+          bash scripts/windows-wine-smoke.sh 2>&1 | tee windows-wine.log
       - name: Package the Windows binaries
         run: bash scripts/build-windows-zip.sh
       - uses: actions/upload-artifact@v7.0.2
@@ -112,11 +114,12 @@ jobs:
         if: always()
         run: python .github/ci/report-rust-diagnostics.py "$env:RUNNER_TEMP/localweb-clippy.jsonl"
       - name: Run Windows workspace regressions
+        id: windows-tests
         run: |
           cargo test --workspace --all-targets 2>&1 | Tee-Object -FilePath "$env:RUNNER_TEMP/localweb-tests.log"
           exit $LASTEXITCODE
       - name: Report failing tests
-        if: failure()
+        if: failure() && steps.windows-tests.outcome == 'failure'
         run: python .github/ci/report-failure.py "$env:RUNNER_TEMP/localweb-tests.log"
 
   macos-package:

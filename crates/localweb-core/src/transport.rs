@@ -39,7 +39,19 @@ impl DaemonListener {
     ///
     /// Returns an error when another daemon already answers or the endpoint
     /// cannot be created.
-    pub async fn bind(paths: &Paths) -> Result<Self> {
+    pub fn bind(paths: &Paths) -> impl std::future::Future<Output = Result<Self>> + '_ {
+        #[cfg(unix)]
+        {
+            Self::bind_unix(paths)
+        }
+        #[cfg(windows)]
+        {
+            std::future::ready(Self::bind_windows(paths))
+        }
+    }
+
+    #[cfg(unix)]
+    async fn bind_unix(paths: &Paths) -> Result<Self> {
         let path = paths.socket();
         #[cfg(unix)]
         {
@@ -88,14 +100,16 @@ impl DaemonListener {
                 _lock: lock,
             })
         }
-        #[cfg(windows)]
-        {
-            let name = path
-                .to_str()
-                .ok_or_else(|| LocalWebError::Config("non-UTF-8 pipe name".into()))?;
-            let pending = crate::windows_ipc::create_server(name, true)?;
-            Ok(Self { path, pending })
-        }
+    }
+
+    #[cfg(windows)]
+    fn bind_windows(paths: &Paths) -> Result<Self> {
+        let path = paths.socket();
+        let name = path
+            .to_str()
+            .ok_or_else(|| LocalWebError::Config("non-UTF-8 pipe name".into()))?;
+        let pending = crate::windows_ipc::create_server(name, true)?;
+        Ok(Self { path, pending })
     }
 
     /// Returns the endpoint path or pipe name.

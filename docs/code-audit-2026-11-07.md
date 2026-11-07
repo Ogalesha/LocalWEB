@@ -22,7 +22,7 @@ macOS/Windows process ownership and public download publication. Ubuntu
 | Medium | Linux workers stayed stopped after a clean exit, including framework worker restarts. | Use restart-on-exit supervision. A real systemd worker exits successfully and is started again with its literal environment intact. |
 | Medium | macOS runtime discovery could report another PHP version's generic Homebrew binary as available; Windows checked CLI but not CGI version. | Require both selected executables to match; prefer private runtimes before system candidates. Regression rejects mixed PHP pairs. |
 | Medium | Windows Doctor required a bundled manifest absent from the portable ZIP and described CGI as FPM. | Report the actual native runtime provider and CGI interface. Cross-platform regression expectations now reflect each backend. |
-| Medium | Rolling releases retained old versioned installers, homepage links were indirect and source archives pointed at an old commit. | Publish four permanent OS-specific asset names, current checksums and the tested commit. Remove obsolete rolling installers only after replacement succeeds. Align the rolling source tag. Six publisher tests cover trusted run selection, complete matching versions, hashes and cleanup ordering. |
+| Medium | Rolling releases retained old versioned installers, homepage links were indirect and source archives pointed at an old commit. | Publish four permanent OS-specific asset names, current checksums and the tested commit. Remove obsolete rolling installers only after replacement succeeds. Align the rolling source tag. Nine publisher tests cover trusted run selection, complete matching versions, hashes, cleanup ordering and required checks. |
 
 ## Local application recovery
 
@@ -34,6 +34,9 @@ the app's base URL changed. The original stack's database was preserved.
 
 With the other stack stopped, Laravel's database inspection succeeded through
 LocalWeb's project proxy and the site returned HTTPS 200 using the local CA.
+After installing 0.1.4 and restarting the installed daemon, the site again
+returned HTTPS 200, all 31 tables remained available and a passwordless root
+TCP connection was rejected.
 No framework-specific bootstrap code was added to LocalWeb. Applications
 still own their configuration and data-import steps.
 

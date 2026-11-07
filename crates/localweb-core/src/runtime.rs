@@ -898,8 +898,8 @@ fn php_pair_matches(php: &Path, handler: &Path, version: &str) -> bool {
     {
         use std::os::windows::process::CommandExt as _;
         cli.creation_flags(0x0800_0000);
-        fastcgi.creation_flags(0x0800_0000);
-    }
+        fastcgi.creation_flags(0x0800_0000)
+    };
     cli.output().is_ok_and(|output| {
         output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == version
     }) && fastcgi.output().is_ok_and(|output| {

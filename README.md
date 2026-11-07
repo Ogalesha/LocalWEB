@@ -95,11 +95,12 @@ cross-built and exercised under Wine; a final acceptance run on real macOS
 and Windows hosts is still pending.
 
 The Linux jobs build and install the package, test PHP 8.0–8.5 with both web
-servers and all four database choices, checks Redis,
+servers and all four database choices, check Redis,
 Mailpit and the PHP CLI, then exercises stop, removal and source-folder
 preservation. Packages are uploaded as workflow artifacts only after the
-job passes. macOS also runs the workspace regression suite; Windows runs
-core and daemon regressions under Wine. These checks do not replace native
+job passes. macOS and Windows also run the workspace regression suite on
+native runners; Windows runs core and daemon regressions under Wine too.
+These checks do not replace native
 web-stack acceptance on macOS and Windows. Tagged versions and the rolling pre-release publish the same
 files as public release assets.
 
