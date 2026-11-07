@@ -21,7 +21,10 @@ CURRENT_ASSETS = {alias for _, alias, _ in PACKAGES} | {"SHA256SUMS"}
 
 
 def gh(*args):
-    return subprocess.check_output(["gh", *args], text=True).strip()
+    result = subprocess.run(["gh", *args], text=True, capture_output=True)
+    if result.returncode:
+        raise RuntimeError(result.stderr.strip()[-3000:])
+    return result.stdout.strip()
 
 
 def select_run(runs, repository):
@@ -136,4 +139,9 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except (ValueError, RuntimeError, OSError) as error:
+        message = str(error).replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+        print(f"::error title=Download publication::{message}", flush=True)
+        raise
