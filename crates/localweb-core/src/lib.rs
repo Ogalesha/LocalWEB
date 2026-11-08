@@ -1614,10 +1614,9 @@ mod tests {
         let report: serde_json::Value = serde_json::from_str(line).unwrap();
         assert_eq!(report["marker"], literal);
         assert_eq!(report["project"], "demo");
-        assert_eq!(
-            report["directory"],
-            serde_json::to_value(directory).unwrap()
-        );
+        let actual_directory: PathBuf =
+            serde_json::from_value(report["directory"].clone()).unwrap();
+        assert_eq!(actual_directory.canonicalize().unwrap(), directory);
         let path: std::ffi::OsString = serde_json::from_value(report["path"].clone()).unwrap();
         assert_eq!(
             std::env::split_paths(&path).collect::<Vec<_>>(),

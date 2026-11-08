@@ -121,7 +121,7 @@ jobs:
         id: windows-tests
         if: ${{ !cancelled() }}
         run: |
-          cargo test --workspace --all-targets 2>&1 | Tee-Object -FilePath "$env:RUNNER_TEMP/localweb-tests.log"
+          cargo test --workspace --all-targets --no-fail-fast 2>&1 | Tee-Object -FilePath "$env:RUNNER_TEMP/localweb-tests.log"
           exit $LASTEXITCODE
       - name: Report failing tests
         if: failure() && steps.windows-tests.outcome == 'failure'
