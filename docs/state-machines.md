@@ -36,6 +36,9 @@ handshake ordering. Run the workspace and native suites after completing
 the implementation changes. Full web-stack acceptance on macOS and Windows
 still requires native runtime installations; compilation and Wine checks
 are reported separately.
+Wine does not enforce `FILE_FLAG_FIRST_PIPE_INSTANCE`; its smoke suite
+excludes only that OS exclusivity test. The required native Windows job
+runs it, along with the complete workspace suite, without that exclusion.
 
 Verified locally on Ubuntu on 8 November 2026: 134 workspace tests, seven
 native service tests, nine publisher regressions, Clippy with warnings

@@ -196,11 +196,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn named_pipe_checks_peer_identity_and_single_owner() {
+    async fn first_pipe_instance_excludes_another_owner() {
+        let name = format!(r"\\.\pipe\lw-owner-test-{}", uuid::Uuid::new_v4());
+        let _owner = create_server(&name, true).unwrap();
+        create_server(&name, true).unwrap_err();
+    }
+
+    #[tokio::test]
+    async fn named_pipe_verifies_peer_and_exchanges_bytes() {
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
         let name = format!(r"\\.\pipe\lw-security-test-{}", uuid::Uuid::new_v4());
         let server = create_server(&name, true).unwrap();
-        create_server(&name, true).unwrap_err();
         let mut client = connect(&name).await.unwrap();
         assert!(verify_server(&client, "S-1-0-0").is_err());
         server.connect().await.unwrap();

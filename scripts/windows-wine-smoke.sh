@@ -78,7 +78,11 @@ records = [json.loads(line) for line in Path(sys.argv[1]).read_text().splitlines
 executables = sorted({record['executable'] for record in records if record.get('reason') == 'compiler-artifact' and record.get('profile', {}).get('test') and record.get('executable')})
 assert len(executables) == 2, executables
 for executable in executables:
-    subprocess.run([sys.argv[2], executable, '--test-threads=1'], check=True, timeout=240)
+    # Wine accepts a second FILE_FLAG_FIRST_PIPE_INSTANCE owner. The required
+    # native Windows job runs that OS exclusivity test without exclusions.
+    subprocess.run([sys.argv[2], executable, '--test-threads=1', '--skip',
+                    'windows_ipc::tests::first_pipe_instance_excludes_another_owner'],
+                   check=True, timeout=240)
 PYTEST
 
 echo '::notice title=Windows smoke phase::Starting the daemon and checking named-pipe communication'
