@@ -587,6 +587,8 @@ fn windows_certificate_error(output: &std::process::Output) -> LocalWebError {
 
 #[cfg(windows)]
 fn windows_certificate_present(certificate: &Path) -> Result<bool> {
+    use windows_sys::Win32::Foundation::{CRYPT_E_NOT_FOUND, NTE_NOT_FOUND};
+
     let fingerprint = windows_sha1_fingerprint(certificate)?;
     let output = windows_certutil_command()?
         .args(["-user", "-silent", "-store", "Root", &fingerprint])
@@ -594,7 +596,10 @@ fn windows_certificate_present(certificate: &Path) -> Result<bool> {
     if output.status.success() {
         return Ok(true);
     }
-    if output.status.code() == Some(windows_sys::Win32::Foundation::CRYPT_E_NOT_FOUND) {
+    if matches!(
+        output.status.code(),
+        Some(CRYPT_E_NOT_FOUND | NTE_NOT_FOUND)
+    ) {
         return Ok(false);
     }
     Err(windows_certificate_error(&output))
@@ -638,6 +643,12 @@ mod windows_tests {
     #[test]
     #[ignore = "temporarily modifies the current user's Root store; run explicitly on an isolated Windows runner"]
     fn windows_current_user_ca_install_query_and_remove() {
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = remove_current_user_ca(&self.0);
+            }
+        }
         let base = std::env::temp_dir().join(format!("lw-user-ca-{}", uuid::Uuid::new_v4()));
         let paths = crate::Paths {
             config: base.join("c"),
@@ -648,12 +659,6 @@ mod windows_tests {
         paths.create().unwrap();
         let ca = crate::certificate::CaPaths::new(&paths);
         ca.ensure_ca().unwrap();
-        struct Cleanup(PathBuf);
-        impl Drop for Cleanup {
-            fn drop(&mut self) {
-                let _ = remove_current_user_ca(&self.0);
-            }
-        }
         let cleanup = Cleanup(ca.cert.clone());
         assert!(!TrustStore::Windows.trusted(&ca.cert));
         install_current_user_ca(&ca.cert).unwrap();
