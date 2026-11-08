@@ -544,7 +544,7 @@ pub fn remove_current_user_ca(certificate: &Path) -> Result<()> {
     }
     let fingerprint = windows_sha1_fingerprint(certificate)?;
     let output = windows_certutil_command()?
-        .args(["-user", "-delstore", "Root", &fingerprint])
+        .args(["-user", "-silent", "-delstore", "Root", &fingerprint])
         .output()?;
     if !output.status.success() {
         return Err(windows_certificate_error(&output));
@@ -660,7 +660,12 @@ mod windows_tests {
         let ca = crate::certificate::CaPaths::new(&paths);
         ca.ensure_ca().unwrap();
         let cleanup = Cleanup(ca.cert.clone());
+        println!(
+            "LocalWeb test CA thumbprint: {}",
+            windows_sha1_fingerprint(&ca.cert).unwrap()
+        );
         assert!(!TrustStore::Windows.trusted(&ca.cert));
+        println!("Importing the test CA; Windows may request confirmation");
         install_current_user_ca(&ca.cert).unwrap();
         assert!(TrustStore::Windows.trusted(&ca.cert));
         install_current_user_ca(&ca.cert).unwrap();
@@ -674,6 +679,7 @@ mod windows_tests {
             TrustStore::Windows.trusted(&alternate),
             "trust follows DER identity, not PEM file bytes"
         );
+        println!("Removing the test CA");
         remove_current_user_ca(&alternate).unwrap();
         assert!(!TrustStore::Windows.trusted(&ca.cert));
         remove_current_user_ca(&ca.cert).unwrap();

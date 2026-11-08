@@ -43,6 +43,9 @@ excludes only that OS exclusivity test. The required native Windows job
 runs it, along with the complete workspace suite, without that exclusion.
 The user-certificate integration test is opt-in for local developers and
 runs explicitly on the isolated Windows CI host, with cleanup on failure.
+The CI wrapper accepts the Windows confirmation only when a native certutil
+dialog contains the generated test CA's exact thumbprint. Interactive users
+keep the system confirmation; a bounded timeout exposes stalled tests.
 
 Verified locally on Ubuntu on 8 November 2026: 134 workspace tests, seven
 native service tests, nine publisher regressions, Clippy with warnings
