@@ -49,7 +49,7 @@ still own their configuration and data-import steps.
 ## Verification and limits
 
 - Local Ubuntu workspace regression suite, formatting and Clippy with
-  warnings denied: 133 tests passed; all seven opt-in native service tests passed separately, including isolated database authentication checks.
+  warnings denied: 134 tests passed; all seven opt-in native service tests passed separately, including isolated database authentication checks.
 - Native checks cover Nginx/Apache/PHP/Redis, request metadata, paths with
   spaces, literal systemd arguments, cancellation of pending restarts and
   worker restart after exit 0.

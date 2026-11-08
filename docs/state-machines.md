@@ -16,6 +16,7 @@ requests or ownership of a resource.
 | Project activation | Start, restore or restart intent; prepare → health check → durable commit, with rollback on failure. | Typed intent replaces paired flags. Restart cancels the project's old scheduled commands before replacing services. |
 | Observed/persisted running set | Committed or retry needed. A completed stop changes memory before persistence; failed writes retry during maintenance. | A disk error cannot keep a stopped project marked running. Boot rewrites the successfully restored set. |
 | Partial runtime failure | Running or recovery needed; successful activation clears recovery. | Failed stop/rollback cannot become a false idempotent Start. Recovering a project recreates its owned services; boot reconciles leftover inactive services. |
+| Unexpected service/listener exit | A saved running entry is reusable only while its required services and owned proxy task remain alive. | Start recreates interrupted services and finished proxies. Native acceptance deliberately stops the web server and checks recovery through Start. |
 | Project update/remove | Validate → stop → save → restart; restore settings and restart separately on failure. | Recovery messages distinguish failed settings restoration from failed restart. Removal clears obsolete schedule history. |
 | Scheduler | Idle, running with an owned task, completed or cancelled; one dispatch per matching minute. | Shutdown cancels and joins all jobs. Maintenance releases finished/panicked task records. |
 | Database proxies | Bound listener with owned connection tasks → shutdown → released listener. | Existing `DbProxy` ownership closes established connections on stop and rollback. Shutdown drains the proxy registry. |
@@ -36,8 +37,10 @@ the implementation changes. Full web-stack acceptance on macOS and Windows
 still requires native runtime installations; compilation and Wine checks
 are reported separately.
 
-Verified locally on Ubuntu on 8 November 2026: 133 workspace tests, seven
+Verified locally on Ubuntu on 8 November 2026: 134 workspace tests, seven
 native service tests, nine publisher regressions, Clippy with warnings
 denied, package layout and an MCP process-level handshake/input-limit check.
 A fresh RustSec scan reported no vulnerability advisories; seven notices
 about unmaintained or yanked dependencies remain.
+A controlled stop of the local nginx process was recovered through Start;
+the application returned HTTP 200 again without replacing its data.

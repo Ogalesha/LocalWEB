@@ -56,8 +56,9 @@ use services::{Services, is_active, php_unit};
 
 /// Observed running set plus the state of its desired-state file.
 ///
-/// `active` is the source of truth for `Status` and `ProjectList`. It is
-/// updated before writing `active-projects.json`, so a failed write can never
+/// Running entries back `Status` and `ProjectList`; recovery entries require
+/// service reconstruction. A completed stop updates memory before writing
+/// `active-projects.json`, so a failed write can never
 /// make a stopped project look active. `RetryNeeded` asks the maintenance loop to
 /// retry the write.
 struct RunningState {
@@ -765,7 +766,18 @@ async fn start_project_locked(
         return Err(LocalWebError::Config("project is disabled".into()));
     }
     let old = state.running.lock().await.snapshot();
-    if old.contains(name) && mode != StartMode::Restart {
+    let proxy_ready = services::database_service_port(project.database).is_none()
+        || state
+            .db_proxies
+            .lock()
+            .await
+            .get(name)
+            .is_some_and(DbProxy::is_running);
+    if old.contains(name)
+        && mode != StartMode::Restart
+        && proxy_ready
+        && Services::project_is_active(&project)
+    {
         return Ok(());
     }
     let mut next = old.clone();
@@ -782,7 +794,12 @@ async fn start_project_locked(
             "web port {port} for {name} is already in use"
         )));
     }
-    let needs_proxy = !state.db_proxies.lock().await.contains_key(name);
+    let needs_proxy = !state
+        .db_proxies
+        .lock()
+        .await
+        .get(name)
+        .is_some_and(DbProxy::is_running);
     if needs_proxy {
         stop_db_proxy(state, name).await;
         if let Err(error) = start_db_proxy(state, &project).await {

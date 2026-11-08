@@ -17,6 +17,11 @@ pub struct DbProxy {
 }
 
 impl DbProxy {
+    /// Whether the owned listener task can still accept connections.
+    #[must_use]
+    pub fn is_running(&self) -> bool {
+        !self.task.is_finished()
+    }
     /// Binds `listen_port` on loopback and forwards connections to `target_port`.
     ///
     /// # Errors
@@ -81,6 +86,21 @@ impl Drop for DbProxy {
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn listener_exit_invalidates_the_running_proxy() {
+        let reserved = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let port = reserved.local_addr().unwrap().port();
+        drop(reserved);
+        let mut proxy = DbProxy::start(port, 9).await.unwrap();
+        assert!(proxy.is_running());
+        proxy.task.abort();
+        (&mut proxy.task).await.unwrap_err();
+        assert!(!proxy.is_running());
+        let _rebound = TcpListener::bind((Ipv4Addr::LOCALHOST, port))
+            .await
+            .unwrap();
+    }
 
     #[tokio::test]
     async fn rejects_a_listen_port_already_in_use() {

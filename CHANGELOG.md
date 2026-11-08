@@ -23,6 +23,7 @@ All notable changes to this project are documented here. The format follows
 - Make daemon, project recovery, UI requests and MCP initialization transitions explicit. Ignore stale UI replies and prevent queued work from restarting services during shutdown.
 - Retry failed state writes, cancel scheduled commands on restart/shutdown, and report settings restoration separately from runtime recovery.
 - Keep startup status probes responsive while restoring projects, with mutations queued until restoration finishes.
+- Recreate interrupted services and database proxy listeners when Start is requested for a previously running project.
 - Install and remove the CA in both Chromium NSS locations; verify SSL trust flags and reissue stale leaf certificates.
 
 ### Added

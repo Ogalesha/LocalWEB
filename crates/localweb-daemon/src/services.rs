@@ -71,6 +71,32 @@ pub struct Services<'a> {
 }
 
 impl Services<'_> {
+    pub fn project_is_active(project: &Project) -> bool {
+        let mut units = vec![php_unit(&project.php), "localweb-gateway".into()];
+        units.push(
+            match project.web_server {
+                WebServer::Nginx => "localweb-nginx",
+                WebServer::Apache => "localweb-apache",
+            }
+            .into(),
+        );
+        match project.database {
+            Database::Mariadb => units.push("localweb-db-mariadb".into()),
+            Database::Mysql => units.push("localweb-db-mysql".into()),
+            Database::Postgres => units.push("localweb-db-postgres".into()),
+            Database::None | Database::Sqlite => {}
+        }
+        if project.cache == Cache::Redis {
+            units.push(redis_unit(project));
+        }
+        if project.mail {
+            units.push(mailpit_unit(project));
+        }
+        if project.supervisor.enabled {
+            units.push(supervisor_unit(project));
+        }
+        units.iter().all(|unit| is_active(unit))
+    }
     #[cfg_attr(
         windows,
         expect(

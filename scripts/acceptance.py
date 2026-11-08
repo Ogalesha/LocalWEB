@@ -205,6 +205,11 @@ try:
                     body = response.read().decode()
                     assert body == f"8.{minor} database OK", f"direct HTTP port {web_port} returned {body!r}"
                 if name == "php8-0-nginx-mariadb":
+                    if not mac:
+                        subprocess.run(["systemctl", "--user", "stop", "localweb-nginx"], env=env, check=True)
+                        request("project_start", {"name": name})
+                        with opener.open(f"https://{name}.test", timeout=20) as response:
+                            assert response.read().decode() == "8.0 database OK", "Start did not recover the stopped web server"
                     daemon.kill()
                     daemon.wait(timeout=30)
                     daemon = subprocess.Popen([str(binary_dir / "localwebd")], env=env)
