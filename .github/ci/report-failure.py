@@ -44,7 +44,10 @@ else:
             re.I,
         )
     ]
-    selected = errors[-15:] or lines[-25:]
+    for index, line in enumerate(lines):
+        if "panicked at" in line:
+            selected.extend(lines[max(0, index - 1):index + 12])
+    selected.extend(errors[-15:] or lines[-25:])
 
 summary = "\n".join(selected)[-12000:]
 if fail_markers:

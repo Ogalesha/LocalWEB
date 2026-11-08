@@ -1055,7 +1055,7 @@ mod tests {
             PathBuf::from("/opt/localweb-runtime/runtime-manifest.json")
         );
         #[cfg(windows)]
-        assert!(layout.library_path().is_empty());
+        assert_eq!(layout.library_path(), "");
         #[cfg(not(windows))]
         assert!(
             layout

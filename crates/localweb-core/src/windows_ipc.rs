@@ -200,7 +200,7 @@ mod tests {
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
         let name = format!(r"\\.\pipe\lw-security-test-{}", uuid::Uuid::new_v4());
         let server = create_server(&name, true).unwrap();
-        assert!(create_server(&name, true).is_err());
+        create_server(&name, true).unwrap_err();
         let mut client = connect(&name).await.unwrap();
         assert!(verify_server(&client, "S-1-0-0").is_err());
         server.connect().await.unwrap();

@@ -119,6 +119,7 @@ jobs:
         run: python .github/ci/report-rust-diagnostics.py "$env:RUNNER_TEMP/localweb-clippy.jsonl"
       - name: Run Windows workspace regressions
         id: windows-tests
+        if: ${{ !cancelled() }}
         run: |
           cargo test --workspace --all-targets 2>&1 | Tee-Object -FilePath "$env:RUNNER_TEMP/localweb-tests.log"
           exit $LASTEXITCODE
