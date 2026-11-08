@@ -93,13 +93,21 @@ try:
         text=True,
         env=env,
     )
+    before_init = mcp_call(mcp, {"jsonrpc": "2.0", "id": 0, "method": "tools/list"})
+    assert before_init["error"]["code"] == -32002, before_init
     initialized = mcp_call(mcp, {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "acceptance", "version": "1"}}})
     assert initialized["result"]["serverInfo"]["name"] == "localweb"
+    mcp.stdin.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n")
+    mcp.stdin.flush()
     status = mcp_call(mcp, {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "localweb_status", "arguments": {}}})
     assert not status["result"]["isError"], status
+    duplicate_init = mcp_call(mcp, {"jsonrpc": "2.0", "id": 3, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}})
+    assert duplicate_init["error"]["code"] == -32600, duplicate_init
     mcp.terminate()
     mcp.wait(timeout=10)
     mcp = None
+    oversized = subprocess.run([str(binary_dir / "localweb-mcp")], input=" " * (1024 * 1024 + 1) + "\n", text=True, capture_output=True, env=env, timeout=10, check=True)
+    assert json.loads(oversized.stdout)["error"]["code"] == -32600
     domains = [f"php8-{minor}-{web}-{db}.test" for minor in range(6) for web in ("nginx", "apache") for db in ("mariadb", "mysql", "postgres", "sqlite")]
     domains.append("php-update.test")
     helper("sync-hosts", json.dumps({"address": gateway_address, "domains": domains}).encode())

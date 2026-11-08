@@ -13,7 +13,7 @@ use std::{
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
-    sync::{Mutex, Notify},
+    sync::{Mutex, watch},
 };
 use tracing::{error, info, warn};
 
@@ -54,15 +54,168 @@ mod services;
 use proxy::DbProxy;
 use services::{Services, is_active, php_unit};
 
+/// Observed running set plus the state of its desired-state file.
+///
+/// `active` is the source of truth for `Status` and `ProjectList`. It is
+/// updated before writing `active-projects.json`, so a failed write can never
+/// make a stopped project look active. `RetryNeeded` asks the maintenance loop to
+/// retry the write.
+struct RunningState {
+    projects: BTreeMap<String, ProjectRuntime>,
+    persistence: Persistence,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProjectRuntime {
+    Running,
+    RecoveryNeeded,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Persistence {
+    Committed,
+    RetryNeeded,
+}
+
+impl RunningState {
+    fn new() -> Self {
+        Self {
+            projects: BTreeMap::new(),
+            persistence: Persistence::Committed,
+        }
+    }
+
+    fn contains(&self, name: &str) -> bool {
+        self.projects.get(name) == Some(&ProjectRuntime::Running)
+    }
+
+    fn count(&self) -> usize {
+        self.projects
+            .values()
+            .filter(|state| **state == ProjectRuntime::Running)
+            .count()
+    }
+
+    fn snapshot(&self) -> BTreeSet<String> {
+        self.projects
+            .iter()
+            .filter(|(_, state)| **state == ProjectRuntime::Running)
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+
+    fn needs_recovery(&self, name: &str) -> bool {
+        self.projects.get(name) == Some(&ProjectRuntime::RecoveryNeeded)
+    }
+
+    fn mark_recovery(
+        &mut self,
+        paths: &Paths,
+        names: &BTreeSet<String>,
+    ) -> localweb_core::Result<()> {
+        for name in names {
+            self.projects
+                .insert(name.clone(), ProjectRuntime::RecoveryNeeded);
+        }
+        self.persistence = Persistence::RetryNeeded;
+        self.persist(paths)
+    }
+
+    fn forget(&mut self, name: &str) {
+        self.projects.remove(name);
+    }
+
+    fn replace_running(&mut self, active: BTreeSet<String>) {
+        self.projects
+            .retain(|_, state| *state == ProjectRuntime::RecoveryNeeded);
+        self.projects.extend(
+            active
+                .into_iter()
+                .map(|name| (name, ProjectRuntime::Running)),
+        );
+    }
+
+    /// Commits an observed set: memory first, then the desired-state file.
+    ///
+    /// A failed write keeps the new observed state and marks it dirty so the
+    /// maintenance loop can retry without reporting stale running projects.
+    fn commit(&mut self, paths: &Paths, active: BTreeSet<String>) -> localweb_core::Result<()> {
+        self.replace_running(active);
+        self.persistence = Persistence::RetryNeeded;
+        self.persist(paths)
+    }
+
+    /// Records a set whose file write already succeeded.
+    fn set_committed(&mut self, active: BTreeSet<String>) {
+        self.replace_running(active);
+        self.persistence = Persistence::Committed;
+    }
+
+    /// Writes the observed set and marks it committed on success.
+    fn persist(&mut self, paths: &Paths) -> localweb_core::Result<()> {
+        persist_running(paths, &self.snapshot())?;
+        self.persistence = Persistence::Committed;
+        Ok(())
+    }
+
+    /// Forces a write after boot so the file matches what actually restarted.
+    fn force_persist(&mut self, paths: &Paths) -> localweb_core::Result<()> {
+        self.persistence = Persistence::RetryNeeded;
+        self.persist(paths)
+    }
+
+    /// Retries a failed write, if needed.
+    fn reconcile(&mut self, paths: &Paths) -> localweb_core::Result<()> {
+        if self.persistence == Persistence::RetryNeeded {
+            self.persist(paths)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DaemonPhase {
+    Restoring,
+    Serving,
+    Stopping,
+    Stopped,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StartMode {
+    Start,
+    Restore,
+    Restart,
+}
+
 struct State {
     paths: Paths,
     config: GlobalConfig,
-    running: Mutex<BTreeSet<String>>,
-    operations: Mutex<()>,
+    running: Mutex<RunningState>,
+    operations: Mutex<DaemonPhase>,
     db_proxies: Mutex<BTreeMap<String, DbProxy>>,
     cron_jobs: Mutex<BTreeMap<(String, usize), tokio::task::JoinHandle<()>>>,
     cron_last_minute: Mutex<BTreeMap<(String, usize), i64>>,
-    shutdown: Notify,
+    shutdown: watch::Sender<bool>,
+}
+
+impl State {
+    async fn begin_operation(
+        &self,
+    ) -> localweb_core::Result<tokio::sync::MutexGuard<'_, DaemonPhase>> {
+        let phase = self.operations.lock().await;
+        if *phase == DaemonPhase::Restoring {
+            return Err(LocalWebError::Service(
+                "LocalWeb could not finish starting; check its daemon log".into(),
+            ));
+        }
+        if *phase != DaemonPhase::Serving {
+            return Err(LocalWebError::Service(
+                "LocalWeb is stopping; start it again before changing projects".into(),
+            ));
+        }
+        Ok(phase)
+    }
 }
 
 #[tokio::main]
@@ -94,22 +247,32 @@ async fn main() -> Result<()> {
     let state = Arc::new(State {
         paths,
         config,
-        running: Mutex::new(BTreeSet::new()),
-        operations: Mutex::new(()),
+        running: Mutex::new(RunningState::new()),
+        operations: Mutex::new(DaemonPhase::Restoring),
         db_proxies: Mutex::new(BTreeMap::new()),
         cron_jobs: Mutex::new(BTreeMap::new()),
         cron_last_minute: Mutex::new(BTreeMap::new()),
-        shutdown: Notify::new(),
+        shutdown: watch::channel(false).0,
     });
-    for name in restore {
-        if let Err(error) = restore_project(&state, &name).await {
-            error!(project = %name, %error, "project restore failed");
-        }
-    }
-    tokio::spawn(cron_loop(Arc::clone(&state)));
+    let boot_guard = state.operations.lock().await;
+    let startup = restore_services(&state, restore, boot_guard);
+    tokio::pin!(startup);
+    let mut restoring = true;
     info!(endpoint = %listener.path().display(), "daemon listening");
-    loop {
+    let mut shutdown = state.shutdown.subscribe();
+    let result = loop {
+        if *shutdown.borrow() {
+            break Ok(());
+        }
         tokio::select! {
+            result = &mut startup, if restoring => {
+                restoring = false;
+                if let Err(error) = result {
+                    break Err(error);
+                }
+                tokio::spawn(cron_loop(Arc::clone(&state)));
+                info!("project restoration complete");
+            }
             incoming = listener.accept() => {
                 match incoming {
                     Ok(stream) => {
@@ -126,11 +289,50 @@ async fn main() -> Result<()> {
                     }
                 }
             }
-            () = state.shutdown.notified() => break,
+            _ = shutdown.changed() => break Ok(()),
         }
-    }
+    };
     listener.cleanup()?;
     info!("daemon stopped");
+    result
+}
+
+async fn restore_services(
+    state: &Arc<State>,
+    restore: BTreeSet<String>,
+    mut phase: tokio::sync::MutexGuard<'_, DaemonPhase>,
+) -> Result<()> {
+    // The listener remains responsive to read-only probes. Mutations queue
+    // behind this guard until restoration has committed its result.
+    for name in restore {
+        if let Err(error) = start_project_locked(state, &name, StartMode::Restore).await {
+            error!(project = %name, %error, "project restore failed");
+        }
+    }
+    let active = state.running.lock().await.snapshot();
+    let task_state = Arc::clone(state);
+    let recovery = tokio::task::spawn_blocking(move || -> localweb_core::Result<BTreeSet<String>> {
+        let mut recovery = BTreeSet::new();
+        for project in load_projects(&task_state.paths)? {
+            if !active.contains(&project.name) && let Err(error) = stop_project_owned_services(&project) {
+                warn!(project = %project.name, %error, "inactive project cleanup needs recovery");
+                recovery.insert(project.name);
+            }
+        }
+        if active.is_empty() {
+            shutdown_services(&task_state)?;
+        } else {
+            apply_services(&task_state, &active)?;
+        }
+        Ok(recovery)
+    }).await.map_err(|error| join_failed(&error))??;
+    state
+        .running
+        .lock()
+        .await
+        .mark_recovery(&state.paths, &recovery)?;
+    state.running.lock().await.force_persist(&state.paths)?;
+    *phase = DaemonPhase::Serving;
     Ok(())
 }
 
@@ -175,7 +377,7 @@ async fn reply<S>(
     stream: &mut S,
     response: Response,
     shutdown_requested: bool,
-    shutdown: &Notify,
+    shutdown: &watch::Sender<bool>,
 ) -> Result<()>
 where
     S: tokio::io::AsyncWrite + Unpin,
@@ -190,7 +392,7 @@ where
     data.push(b'\n');
     let written = stream.write_all(&data).await;
     if stop {
-        shutdown.notify_waiters();
+        shutdown.send_replace(true);
     }
     written?;
     Ok(())
@@ -222,26 +424,44 @@ async fn execute(request: Request, state: &Arc<State>) -> localweb_core::Result<
                 gateway_bind_address: gateway_endpoint.map(|endpoint| endpoint.bind_address),
                 gateway_https_port: gateway_endpoint.map(|endpoint| endpoint.https_port),
                 project_count: projects.len(),
-                active_projects: state.running.lock().await.len(),
+                active_projects: state.running.lock().await.count(),
             }))
         }
         Request::Shutdown => {
-            let _operations = state.operations.lock().await;
+            let mut phase = state.begin_operation().await?;
+            *phase = DaemonPhase::Stopping;
+            cancel_all_cron(state).await;
+            let proxies = std::mem::take(&mut *state.db_proxies.lock().await);
+            for (_, proxy) in proxies {
+                proxy.stop().await;
+            }
             let result = {
                 let state = Arc::clone(state);
                 tokio::task::spawn_blocking(move || shutdown_services(&state))
                     .await
-                    .map_err(|error| join_failed(&error))?
+                    .map_err(|error| join_failed(&error))
+                    .and_then(std::convert::identity)
             };
             match result {
                 Ok(()) => {
-                    persist_running(&state.paths, &BTreeSet::new())?;
-                    state.running.lock().await.clear();
+                    if let Err(error) = state
+                        .running
+                        .lock()
+                        .await
+                        .commit(&state.paths, BTreeSet::new())
+                    {
+                        *phase = DaemonPhase::Serving;
+                        return Err(error);
+                    }
+                    *phase = DaemonPhase::Stopped;
                     Ok(Response::Message(
                         localweb_core::copy::LOCALWEB_STOPPED.into(),
                     ))
                 }
                 Err(error) => {
+                    let active = state.running.lock().await.snapshot();
+                    require_recovery(state, &active).await;
+                    *phase = DaemonPhase::Serving;
                     error!(%error, "shutdown left services running; desired state was preserved");
                     Err(error)
                 }
@@ -280,7 +500,7 @@ async fn execute(request: Request, state: &Arc<State>) -> localweb_core::Result<
             }))
         }
         Request::ProjectAdd(input) => {
-            let _operations = state.operations.lock().await;
+            let _operations = state.begin_operation().await?;
             let mut project = Project::from_new(input, &state.config)?;
             for owned in [
                 &state.paths.config,
@@ -315,7 +535,7 @@ async fn execute(request: Request, state: &Arc<State>) -> localweb_core::Result<
             }))
         }
         Request::ProjectUpdate { name, input } => {
-            let _operations = state.operations.lock().await;
+            let _operations = state.begin_operation().await?;
             let existing = find_project(&state.paths, &name)?;
             let mut updated = Project::from_update(&existing, input, &state.config)?;
             let projects = load_projects(&state.paths)?;
@@ -347,29 +567,33 @@ async fn execute(request: Request, state: &Arc<State>) -> localweb_core::Result<
             }
             if let Err(error) = save_project(&state.paths, &updated) {
                 if was_running {
-                    let _ = start_project_locked(state, &name, false, true).await;
+                    let recovery = start_project_locked(state, &name, StartMode::Start).await;
+                    return Err(combine_rollback(error, recovery));
                 }
                 return Err(error);
             }
             let running = if was_running {
-                match start_project_locked(state, &name, false, true).await {
+                match start_project_locked(state, &name, StartMode::Start).await {
                     Ok(()) => true,
                     Err(error) => {
-                        let restore = save_project(&state.paths, &existing);
-                        let recovery = match restore {
-                            Ok(()) => start_project_locked(state, &name, false, true).await.err(),
-                            Err(restore) => Some(restore),
-                        };
                         let mut message =
                             format!("could not start {name} with the updated settings: {error}");
-                        match recovery {
-                            Some(recovery) => {
-                                message.push_str(
-                                    "; the previous settings were restored but the project could not be restarted: ",
-                                );
-                                message.push_str(&recovery.to_string());
+                        match save_project(&state.paths, &existing) {
+                            Err(restore) => {
+                                message.push_str("; the previous settings could not be restored: ");
+                                message.push_str(&restore.to_string());
                             }
-                            None => message.push_str("; the previous settings were restored"),
+                            Ok(()) => {
+                                match start_project_locked(state, &name, StartMode::Start).await {
+                                    Ok(()) => message.push_str(
+                                        "; the previous settings and running project were restored",
+                                    ),
+                                    Err(recovery) => {
+                                        message.push_str("; the previous settings were restored but the project could not be restarted: ");
+                                        message.push_str(&recovery.to_string());
+                                    }
+                                }
+                            }
                         }
                         return Err(LocalWebError::Service(message));
                     }
@@ -386,13 +610,18 @@ async fn execute(request: Request, state: &Arc<State>) -> localweb_core::Result<
             }))
         }
         Request::ProjectRemove { name } => {
-            let _operations = state.operations.lock().await;
+            let _operations = state.begin_operation().await?;
             let project = find_project(&state.paths, &name)?;
             let was_running = state.running.lock().await.contains(&name);
             // Stop first so an active project never keeps serving with a
             // configuration that no longer exists.
             stop_project_locked(state, &name).await?;
             fs::remove_file(state.paths.project_file(project.id))?;
+            state
+                .cron_last_minute
+                .lock()
+                .await
+                .retain(|(project, _), _| project != &name);
             cleanup_project_runtime(&state.paths, &project);
             Ok(Response::Message(localweb_core::copy::project_removed(
                 &name,
@@ -413,6 +642,7 @@ async fn execute(request: Request, state: &Arc<State>) -> localweb_core::Result<
             Ok(Response::Message(format!("{name} is stopped")))
         }
         Request::ProjectEnvironment { name } => {
+            let _operations = state.begin_operation().await?;
             let project = find_project(&state.paths, &name)?;
             let services = Services {
                 paths: &state.paths,
@@ -421,6 +651,7 @@ async fn execute(request: Request, state: &Arc<State>) -> localweb_core::Result<
         }
         Request::RuntimeList => Ok(Response::Diagnostics(runtime_diagnostics())),
         Request::ResolveExecution { name } => {
+            let _operations = state.begin_operation().await?;
             let project = find_project(&state.paths, &name)?;
             let services = Services {
                 paths: &state.paths,
@@ -514,44 +745,36 @@ fn install_shim(link: &std::path::Path, target: &std::path::Path) -> localweb_co
 }
 
 async fn start_project(state: &Arc<State>, name: &str) -> localweb_core::Result<()> {
-    let _operations = state.operations.lock().await;
-    start_project_locked(state, name, false, true).await
-}
-
-/// Restarts a project that was running before the daemon restarted.
-///
-/// The preflight that rejects a busy web port is skipped because the daemon's
-/// own nginx or Apache unit may still be serving the port after a crash.
-async fn restore_project(state: &Arc<State>, name: &str) -> localweb_core::Result<()> {
-    let _operations = state.operations.lock().await;
-    start_project_locked(state, name, false, false).await
+    let _operations = state.begin_operation().await?;
+    start_project_locked(state, name, StartMode::Start).await
 }
 
 async fn restart_project(state: &Arc<State>, name: &str) -> localweb_core::Result<()> {
-    let _operations = state.operations.lock().await;
-    let running = state.running.lock().await.contains(name);
-    start_project_locked(state, name, running, !running).await
+    let _operations = state.begin_operation().await?;
+    cancel_project_cron(state, name).await;
+    start_project_locked(state, name, StartMode::Restart).await
 }
 
 async fn start_project_locked(
     state: &Arc<State>,
     name: &str,
-    restart: bool,
-    preflight_ports: bool,
+    mode: StartMode,
 ) -> localweb_core::Result<()> {
     let project = find_project(&state.paths, name)?;
     if !project.enabled {
         return Err(LocalWebError::Config("project is disabled".into()));
     }
-    let old = state.running.lock().await.clone();
-    if old.contains(name) && !restart {
+    let old = state.running.lock().await.snapshot();
+    if old.contains(name) && mode != StartMode::Restart {
         return Ok(());
     }
     let mut next = old.clone();
     next.insert(name.to_owned());
     let fresh = !old.contains(name);
+    let recovery = state.running.lock().await.needs_recovery(name);
     if fresh
-        && preflight_ports
+        && !recovery
+        && mode != StartMode::Restore
         && let Some(port) = project.web_port
         && !port_available(port)
     {
@@ -604,7 +827,7 @@ async fn start_project_locked(
             rollback_start(state, &project, name, &old, fresh).await,
         ));
     }
-    *state.running.lock().await = next;
+    state.running.lock().await.set_committed(next);
     Ok(())
 }
 
@@ -662,15 +885,39 @@ async fn rollback_start(
     if fresh {
         stop_db_proxy(state, name).await;
     }
-    let state = Arc::clone(state);
+    let task_state = Arc::clone(state);
     let project = project.clone();
-    let name = name.to_owned();
+    let mut affected = old.clone();
+    affected.insert(name.to_owned());
+    let task_name = name.to_owned();
     let old = old.clone();
-    tokio::task::spawn_blocking(move || {
-        rollback_start_services(&state, &project, &name, &old, fresh)
+    let rollback = tokio::task::spawn_blocking(move || {
+        rollback_start_services(&task_state, &project, &task_name, &old, fresh)
     })
     .await
-    .map_err(|error| join_failed(&error))?
+    .map_err(|error| join_failed(&error))
+    .and_then(std::convert::identity);
+    if rollback.is_err() {
+        require_recovery(state, &affected).await;
+    } else if fresh {
+        state.running.lock().await.forget(name);
+    }
+    rollback
+}
+
+async fn require_recovery(state: &Arc<State>, names: &BTreeSet<String>) {
+    for name in names {
+        cancel_project_cron(state, name).await;
+        stop_db_proxy(state, name).await;
+    }
+    if let Err(error) = state
+        .running
+        .lock()
+        .await
+        .mark_recovery(&state.paths, names)
+    {
+        error!(%error, "could not persist projects needing recovery; will retry");
+    }
 }
 
 fn rollback_start_services(
@@ -751,21 +998,27 @@ fn join_failed(error: &tokio::task::JoinError) -> LocalWebError {
 }
 
 async fn stop_project(state: &Arc<State>, name: &str) -> localweb_core::Result<()> {
-    let _operations = state.operations.lock().await;
+    let _operations = state.begin_operation().await?;
     stop_project_locked(state, name).await
 }
 
 async fn stop_project_locked(state: &Arc<State>, name: &str) -> localweb_core::Result<()> {
     let project = find_project(&state.paths, name)?;
     cancel_project_cron(state, name).await;
-    let mut active = state.running.lock().await.clone();
-    if !active.remove(name) {
+    let mut active = state.running.lock().await.snapshot();
+    let was_running = active.remove(name);
+    let recovery = state.running.lock().await.needs_recovery(name);
+    if !was_running && !recovery {
         let project_owned = project.clone();
         let stopped =
             tokio::task::spawn_blocking(move || stop_project_owned_services(&project_owned))
                 .await
-                .map_err(|error| join_failed(&error))?;
+                .map_err(|error| join_failed(&error))
+                .and_then(std::convert::identity);
         stop_db_proxy(state, name).await;
+        if stopped.is_err() {
+            require_recovery(state, &BTreeSet::from([name.to_owned()])).await;
+        }
         return stopped;
     }
     let state_owned = Arc::clone(state);
@@ -775,13 +1028,16 @@ async fn stop_project_locked(state: &Arc<State>, name: &str) -> localweb_core::R
         stop_project_services(&state_owned, &project_owned, &active_owned)
     })
     .await
-    .map_err(|error| join_failed(&error))?;
+    .map_err(|error| join_failed(&error))
+    .and_then(std::convert::identity);
     if let Err(error) = stopped {
-        error!(project = %name, %error, "project stop failed; committed state was preserved");
+        require_recovery(state, &BTreeSet::from([name.to_owned()])).await;
+        error!(project = %name, %error, "project stop failed; recovery is required");
         return Err(error);
     }
     stop_db_proxy(state, name).await;
-    *state.running.lock().await = active;
+    state.running.lock().await.forget(name);
+    state.running.lock().await.commit(&state.paths, active)?;
     Ok(())
 }
 
@@ -835,7 +1091,6 @@ fn stop_project_services(
             failures.join("; ")
         )));
     }
-    persist_running(&state.paths, active)?;
     if !active_uses_database(&state.paths, active, localweb_core::Database::Mariadb)
         && let Err(error) = Services::stop("localweb-db-mariadb")
     {
@@ -1241,22 +1496,25 @@ fn shutdown_services(state: &State) -> localweb_core::Result<()> {
     if let Err(error) = write_routes(state, &BTreeSet::new()) {
         failures.push(error.to_string());
     }
-    if let Ok(projects) = load_projects(&state.paths) {
-        for project in projects {
-            if let Err(error) = Services::stop_supervisor(&project) {
-                failures.push(error.to_string());
-            }
-            if project.cache == localweb_core::Cache::Redis
-                && let Err(error) = Services::stop_redis(&project)
-            {
-                failures.push(error.to_string());
-            }
-            if project.mail
-                && let Err(error) = Services::stop_mailpit(&project)
-            {
-                failures.push(error.to_string());
+    match load_projects(&state.paths) {
+        Ok(projects) => {
+            for project in projects {
+                if let Err(error) = Services::stop_supervisor(&project) {
+                    failures.push(error.to_string());
+                }
+                if project.cache == localweb_core::Cache::Redis
+                    && let Err(error) = Services::stop_redis(&project)
+                {
+                    failures.push(error.to_string());
+                }
+                if project.mail
+                    && let Err(error) = Services::stop_mailpit(&project)
+                {
+                    failures.push(error.to_string());
+                }
             }
         }
+        Err(error) => failures.push(format!("could not inspect project-owned services: {error}")),
     }
     for version in localweb_core::PHP_VERSIONS {
         if let Err(error) = Services::stop(&php_unit(version)) {
@@ -1555,9 +1813,13 @@ fn healthy_response(response: &[u8]) -> bool {
 
 async fn cron_loop(state: Arc<State>) {
     let mut ticker = tokio::time::interval(CRON_TICK_INTERVAL);
+    let mut shutdown = state.shutdown.subscribe();
     loop {
+        if *shutdown.borrow() {
+            break;
+        }
         tokio::select! {
-            () = state.shutdown.notified() => break,
+            _ = shutdown.changed() => break,
             _ = ticker.tick() => cron_tick(&state).await,
         }
     }
@@ -1566,7 +1828,12 @@ async fn cron_loop(state: Arc<State>) {
 async fn cron_tick(state: &Arc<State>) {
     // Register due jobs under the same lock as stop/remove. Otherwise a tick
     // could launch a job from an obsolete running-project snapshot after stop.
-    let _operations = state.operations.lock().await;
+    let Ok(_operations) = state.begin_operation().await else {
+        return;
+    };
+    if let Err(error) = state.running.lock().await.reconcile(&state.paths) {
+        error!(%error, "could not persist the observed running projects; will retry");
+    }
     let now = chrono::Local::now();
     let projects = match load_projects(&state.paths) {
         Ok(projects) => projects,
@@ -1575,7 +1842,13 @@ async fn cron_tick(state: &Arc<State>) {
             return;
         }
     };
-    let running = state.running.lock().await.clone();
+    let running = state.running.lock().await.snapshot();
+    // A panicking job cannot execute its normal completion cleanup.
+    state
+        .cron_jobs
+        .lock()
+        .await
+        .retain(|_, job| !job.is_finished());
     for project in projects {
         if !running.contains(&project.name) || project.cron.is_empty() {
             continue;
@@ -1625,6 +1898,16 @@ async fn cancel_project_cron(state: &State, name: &str) {
         handle.abort();
     }
     for handle in handles {
+        let _ = handle.await;
+    }
+}
+
+async fn cancel_all_cron(state: &State) {
+    let jobs = std::mem::take(&mut *state.cron_jobs.lock().await);
+    for handle in jobs.values() {
+        handle.abort();
+    }
+    for (_, handle) in jobs {
         let _ = handle.await;
     }
 }
@@ -2017,18 +2300,115 @@ mod tests {
         fs::remove_dir_all(base).unwrap();
     }
 
+    #[test]
+    fn stopped_projects_stay_stopped_when_persistence_fails_then_recovers() {
+        let (base, paths, _) = project_fixture();
+        let file = paths.state.join("active-projects.json");
+        fs::create_dir(&file).unwrap();
+        let mut running = RunningState::new();
+        running.set_committed(BTreeSet::from(["demo".into()]));
+        assert!(running.commit(&paths, BTreeSet::new()).is_err());
+        assert!(!running.contains("demo"));
+        assert_eq!(running.persistence, Persistence::RetryNeeded);
+        fs::remove_dir(&file).unwrap();
+        running.reconcile(&paths).unwrap();
+        assert_eq!(running.persistence, Persistence::Committed);
+        assert!(load_desired_running(&paths).unwrap().is_empty());
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn failed_stop_needs_recovery_instead_of_becoming_an_idempotent_start() {
+        let (base, paths, _) = project_fixture();
+        let mut running = RunningState::new();
+        running.set_committed(BTreeSet::from(["demo".into(), "other".into()]));
+        running
+            .mark_recovery(&paths, &BTreeSet::from(["demo".into()]))
+            .unwrap();
+        assert!(!running.contains("demo"));
+        assert!(running.needs_recovery("demo"));
+        assert!(running.contains("other"));
+        assert_eq!(
+            load_desired_running(&paths).unwrap(),
+            BTreeSet::from(["other".into()])
+        );
+        running.set_committed(BTreeSet::from(["demo".into(), "other".into()]));
+        assert!(running.contains("demo"));
+        assert!(!running.needs_recovery("demo"));
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn shutdown_phase_rejects_new_operations_and_cancels_all_jobs() {
+        let (base, paths, _) = project_fixture();
+        let state = State {
+            paths,
+            config: GlobalConfig::default(),
+            running: Mutex::new(RunningState::new()),
+            operations: Mutex::new(DaemonPhase::Serving),
+            db_proxies: Mutex::new(BTreeMap::new()),
+            cron_jobs: Mutex::new(BTreeMap::new()),
+            cron_last_minute: Mutex::new(BTreeMap::new()),
+            shutdown: watch::channel(false).0,
+        };
+        let job = tokio::spawn(std::future::pending());
+        let cancelled = job.abort_handle();
+        state.cron_jobs.lock().await.insert(("demo".into(), 0), job);
+        *state.operations.lock().await = DaemonPhase::Stopping;
+        state.begin_operation().await.unwrap_err();
+        cancel_all_cron(&state).await;
+        assert!(cancelled.is_finished());
+        assert!(state.cron_jobs.lock().await.is_empty());
+        *state.operations.lock().await = DaemonPhase::Stopped;
+        state.begin_operation().await.unwrap_err();
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn startup_answers_status_while_mutations_wait_for_restoration() {
+        let (base, paths, project) = project_fixture();
+        let state = Arc::new(State {
+            paths,
+            config: GlobalConfig::default(),
+            running: Mutex::new(RunningState::new()),
+            operations: Mutex::new(DaemonPhase::Restoring),
+            db_proxies: Mutex::new(BTreeMap::new()),
+            cron_jobs: Mutex::new(BTreeMap::new()),
+            cron_last_minute: Mutex::new(BTreeMap::new()),
+            shutdown: watch::channel(false).0,
+        });
+        let mut guard = state.operations.lock().await;
+        let status = tokio::time::timeout(Duration::from_secs(2), execute(Request::Status, &state))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(status, Response::Status(_)));
+        let input = serde_json::from_value(serde_json::json!({"path":project.path,"name":"queued","hostname":"queued.test","autostart":false})).unwrap();
+        let mutation = execute(Request::ProjectAdd(input), &state);
+        tokio::pin!(mutation);
+        tokio::time::timeout(Duration::from_millis(10), &mut mutation)
+            .await
+            .unwrap_err();
+        assert!(load_projects(&state.paths).unwrap().is_empty());
+        *guard = DaemonPhase::Serving;
+        drop(guard);
+        assert!(matches!(mutation.await.unwrap(), Response::Project(_)));
+        assert_eq!(load_projects(&state.paths).unwrap().len(), 1);
+        fs::remove_dir_all(base).unwrap();
+    }
+
     #[tokio::test]
     async fn stopping_cron_only_cancels_the_selected_projects_tasks() {
         let (base, paths, _) = project_fixture();
         let state = State {
             paths,
             config: GlobalConfig::default(),
-            running: Mutex::new(BTreeSet::new()),
-            operations: Mutex::new(()),
+            running: Mutex::new(RunningState::new()),
+            operations: Mutex::new(DaemonPhase::Serving),
             db_proxies: Mutex::new(BTreeMap::new()),
             cron_jobs: Mutex::new(BTreeMap::new()),
             cron_last_minute: Mutex::new(BTreeMap::new()),
-            shutdown: Notify::new(),
+            shutdown: watch::channel(false).0,
         };
         let selected = tokio::spawn(std::future::pending());
         let other = tokio::spawn(std::future::pending());
@@ -2102,10 +2482,7 @@ mod tests {
 
     #[tokio::test]
     async fn failed_shutdown_keeps_the_daemon_available() {
-        let shutdown = Notify::new();
-        let notified = shutdown.notified();
-        tokio::pin!(notified);
-        notified.as_mut().enable();
+        let shutdown = watch::channel(false).0;
         reply(
             &mut tokio::io::sink(),
             Response::Error {
@@ -2117,19 +2494,12 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(
-            tokio::time::timeout(Duration::from_millis(10), notified)
-                .await
-                .is_err()
-        );
+        assert!(!*shutdown.borrow());
     }
 
     #[tokio::test]
     async fn successful_shutdown_finishes_when_the_client_disconnects() {
-        let shutdown = Notify::new();
-        let notified = shutdown.notified();
-        tokio::pin!(notified);
-        notified.as_mut().enable();
+        let shutdown = watch::channel(false).0;
         let (mut server, client) = tokio::io::duplex(64);
         drop(client);
         reply(
@@ -2140,9 +2510,10 @@ mod tests {
         )
         .await
         .unwrap_err();
-        tokio::time::timeout(Duration::from_secs(1), notified)
-            .await
-            .unwrap();
+        assert!(
+            *shutdown.subscribe().borrow(),
+            "late subscribers must observe shutdown too"
+        );
     }
 
     #[test]

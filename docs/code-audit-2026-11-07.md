@@ -38,13 +38,18 @@ LocalWeb's project proxy and the site returned HTTPS 200 using the local CA.
 After installing 0.1.4 and restarting the installed daemon, the site again
 returned HTTPS 200, all 31 tables remained available and a passwordless root
 TCP connection was rejected.
+For the reported Brave certificate error, the exact live leaf certificate
+passed NSS validation. A fresh Brave session then loaded the site with HTTP
+200, TLS 1.3 and `securityState: secure`, without disabling certificate checks.
+Both existing NSS stores contain the CA with SSL trust. Installation and
+removal now handle both locations; already open browsers may need a restart.
 No framework-specific bootstrap code was added to LocalWeb. Applications
 still own their configuration and data-import steps.
 
 ## Verification and limits
 
 - Local Ubuntu workspace regression suite, formatting and Clippy with
-  warnings denied: 114 tests passed; seven opt-in native service tests run separately, including isolated database authentication checks.
+  warnings denied: 133 tests passed; all seven opt-in native service tests passed separately, including isolated database authentication checks.
 - Native checks cover Nginx/Apache/PHP/Redis, request metadata, paths with
   spaces, literal systemd arguments, cancellation of pending restarts and
   worker restart after exit 0.

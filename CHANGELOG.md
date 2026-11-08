@@ -6,19 +6,24 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-## [0.1.4] - 2026-11-07
+## [0.1.4] - 2026-11-08
 
 ### Security
 
 - Protect MariaDB and MySQL administration with private credentials; reject passwordless root access without changing app database credentials or data.
 - Reject unrelated Host headers on direct web ports, cancel command trees on stop/timeout, and verify native process identity before termination.
 - Restrict Windows daemon pipes to the native account and verify the server's SID before exchanging data.
+- Resolve Windows system tools through the native system directory, and verify certificate/key identity before reusing TLS material.
 
 ### Fixed
 
 - Correct Nginx FastCGI metadata, Apache high-port reporting, project environment exports, worker restart and cron stop behavior.
 - Correct macOS PHP matching, native helper/gateway checks and Windows runtime diagnostics.
 - Publish permanent download links for each OS, current checksums and matching rolling source archives. Native quality/regression checks gate publication.
+- Make daemon, project recovery, UI requests and MCP initialization transitions explicit. Ignore stale UI replies and prevent queued work from restarting services during shutdown.
+- Retry failed state writes, cancel scheduled commands on restart/shutdown, and report settings restoration separately from runtime recovery.
+- Keep startup status probes responsive while restoring projects, with mutations queued until restoration finishes.
+- Install and remove the CA in both Chromium NSS locations; verify SSL trust flags and reissue stale leaf certificates.
 
 ### Added
 

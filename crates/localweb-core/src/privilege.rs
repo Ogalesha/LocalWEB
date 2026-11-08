@@ -166,9 +166,12 @@ mod windows {
             ps_escape(&helper.display().to_string()),
             ps_escape(&arguments)
         );
-        let status = Command::new("powershell.exe")
-            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-            .status();
+        let status = Command::new(
+            crate::platform::windows_system_directory()?
+                .join("WindowsPowerShell/v1.0/powershell.exe"),
+        )
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .status();
         let _ = fs::remove_file(&payload);
         match status {
             Ok(status) if status.success() => Ok(()),

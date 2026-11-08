@@ -6,6 +6,40 @@ use std::{fs, path::Path, path::PathBuf, process::Command};
 /// Common name embedded in every generated `LocalWeb` development CA.
 pub const CA_COMMON_NAME: &str = "LocalWeb Development CA";
 
+/// Resolves the native Windows system directory without trusting PATH,
+/// the current directory or environment overrides.
+///
+/// # Errors
+/// Returns an error if Windows cannot provide a complete absolute path.
+#[cfg(windows)]
+pub fn windows_system_directory() -> std::io::Result<PathBuf> {
+    use std::{ffi::OsString, os::windows::ffi::OsStringExt as _};
+    let mut buffer = vec![0u16; 32_768];
+    // SAFETY: buffer is writable and has the stated capacity in UTF-16 units.
+    let length = unsafe {
+        windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW(
+            buffer.as_mut_ptr(),
+            32_768,
+        )
+    };
+    if length == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let length = usize::try_from(length).map_err(std::io::Error::other)?;
+    if length >= buffer.len() {
+        return Err(std::io::Error::other(
+            "Windows system directory is too long",
+        ));
+    }
+    let directory = PathBuf::from(OsString::from_wide(&buffer[..length]));
+    if !directory.is_absolute() {
+        return Err(std::io::Error::other(
+            "Windows system directory is not absolute",
+        ));
+    }
+    Ok(directory)
+}
+
 #[cfg(target_os = "macos")]
 const MACOS_CERTIFICATE_PATH: &str =
     "/Library/Application Support/LocalWeb/localweb-development-ca.crt";
@@ -490,7 +524,9 @@ fn sha1_fingerprint(certificate: &Path) -> Option<String> {
 
 #[cfg(windows)]
 fn windows_certutil(args: &[&str]) -> Result<()> {
-    let output = Command::new("certutil").args(args).output()?;
+    let output = Command::new(windows_system_directory()?.join("certutil.exe"))
+        .args(args)
+        .output()?;
     if !output.status.success() {
         return Err(LocalWebError::Service(format!(
             "certutil {} failed: {}",
@@ -506,7 +542,10 @@ fn windows_store_contains(certificate: &Path) -> bool {
     let Some(fingerprint) = windows_sha1_fingerprint(certificate) else {
         return false;
     };
-    let Ok(output) = Command::new("certutil")
+    let Ok(directory) = windows_system_directory() else {
+        return false;
+    };
+    let Ok(output) = Command::new(directory.join("certutil.exe"))
         .args(["-user", "-store", "Root"])
         .output()
     else {
@@ -526,7 +565,7 @@ fn windows_store_contains(certificate: &Path) -> bool {
 
 #[cfg(windows)]
 fn windows_sha1_fingerprint(certificate: &Path) -> Option<String> {
-    let output = Command::new("certutil")
+    let output = Command::new(windows_system_directory().ok()?.join("certutil.exe"))
         .arg("-hashfile")
         .arg(certificate)
         .arg("SHA1")
@@ -550,6 +589,16 @@ fn normalize_fingerprint(value: &str) -> String {
         .filter(char::is_ascii_hexdigit)
         .collect::<String>()
         .to_uppercase()
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    #[test]
+    fn system_tools_resolve_inside_the_native_system_directory() {
+        let directory = super::windows_system_directory().unwrap();
+        assert!(directory.is_absolute());
+        assert!(directory.join("cmd.exe").is_file());
+    }
 }
 
 #[cfg(all(test, unix))]

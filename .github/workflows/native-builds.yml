@@ -87,12 +87,15 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
       - name: Install cargo-xwin
-        run: cargo install --locked cargo-xwin
+        shell: bash
+        run: |
+          trap 'python3 .github/ci/report-failure.py xwin-install.log' ERR
+          timeout --kill-after=30s 20m cargo install --locked cargo-xwin 2>&1 | tee xwin-install.log
       - name: Cross-build and exercise the Windows binaries under Wine
         shell: bash
         run: |
           trap 'python3 .github/ci/report-failure.py windows-wine.log' ERR
-          bash scripts/windows-wine-smoke.sh 2>&1 | tee windows-wine.log
+          timeout --kill-after=30s 75m bash scripts/windows-wine-smoke.sh 2>&1 | tee windows-wine.log
       - name: Package the Windows binaries
         run: bash scripts/build-windows-zip.sh
       - uses: actions/upload-artifact@v7.0.2

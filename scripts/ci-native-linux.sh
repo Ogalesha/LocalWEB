@@ -139,12 +139,12 @@ wlroots_smoke() {
 }
 
 run_step ci-inputs source scripts/ci-inputs.sh
+run_step cargo-fmt cargo fmt --all --check
+run_step cargo-clippy cargo clippy --workspace --all-targets -- -D warnings
 run_step build-php-runtimes sh scripts/build-php-runtimes.sh
 run_step stage-runtime sh scripts/stage-runtime.sh
 export LD_LIBRARY_PATH="$PWD/packaging/runtime-root/lib"
 run_step verify-runtime python3 scripts/verify-runtime.py packaging/runtime-root --all-php
-run_step cargo-fmt cargo fmt --all --check
-run_step cargo-clippy cargo clippy --workspace --all-targets -- -D warnings
 run_step cargo-test cargo test --workspace
 run_step native-unit-tests env LOCALWEB_RUNTIME_ROOT="$PWD/packaging/runtime-root" cargo test -p localweb-daemon -- --ignored
 run_step gui-smoke gui_smoke
@@ -161,6 +161,13 @@ run_step assert-preservation assert_preserved_data
 assert_cleanup() {
     test ! -e /usr/lib/localweb
     test ! -e /var/lib/localweb
+    for database in "$HOME/.pki/nssdb" "$HOME/.local/share/pki/nssdb"; do
+        [ -f "$database/cert9.db" ] || continue
+        if /usr/bin/certutil -L -d "sql:$database" -n 'LocalWeb Development CA' >/dev/null 2>&1; then
+            echo "LocalWeb CA was retained in $database after removal" >&2
+            return 1
+        fi
+    done
     python3 - <<'PY'
 from pathlib import Path
 assert '# BEGIN LOCALWEB' not in Path('/etc/hosts').read_text()

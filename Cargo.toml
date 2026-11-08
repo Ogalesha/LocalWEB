@@ -39,7 +39,7 @@ toml = "0.9"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "serde"] }
-x509-parser = "0.16"
+x509-parser = { version = "0.16", features = ["verify"] }
 
 [workspace.lints.rust]
 ambiguous_negative_literals = "warn"

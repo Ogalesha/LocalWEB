@@ -43,8 +43,7 @@ pub fn terminate_tree(pid: u32) -> io::Result<Output> {
             "invalid process ID",
         ));
     }
-    let system_root = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
-    std::process::Command::new(std::path::PathBuf::from(system_root).join("System32/taskkill.exe"))
+    std::process::Command::new(crate::platform::windows_system_directory()?.join("taskkill.exe"))
         .args(["/PID", &pid.to_string(), "/T", "/F"])
         .creation_flags(0x0800_0000)
         .stdin(Stdio::null())

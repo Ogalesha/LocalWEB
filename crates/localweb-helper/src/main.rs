@@ -75,7 +75,10 @@ fn main() -> Result<()> {
         "remove-ca" => remove_ca(input_file.as_deref()),
         #[cfg(all(unix, not(target_os = "macos")))]
         "set-gateway-cap" => set_gateway_cap(),
+        #[cfg(unix)]
         "register-paths" => register_paths(input_file.as_deref()),
+        #[cfg(windows)]
+        "register-paths" => Ok(()),
         "remove-integration" => remove_system_integration(),
         "package-remove" if package_removal => remove_system_integration(),
         _ => bail!("unknown privileged operation"),
@@ -99,7 +102,7 @@ fn invoking_uid() -> Result<u32> {
 fn require_administrator() -> Result<()> {
     if fs::OpenOptions::new()
         .append(true)
-        .open(hosts_path())
+        .open(hosts_path()?)
         .is_err()
     {
         bail!("localweb-helper requires administrator authorization");
@@ -107,26 +110,17 @@ fn require_administrator() -> Result<()> {
     Ok(())
 }
 
-/// Returns the system hosts file for the current platform.
-fn hosts_path() -> PathBuf {
+/// Returns a validated system hosts file for the current platform.
+fn hosts_path() -> Result<PathBuf> {
     #[cfg(windows)]
-    {
-        let root = std::env::var_os("SystemRoot")
-            .map_or_else(|| PathBuf::from(r"C:\Windows"), PathBuf::from);
-        root.join("System32")
-            .join("drivers")
-            .join("etc")
-            .join("hosts")
-    }
+    let path = localweb_core::platform::windows_system_directory()?
+        .join("drivers")
+        .join("etc")
+        .join("hosts");
     #[cfg(not(windows))]
-    {
-        PathBuf::from("/etc/hosts")
-    }
-}
-
-#[cfg(windows)]
-fn register_paths(_input: Option<&Path>) -> Result<()> {
-    Ok(())
+    let path = PathBuf::from("/etc/hosts");
+    ensure_regular_root_owned(&path)?;
+    Ok(path)
 }
 
 #[cfg(unix)]
@@ -263,8 +257,7 @@ fn home_for_uid(uid: u32) -> Result<PathBuf> {
 }
 
 fn remove_system_integration() -> Result<()> {
-    let hosts = hosts_path();
-    ensure_regular_root_owned(&hosts)?;
+    let hosts = hosts_path()?;
     let updated = remove_managed_block(&fs::read_to_string(&hosts)?)?;
     atomic_write(&hosts, updated.as_bytes(), 0o644)?;
 
@@ -313,8 +306,7 @@ fn sync_hosts(input: Option<&Path>) -> Result<()> {
     if request.domains.len() > 1000 {
         bail!("too many hostnames");
     }
-    let path = hosts_path();
-    ensure_regular_root_owned(&path)?;
+    let path = hosts_path()?;
     let original = fs::read_to_string(&path)?;
     let updated = transform_hosts_at(&original, request.address, &request.domains)?;
     atomic_write(&path, updated.as_bytes(), 0o644)?;
@@ -414,6 +406,14 @@ fn ensure_regular_root_owned(path: &Path) -> Result<()> {
     Ok(())
 }
 
+#[cfg(windows)]
+fn ensure_regular_root_owned(path: &Path) -> Result<()> {
+    if !fs::symlink_metadata(path)?.file_type().is_file() {
+        bail!("{} must be a regular file", path.display());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -437,12 +437,4 @@ mod tests {
         };
         assert_eq!(domains, ["legacy.dev"]);
     }
-}
-
-#[cfg(windows)]
-fn ensure_regular_root_owned(path: &Path) -> Result<()> {
-    if !fs::symlink_metadata(path)?.file_type().is_file() {
-        bail!("{} must be a regular file", path.display());
-    }
-    Ok(())
 }

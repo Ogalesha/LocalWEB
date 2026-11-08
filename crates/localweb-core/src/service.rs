@@ -162,7 +162,7 @@ mod windows {
 
     pub(super) fn restart_daemon() -> Result<()> {
         ensure_task()?;
-        let _ = Command::new("taskkill.exe")
+        let _ = Command::new(crate::platform::windows_system_directory()?.join("taskkill.exe"))
             .args(["/IM", "localwebd.exe", "/F"])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -197,7 +197,10 @@ mod windows {
     }
 
     fn task_exists() -> bool {
-        Command::new("schtasks.exe")
+        let Ok(directory) = crate::platform::windows_system_directory() else {
+            return false;
+        };
+        Command::new(directory.join("schtasks.exe"))
             .args(["/Query", "/TN", DAEMON_TASK])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -213,7 +216,12 @@ mod windows {
             "Start-Process -FilePath '{}' -WindowStyle Hidden",
             daemon.display().to_string().replace('\'', "''")
         );
-        let launch = format!("powershell.exe -NoProfile -WindowStyle Hidden -Command \"{script}\"");
+        let powershell = crate::platform::windows_system_directory()?
+            .join("WindowsPowerShell/v1.0/powershell.exe");
+        let launch = format!(
+            "\"{}\" -NoProfile -WindowStyle Hidden -Command \"{script}\"",
+            powershell.display()
+        );
         run(
             &[
                 "/Create",
@@ -232,7 +240,10 @@ mod windows {
     }
 
     fn run(args: &[&str], message: &str) -> Result<()> {
-        let output = Command::new("schtasks.exe").args(args).output()?;
+        let output =
+            Command::new(crate::platform::windows_system_directory()?.join("schtasks.exe"))
+                .args(args)
+                .output()?;
         if !output.status.success() {
             return Err(LocalWebError::Service(format!(
                 "{message}: {}",

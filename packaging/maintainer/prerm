@@ -69,10 +69,12 @@ case "${1:-}" in
                 user=$(getent passwd "$uid" | cut -d: -f1)
                 user_home=$(getent passwd "$uid" | cut -d: -f6)
                 [ -n "$user" ] || continue
-                [ -f "$user_home/.pki/nssdb/cert9.db" ] || continue
-                runuser -u "$user" -- /usr/bin/certutil \
-                    -D -d "sql:$user_home/.pki/nssdb" \
-                    -n "LocalWeb Development CA" 2>/dev/null || true
+                for database in "$user_home/.pki/nssdb" "$user_home/.local/share/pki/nssdb"; do
+                    [ -f "$database/cert9.db" ] || continue
+                    runuser -u "$user" -- /usr/bin/certutil \
+                        -D -d "sql:$database" \
+                        -n "LocalWeb Development CA" 2>/dev/null || true
+                done
             done
         fi
         ;;

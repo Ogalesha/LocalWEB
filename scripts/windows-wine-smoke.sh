@@ -26,10 +26,13 @@ if [ -z "$wine_bin" ]; then
     exit 2
 fi
 
+echo '::notice title=Windows smoke phase::Building workspace binaries'
 cargo xwin build --release --target "$target" --workspace
+echo '::notice title=Windows smoke phase::Building the GUI screenshot variant'
 cargo xwin build --release --target "$target" -p localweb-gui --features localweb-gui/screenshot
 
 test_manifest=$(mktemp /tmp/localweb-windows-tests.XXXXXX)
+echo '::notice title=Windows smoke phase::Building native regression executables'
 cargo xwin build --release --target "$target" --tests -p localweb-core -p localweb-daemon --message-format=json >"$test_manifest"
 
 wineprefix=$(mktemp -d /tmp/localweb-wineprefix.XXXXXX)
@@ -40,19 +43,22 @@ export WINEDEBUG=-all
 export WINEDLLOVERRIDES="mscoree,mshtml="
 export XDG_RUNTIME_DIR="$runtime_dir"
 daemon_pid=""
+wineserver_bin=$(command -v wineserver64 || command -v wineserver || true)
+if [ -z "$wineserver_bin" ] && [ -x /usr/lib/wine/wineserver64 ]; then
+    wineserver_bin=/usr/lib/wine/wineserver64
+fi
 cleanup() {
     [ -n "$daemon_pid" ] && kill "$daemon_pid" 2>/dev/null || true
-    pkill -x wineserver 2>/dev/null || true
-    pkill -x wineserver64 2>/dev/null || true
-    for _ in $(seq 1 60); do
-        pgrep -x wineserver >/dev/null 2>&1 || pgrep -x wineserver64 >/dev/null 2>&1 || break
-        sleep 0.5
-    done
+    if [ -n "$wineserver_bin" ]; then
+        "$wineserver_bin" -k 2>/dev/null || true
+        timeout 20 "$wineserver_bin" -w 2>/dev/null || true
+    fi
     rm -rf "$wineprefix" "$runtime_dir"
     rm -f "$test_manifest"
 }
 trap cleanup EXIT
 
+echo '::notice title=Windows smoke phase::Checking the CLI under Wine'
 version=$(timeout 180 "$wine_bin" "$exe_dir/localweb.exe" --version)
 printf '%s' "$version" | grep -Eq '^localweb [0-9]+\.[0-9]+\.[0-9]+' || {
     echo "unexpected --version output: $version" >&2
@@ -64,6 +70,7 @@ timeout 180 "$wine_bin" "$exe_dir/localweb.exe" --help | grep -q "Commands:" || 
     exit 1
 }
 
+echo '::notice title=Windows smoke phase::Running core and daemon regressions under Wine'
 python3 - "$test_manifest" "$wine_bin" <<'PYTEST'
 import json, subprocess, sys
 from pathlib import Path
@@ -74,6 +81,7 @@ for executable in executables:
     subprocess.run([sys.argv[2], executable, '--test-threads=1'], check=True, timeout=240)
 PYTEST
 
+echo '::notice title=Windows smoke phase::Starting the daemon and checking named-pipe communication'
 daemon_log=/tmp/localweb-wine-daemon.log
 rm -f "$daemon_log"
 "$wine_bin" "$exe_dir/localwebd.exe" >"$daemon_log" 2>&1 &
@@ -107,6 +115,7 @@ status = next(reply for reply in replies if reply.get("id") == 2)
 assert not status["result"]["isError"], status
 PY
 
+echo '::notice title=Windows smoke phase::Checking the GUI screenshot'
 screenshot=/tmp/localweb-gui-windows-smoke.png
 rm -f "$screenshot"
 timeout 180 xvfb-run -a env LIBGL_ALWAYS_SOFTWARE=1 \

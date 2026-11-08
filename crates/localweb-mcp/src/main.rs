@@ -11,30 +11,57 @@ mod tools;
 
 use anyhow::Result;
 use serde_json::{Value, json};
-use std::io::{BufRead, Write};
+use std::io::{BufRead, Read, Write};
 
 /// Protocol revisions this server implements, newest first.
 const PROTOCOL_VERSIONS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
 /// Revision used when the client asks for something unknown.
 const PROTOCOL_FALLBACK: &str = "2025-06-18";
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Phase {
+    #[default]
+    AwaitingInitialize,
+    AwaitingInitialized,
+    Ready,
+}
+
+#[derive(Default)]
+struct Session {
+    phase: Phase,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
     let mut reader = stdin.lock();
-    let mut line = String::new();
+    let mut session = Session::default();
+    let mut line = Vec::new();
     loop {
         line.clear();
-        if reader.read_line(&mut line)? == 0 {
+        if reader
+            .by_ref()
+            .take((localweb_core::MAX_MESSAGE_BYTES + 1) as u64)
+            .read_until(b'\n', &mut line)?
+            == 0
+        {
             break;
         }
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
+        if line.len() > localweb_core::MAX_MESSAGE_BYTES {
+            writeln!(
+                stdout,
+                "{}",
+                error_response(&Value::Null, -32600, "request too large")
+            )?;
+            stdout.flush()?;
+            break;
+        }
+        if line.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
-        let reply = match serde_json::from_str::<Value>(trimmed) {
-            Ok(message) => handle(message).await,
+        let reply = match serde_json::from_slice::<Value>(&line) {
+            Ok(message) => session.handle(message).await,
             Err(error) => Some(error_response(
                 &Value::Null,
                 -32700,
@@ -53,21 +80,57 @@ async fn main() -> Result<()> {
 ///
 /// Returns `None` for notifications and stray responses, which must not be
 /// answered on the wire.
-async fn handle(message: Value) -> Option<Value> {
-    let method = message.get("method").and_then(Value::as_str)?;
-    let id = message.get("id")?.clone();
-    let params = message.get("params").cloned().unwrap_or(Value::Null);
-    let reply = match method {
-        "initialize" => Ok(initialize(&params)),
-        "ping" => Ok(json!({})),
-        "tools/list" => Ok(json!({ "tools": tools::definitions() })),
-        "tools/call" => tools_call(&params).await,
-        other => Err((-32601, format!("method not found: {other}"))),
-    };
-    Some(match reply {
-        Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
-        Err((code, message)) => error_response(&id, code, &message),
-    })
+impl Session {
+    async fn handle(&mut self, message: Value) -> Option<Value> {
+        if message.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
+            return Some(error_response(
+                &Value::Null,
+                -32600,
+                "invalid JSON-RPC request",
+            ));
+        }
+        let method = message.get("method").and_then(Value::as_str)?;
+        let Some(id) = message.get("id") else {
+            if method == "notifications/initialized" && self.phase == Phase::AwaitingInitialized {
+                self.phase = Phase::Ready;
+            }
+            return None;
+        };
+        if !(id.is_string() || id.as_i64().is_some() || id.as_u64().is_some()) {
+            return Some(error_response(&Value::Null, -32600, "invalid request id"));
+        }
+        let id = id.clone();
+        let params = message.get("params").cloned().unwrap_or(Value::Null);
+        let reply = match method {
+            "initialize" if self.phase != Phase::AwaitingInitialize => {
+                Err((-32600, "session is already initialized".into()))
+            }
+            "initialize"
+                if params
+                    .get("protocolVersion")
+                    .and_then(Value::as_str)
+                    .is_none() =>
+            {
+                Err((-32602, "missing protocol version".into()))
+            }
+            "initialize" => {
+                self.phase = Phase::AwaitingInitialized;
+                Ok(initialize(&params))
+            }
+            "ping" => Ok(json!({})),
+            _ if self.phase != Phase::Ready => Err((
+                -32002,
+                "complete initialize and notifications/initialized before using tools".into(),
+            )),
+            "tools/list" => Ok(json!({ "tools": tools::definitions() })),
+            "tools/call" => tools_call(&params).await,
+            other => Err((-32601, format!("method not found: {other}"))),
+        };
+        Some(match reply {
+            Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
+            Err((code, message)) => error_response(&id, code, &message),
+        })
+    }
 }
 
 /// Builds the `initialize` result with version negotiation and guidance.
@@ -120,36 +183,101 @@ fn error_response(id: &Value, code: i64, message: &str) -> Value {
 mod tests {
     use super::*;
 
+    async fn ready_session() -> Session {
+        let mut session = Session::default();
+        session.handle(json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}})).await.unwrap();
+        assert_eq!(session.phase, Phase::AwaitingInitialized);
+        assert!(
+            session
+                .handle(json!({"jsonrpc":"2.0","method":"notifications/initialized"}))
+                .await
+                .is_none()
+        );
+        assert_eq!(session.phase, Phase::Ready);
+        session
+    }
+
+    #[tokio::test]
+    async fn tools_require_both_initialization_steps_and_reinitialization_is_rejected() {
+        let mut session = Session::default();
+        let tools = json!({"jsonrpc":"2.0","id":2,"method":"tools/list"});
+        assert_eq!(
+            session.handle(tools.clone()).await.unwrap()["error"]["code"],
+            -32002
+        );
+        session
+            .handle(json!({"jsonrpc":"2.0","method":"notifications/initialized"}))
+            .await;
+        assert_eq!(session.phase, Phase::AwaitingInitialize);
+        session.handle(json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}})).await;
+        assert_eq!(
+            session.handle(tools.clone()).await.unwrap()["error"]["code"],
+            -32002
+        );
+        session
+            .handle(json!({"jsonrpc":"2.0","method":"notifications/initialized"}))
+            .await;
+        assert!(session.handle(tools).await.unwrap().get("result").is_some());
+        assert_eq!(session.handle(json!({"jsonrpc":"2.0","id":3,"method":"initialize","params":{"protocolVersion":"2025-06-18"}})).await.unwrap()["error"]["code"], -32600);
+        assert_eq!(session.phase, Phase::Ready);
+    }
+
+    #[tokio::test]
+    async fn malformed_initialization_does_not_advance_the_session() {
+        let mut session = Session::default();
+        assert_eq!(
+            session
+                .handle(json!({"jsonrpc":"2.0","id":1,"method":"initialize"}))
+                .await
+                .unwrap()["error"]["code"],
+            -32602
+        );
+        assert_eq!(session.phase, Phase::AwaitingInitialize);
+        assert!(
+            session
+                .handle(json!({"jsonrpc":"2.0","id":2,"method":"ping"}))
+                .await
+                .unwrap()
+                .get("result")
+                .is_some()
+        );
+        assert_eq!(session.phase, Phase::AwaitingInitialize);
+    }
+
     #[tokio::test]
     async fn initialize_negotiates_a_known_version() {
-        let reply = handle(json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": { "protocolVersion": "2024-11-05" }
-        }))
-        .await
-        .expect("requests are answered");
+        let reply = Session::default()
+            .handle(json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": { "protocolVersion": "2024-11-05" }
+            }))
+            .await
+            .expect("requests are answered");
         assert_eq!(reply["result"]["protocolVersion"], "2024-11-05");
         assert_eq!(reply["result"]["serverInfo"]["name"], "localweb");
     }
 
     #[tokio::test]
     async fn initialize_falls_back_for_unknown_versions() {
-        let reply = handle(json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": { "protocolVersion": "1999-01-01" }
-        }))
-        .await
-        .expect("requests are answered");
+        let reply = Session::default()
+            .handle(json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": { "protocolVersion": "1999-01-01" }
+            }))
+            .await
+            .expect("requests are answered");
         assert_eq!(reply["result"]["protocolVersion"], PROTOCOL_FALLBACK);
     }
 
     #[tokio::test]
     async fn unknown_method_reports_method_not_found() {
-        let reply = handle(json!({ "jsonrpc": "2.0", "id": 7, "method": "explode" }))
+        let reply = ready_session()
+            .await
+            .handle(json!({ "jsonrpc": "2.0", "id": 7, "method": "explode" }))
             .await
             .expect("requests are answered");
         assert_eq!(reply["error"]["code"], -32601);
@@ -158,12 +286,14 @@ mod tests {
     #[tokio::test]
     async fn notifications_and_stray_responses_are_ignored() {
         assert!(
-            handle(json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }))
+            Session::default()
+                .handle(json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }))
                 .await
                 .is_none()
         );
         assert!(
-            handle(json!({ "jsonrpc": "2.0", "id": 3, "result": {} }))
+            Session::default()
+                .handle(json!({ "jsonrpc": "2.0", "id": 3, "result": {} }))
                 .await
                 .is_none()
         );
@@ -171,7 +301,9 @@ mod tests {
 
     #[tokio::test]
     async fn tools_list_advertises_the_catalogue() {
-        let reply = handle(json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }))
+        let reply = ready_session()
+            .await
+            .handle(json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }))
             .await
             .expect("requests are answered");
         let tools = reply["result"]["tools"]
@@ -187,27 +319,31 @@ mod tests {
 
     #[tokio::test]
     async fn tools_call_requires_a_name() {
-        let reply = handle(json!({
-            "jsonrpc": "2.0",
-            "id": 4,
-            "method": "tools/call",
-            "params": {}
-        }))
-        .await
-        .expect("requests are answered");
+        let reply = ready_session()
+            .await
+            .handle(json!({
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "tools/call",
+                "params": {}
+            }))
+            .await
+            .expect("requests are answered");
         assert_eq!(reply["error"]["code"], -32602);
     }
 
     #[tokio::test]
     async fn tools_call_reports_unknown_tools_as_tool_errors() {
-        let reply = handle(json!({
-            "jsonrpc": "2.0",
-            "id": 5,
-            "method": "tools/call",
-            "params": { "name": "nope" }
-        }))
-        .await
-        .expect("requests are answered");
+        let reply = ready_session()
+            .await
+            .handle(json!({
+                "jsonrpc": "2.0",
+                "id": 5,
+                "method": "tools/call",
+                "params": { "name": "nope" }
+            }))
+            .await
+            .expect("requests are answered");
         assert_eq!(reply["result"]["isError"], true);
     }
 }

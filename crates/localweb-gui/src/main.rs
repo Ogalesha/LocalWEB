@@ -1,6 +1,7 @@
 mod brand;
 mod icons;
 mod lang;
+mod requests;
 mod theme;
 mod tray;
 mod widgets;
@@ -156,7 +157,7 @@ impl DaemonState {
     /// Applies a successful status probe.
     fn after_status_ok(self) -> Self {
         match self {
-            Self::Stopping => Self::Stopping,
+            Self::Stopping | Self::SettingUp | Self::Starting => self,
             _ => Self::Running,
         }
     }
@@ -239,6 +240,12 @@ enum ProjectTransition {
     Restarting,
 }
 
+enum TrayState {
+    Uninitialized,
+    Unavailable,
+    Ready(Tray),
+}
+
 #[derive(Clone)]
 enum Action {
     RefreshStatus,
@@ -259,6 +266,15 @@ enum Action {
 }
 
 impl Action {
+    fn query(&self) -> Option<requests::Query> {
+        Some(match self {
+            Self::RefreshStatus => requests::Query::Status,
+            Self::LoadProjects => requests::Query::Projects,
+            Self::LoadCa => requests::Query::Certificate,
+            Self::LoadEnvironment(name) => requests::Query::Environment(name.clone()),
+            _ => return None,
+        })
+    }
     fn background(&self) -> bool {
         matches!(
             self,
@@ -269,10 +285,12 @@ impl Action {
 
 enum GuiEvent {
     Response {
+        ticket: requests::Ticket,
         action: Action,
         result: Box<Result<Response, String>>,
     },
     Command {
+        ticket: requests::Ticket,
         action: Action,
         result: Result<String, String>,
     },
@@ -307,14 +325,12 @@ struct LocalWebApp {
     environment: Option<BTreeMap<String, String>>,
     environment_error: Option<String>,
     notice: Option<Notice>,
-    pending: usize,
-    background_pending: usize,
+    requests: requests::Requests,
     project_transition: Option<(String, ProjectTransition)>,
     last_refresh: Instant,
     last_view: View,
     view_changed_at: Option<Instant>,
-    tray: Option<Tray>,
-    tray_checked: bool,
+    tray: TrayState,
     tray_sender: Sender<TrayCommand>,
     tray_receiver: Receiver<TrayCommand>,
     quit_requested: bool,
@@ -369,14 +385,12 @@ impl LocalWebApp {
             environment: None,
             environment_error: None,
             notice,
-            pending: 0,
-            background_pending: 0,
+            requests: requests::Requests::default(),
             project_transition: None,
             last_refresh: Instant::now(),
             last_view: View::Dashboard,
             view_changed_at: None,
-            tray: None,
-            tray_checked: false,
+            tray: TrayState::Uninitialized,
             tray_sender,
             tray_receiver,
             quit_requested: false,
@@ -404,11 +418,7 @@ impl LocalWebApp {
         let Some(paths) = self.paths.clone() else {
             return;
         };
-        if action.background() {
-            self.background_pending += 1;
-        } else {
-            self.pending += 1;
-        }
+        let ticket = self.requests.begin(action.query());
         let sender = self.sender.clone();
         thread::spawn(move || {
             let result = tokio::runtime::Builder::new_current_thread()
@@ -434,6 +444,7 @@ impl LocalWebApp {
                     })
                 });
             let _ = sender.send(GuiEvent::Response {
+                ticket,
                 action,
                 result: Box::new(result),
             });
@@ -441,7 +452,7 @@ impl LocalWebApp {
     }
 
     fn run_command(&mut self, action: Action, program: PathBuf, args: Vec<String>) {
-        self.pending += 1;
+        let ticket = self.requests.begin(None);
         let sender = self.sender.clone();
         thread::spawn(move || {
             let result = Command::new(program)
@@ -455,23 +466,25 @@ impl LocalWebApp {
                         Err(String::from_utf8_lossy(&output.stderr).trim().to_owned())
                     }
                 });
-            let _ = sender.send(GuiEvent::Command { action, result });
+            let _ = sender.send(GuiEvent::Command {
+                ticket,
+                action,
+                result,
+            });
         });
     }
 
     fn receive_events(&mut self) {
         while let Ok(event) = self.receiver.try_recv() {
-            let action = match &event {
-                GuiEvent::Response { action, .. } | GuiEvent::Command { action, .. } => action,
+            let ticket = match &event {
+                GuiEvent::Response { ticket, .. } | GuiEvent::Command { ticket, .. } => *ticket,
             };
-            if action.background() {
-                self.background_pending = self.background_pending.saturating_sub(1);
-            } else {
-                self.pending = self.pending.saturating_sub(1);
+            if !self.requests.complete(ticket) {
+                continue;
             }
             match event {
-                GuiEvent::Response { action, result } => self.handle_response(action, *result),
-                GuiEvent::Command { action, result } => self.handle_command(action, result),
+                GuiEvent::Response { action, result, .. } => self.handle_response(action, *result),
+                GuiEvent::Command { action, result, .. } => self.handle_command(action, result),
             }
         }
     }
@@ -513,7 +526,12 @@ impl LocalWebApp {
             }
         };
         if let Response::Error { code, message } = response {
-            self.project_transition = None;
+            if matches!(
+                &action,
+                Action::StartProject | Action::StopProject | Action::RestartProject
+            ) {
+                self.project_transition = None;
+            }
             if matches!(&action, Action::Shutdown) {
                 self.daemon = self.daemon.after_stop_rejected();
             }
@@ -544,7 +562,7 @@ impl LocalWebApp {
                 self.projects_loaded = true;
                 self.projects_error = None;
                 self.projects = projects;
-                if self.pending == 0 {
+                if self.requests.foreground_pending() == 0 {
                     self.project_transition = None;
                 }
             }
@@ -649,6 +667,11 @@ impl LocalWebApp {
             }
             (Action::SyncHosts, Ok(_)) => {
                 self.notice = Some(Notice::success(self.lang.notice_hosts()));
+                self.refresh_all();
+            }
+            (Action::SyncHosts, Err(error)) => {
+                self.notice = Some(Notice::error(error));
+                self.refresh_all();
             }
             (_, Err(error)) => self.notice = Some(Notice::error(error)),
             (_, Ok(message)) => self.notice = Some(Notice::success(message)),
@@ -680,6 +703,9 @@ impl LocalWebApp {
     }
 
     fn start_daemon(&mut self) {
+        if self.requests.foreground_pending() != 0 {
+            return;
+        }
         let previous = match self.daemon {
             DaemonState::SettingUp => DaemonState::Unavailable,
             state => state,
@@ -695,6 +721,9 @@ impl LocalWebApp {
     }
 
     fn setup(&mut self) {
+        if self.requests.foreground_pending() != 0 {
+            return;
+        }
         let previous = self.daemon;
         self.daemon = DaemonState::SettingUp;
         match localweb_cli_path() {
@@ -707,6 +736,12 @@ impl LocalWebApp {
     }
 
     fn begin_stop(&mut self) {
+        if self.daemon != DaemonState::Running
+            || self.paths.is_none()
+            || self.requests.foreground_pending() != 0
+        {
+            return;
+        }
         self.daemon = DaemonState::Stopping;
         self.request(Action::Shutdown, Request::Shutdown);
     }
@@ -849,7 +884,7 @@ impl LocalWebApp {
                         });
                         if next_lang != self.lang {
                             self.lang = next_lang;
-                            if let Some(tray) = &self.tray {
+                            if let TrayState::Ready(tray) = &self.tray {
                                 tray.set_lang(self.lang);
                             }
                             if let Some(paths) = &self.paths {
@@ -902,7 +937,7 @@ impl LocalWebApp {
             .icon(Icon::Stop)
             .min_width(158.0)
             .height(theme::COMMAND_HEIGHT)
-            .enabled(self.pending == 0 && !stopping)
+            .enabled(self.requests.foreground_pending() == 0 && !stopping)
             .show(ui)
             .on_hover_text(lang.stop_hint());
             if response.clicked() {
@@ -926,7 +961,7 @@ impl LocalWebApp {
                 .height(theme::COMMAND_HEIGHT)
                 .enabled(
                     self.daemon != DaemonState::Checking
-                        && self.pending == 0
+                        && self.requests.foreground_pending() == 0
                         && !self.daemon.is_busy(),
                 )
                 .show(ui);
@@ -1453,7 +1488,7 @@ impl LocalWebApp {
                     if Pill::new(lang.refresh(), PillKind::Secondary)
                         .icon(Icon::Refresh)
                         .height(36.0)
-                        .enabled(self.background_pending == 0 && self.paths.is_some())
+                        .enabled(self.requests.background_pending() == 0 && self.paths.is_some())
                         .show(ui)
                         .clicked()
                     {
@@ -1462,7 +1497,7 @@ impl LocalWebApp {
                     if Pill::new(lang.sync_domains(), PillKind::Secondary)
                         .icon(Icon::Globe)
                         .height(36.0)
-                        .enabled(self.pending == 0)
+                        .enabled(self.requests.foreground_pending() == 0)
                         .show(ui)
                         .clicked()
                     {
@@ -1471,7 +1506,7 @@ impl LocalWebApp {
                     if Pill::new(lang.repair_setup(), PillKind::Secondary)
                         .icon(Icon::Settings)
                         .height(36.0)
-                        .enabled(self.pending == 0)
+                        .enabled(self.requests.foreground_pending() == 0)
                         .show(ui)
                         .clicked()
                     {
@@ -1785,7 +1820,7 @@ impl LocalWebApp {
 
     fn project_edit_action(&mut self, ui: &mut egui::Ui, item: &ProjectStatus, wide: bool) {
         let lang = self.lang;
-        let enabled = self.daemon_online() && self.pending == 0;
+        let enabled = self.daemon_online() && self.requests.foreground_pending() == 0;
         let edit = if wide {
             Pill::new("", PillKind::Ghost)
                 .icon_only(Icon::Pencil, lang.action_edit())
@@ -1807,7 +1842,7 @@ impl LocalWebApp {
 
     fn project_delete_action(&mut self, ui: &mut egui::Ui, item: &ProjectStatus, wide: bool) {
         let lang = self.lang;
-        let enabled = self.daemon_online() && self.pending == 0;
+        let enabled = self.daemon_online() && self.requests.foreground_pending() == 0;
         let delete = if wide {
             Pill::new("", PillKind::GhostDanger)
                 .icon_only(Icon::Trash, lang.action_delete())
@@ -1847,7 +1882,7 @@ impl LocalWebApp {
                 .icon(Icon::Play)
                 .height(36.0)
                 .min_width(96.0)
-                .enabled(self.pending == 0)
+                .enabled(self.requests.foreground_pending() == 0)
                 .show(ui);
             if start.clicked() {
                 self.project_transition =
@@ -1868,14 +1903,14 @@ impl LocalWebApp {
             Pill::new("", PillKind::Secondary)
                 .icon_only(Icon::Stop, lang.action_stop())
                 .height(36.0)
-                .enabled(self.pending == 0)
+                .enabled(self.requests.foreground_pending() == 0)
                 .show(ui)
                 .on_hover_text(lang.action_stop())
         } else {
             Pill::new(lang.action_stop(), PillKind::Secondary)
                 .icon(Icon::Stop)
                 .height(36.0)
-                .enabled(self.pending == 0)
+                .enabled(self.requests.foreground_pending() == 0)
                 .show(ui)
         };
         if stop.clicked() {
@@ -1896,14 +1931,14 @@ impl LocalWebApp {
             Pill::new("", PillKind::Secondary)
                 .icon_only(Icon::Refresh, lang.action_restart())
                 .height(36.0)
-                .enabled(self.pending == 0)
+                .enabled(self.requests.foreground_pending() == 0)
                 .show(ui)
                 .on_hover_text(lang.action_restart())
         } else {
             Pill::new(lang.action_restart(), PillKind::Secondary)
                 .icon(Icon::Refresh)
                 .height(36.0)
-                .enabled(self.pending == 0)
+                .enabled(self.requests.foreground_pending() == 0)
                 .show(ui)
         };
         if restart.clicked() {
@@ -2015,7 +2050,7 @@ impl LocalWebApp {
         if self.environment.is_none() && self.environment_error.is_none() {
             if Pill::new(lang.reveal_environment(), PillKind::Secondary)
                 .height(36.0)
-                .enabled(self.daemon_online() && self.background_pending == 0)
+                .enabled(self.daemon_online() && self.requests.background_pending() == 0)
                 .show(ui)
                 .clicked()
             {
@@ -2160,10 +2195,10 @@ impl LocalWebApp {
             .icon(Icon::Check)
             .height(theme::COMMAND_HEIGHT)
             .min_width(150.0)
-            .enabled(self.pending == 0)
+            .enabled(self.requests.foreground_pending() == 0)
             .show(ui)
             .clicked();
-            if self.pending > 0 {
+            if self.requests.foreground_pending() > 0 {
                 ui.spinner();
                 ui.label(RichText::new(lang.operation_busy()).color(INK_MUTED));
             }
@@ -2604,7 +2639,7 @@ impl LocalWebApp {
                 if Pill::new(lang.delete_confirm(), PillKind::Danger)
                     .icon(Icon::Trash)
                     .height(36.0)
-                    .enabled(self.pending == 0)
+                    .enabled(self.requests.foreground_pending() == 0)
                     .show(ui)
                     .clicked()
                 {
@@ -2615,7 +2650,7 @@ impl LocalWebApp {
                 }
             });
         });
-        if modal.should_close() && self.pending == 0 {
+        if modal.should_close() && self.requests.foreground_pending() == 0 {
             self.remove_confirmation = None;
         }
     }
@@ -2641,7 +2676,7 @@ impl LocalWebApp {
                 if Pill::new(lang.stop_localweb(), PillKind::Danger)
                     .icon(Icon::Stop)
                     .height(36.0)
-                    .enabled(self.pending == 0)
+                    .enabled(self.requests.foreground_pending() == 0)
                     .show(ui)
                     .clicked()
                 {
@@ -2650,7 +2685,7 @@ impl LocalWebApp {
                 }
             });
         });
-        if modal.should_close() && self.pending == 0 {
+        if modal.should_close() && self.requests.foreground_pending() == 0 {
             self.stop_confirmation = false;
         }
     }
@@ -2737,9 +2772,9 @@ impl eframe::App for LocalWebApp {
             ctx.send_viewport_cmd(command);
             self.center_on_first_frame = false;
         }
-        if !self.tray_checked {
-            self.tray_checked = true;
-            self.tray = Tray::new(self.lang, ctx.clone(), self.tray_sender.clone());
+        if matches!(self.tray, TrayState::Uninitialized) {
+            self.tray = Tray::new(self.lang, ctx.clone(), self.tray_sender.clone())
+                .map_or(TrayState::Unavailable, TrayState::Ready);
         }
         while let Ok(command) = self.tray_receiver.try_recv() {
             match command {
@@ -2758,7 +2793,7 @@ impl eframe::App for LocalWebApp {
         if close_requested {
             self.save_window_placement(ctx);
         }
-        if self.tray.is_some() && !self.quit_requested && close_requested {
+        if matches!(self.tray, TrayState::Ready(_)) && !self.quit_requested && close_requested {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
         }
@@ -2767,8 +2802,8 @@ impl eframe::App for LocalWebApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let context = ui.ctx().clone();
         self.receive_events();
-        if self.pending == 0
-            && self.background_pending == 0
+        if self.requests.foreground_pending() == 0
+            && self.requests.background_pending() == 0
             && self.last_refresh.elapsed() > REFRESH_INTERVAL
         {
             if self.daemon_online() {
@@ -3631,6 +3666,57 @@ mod tests {
         assert_eq!(form.document_root, "public");
         assert_eq!(form.profile, Profile::Laravel);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn late_status_reply_cannot_reverse_a_confirmed_shutdown() {
+        let mut app = LocalWebApp::state(None, Lang::English, None);
+        app.daemon = DaemonState::Running;
+        let old_status = app.requests.begin(Some(requests::Query::Status));
+        let stop = app.requests.begin(None);
+        app.daemon = DaemonState::Stopping;
+        app.sender
+            .send(GuiEvent::Response {
+                ticket: stop,
+                action: Action::Shutdown,
+                result: Box::new(Ok(Response::Message("stopped".into()))),
+            })
+            .unwrap();
+        app.sender
+            .send(GuiEvent::Response {
+                ticket: old_status,
+                action: Action::RefreshStatus,
+                result: Box::new(Ok(Response::Status(Status {
+                    daemon_running: true,
+                    gateway_running: true,
+                    gateway_bind_address: None,
+                    gateway_https_port: None,
+                    project_count: 1,
+                    active_projects: 1,
+                }))),
+            })
+            .unwrap();
+        app.receive_events();
+        assert_eq!(app.daemon, DaemonState::Stopped);
+        assert!(app.status.is_none());
+        assert_eq!(app.requests.background_pending(), 0);
+    }
+
+    #[test]
+    fn background_failure_preserves_the_project_operation() {
+        let mut app = LocalWebApp::state(None, Lang::English, None);
+        app.project_transition = Some(("demo".into(), ProjectTransition::Starting));
+        app.handle_response(
+            Action::LoadCa,
+            Ok(Response::Error {
+                code: "IoError".into(),
+                message: "unavailable".into(),
+            }),
+        );
+        assert!(
+            matches!(app.project_transition.as_ref(), Some((name, ProjectTransition::Starting)) if name == "demo")
+        );
+        assert!(app.ca_error.is_some());
     }
 
     fn test_source(label: &str) -> PathBuf {
