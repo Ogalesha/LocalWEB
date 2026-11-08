@@ -73,6 +73,28 @@ pre_remove() {
             rm -f /etc/hosts.localweb-tmp
     fi
 
+    # Remove only LocalWeb's CA from both Chromium NSS locations for each
+    # registered account. Keep the databases and all unrelated certificates.
+    if [ -x /usr/bin/certutil ]; then
+        for registry in /var/lib/localweb/users/*.paths; do
+            [ -f "$registry" ] || continue
+            uid=${registry##*/}
+            uid=${uid%.paths}
+            case "$uid" in
+                *[!0-9]*|'') continue ;;
+            esac
+            user=$(getent passwd "$uid" | cut -d: -f1)
+            user_home=$(getent passwd "$uid" | cut -d: -f6)
+            [ -n "$user" ] && [ -n "$user_home" ] || continue
+            for database in "$user_home/.pki/nssdb" "$user_home/.local/share/pki/nssdb"; do
+                [ -f "$database/cert9.db" ] || continue
+                runuser -u "$user" -- /usr/bin/certutil \
+                    -D -d "sql:$database" \
+                    -n "LocalWeb Development CA" 2>/dev/null || true
+            done
+        done
+    fi
+
     # Drop the LocalWeb CA from the p11-kit trust store.
     rm -f /etc/ca-certificates/trust-source/anchors/localweb-development-ca.crt
     if command -v trust >/dev/null 2>&1; then
