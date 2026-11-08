@@ -2109,6 +2109,7 @@ dependencies = [
  "chrono",
  "libc",
  "rcgen",
+ "ring",
  "serde",
  "serde_json",
  "thiserror 2.0.20",

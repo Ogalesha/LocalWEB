@@ -1171,6 +1171,9 @@ fn human_size(bytes: u64) -> String {
 fn install_ca(paths: &Paths) -> Result<()> {
     let ca = CaPaths::new(paths);
     ca.ensure_ca()?;
+    #[cfg(windows)]
+    localweb_core::platform::install_current_user_ca(&ca.cert)?;
+    #[cfg(not(windows))]
     run_helper("install-ca", &std::fs::read(&ca.cert)?)?;
     localweb_core::platform::install_browser_ca(&ca.cert)?;
     println!("{}", copy::HTTPS_TRUSTED);
@@ -1183,6 +1186,9 @@ fn remove_ca(paths: &Paths) -> Result<()> {
         bail!("No LocalWeb HTTPS certificate found for this account.");
     }
     localweb_core::platform::remove_browser_ca()?;
+    #[cfg(windows)]
+    localweb_core::platform::remove_current_user_ca(&ca.cert)?;
+    #[cfg(not(windows))]
     run_helper("remove-ca", &std::fs::read(&ca.cert)?)?;
     println!("{}", copy::HTTPS_TRUST_REMOVED);
     Ok(())

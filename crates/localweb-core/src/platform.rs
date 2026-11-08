@@ -151,14 +151,7 @@ impl TrustStore {
         }
         #[cfg(windows)]
         {
-            let _ = self;
-            windows_certutil(&[
-                "-user",
-                "-addstore",
-                "-f",
-                "Root",
-                &self.certificate_path().to_string_lossy(),
-            ])
+            install_current_user_ca(&self.certificate_path())
         }
         #[cfg(all(unix, not(target_os = "macos")))]
         {
@@ -187,8 +180,7 @@ impl TrustStore {
         }
         #[cfg(windows)]
         {
-            let _ = self;
-            windows_certutil(&["-user", "-delstore", "Root", CA_COMMON_NAME])
+            remove_current_user_ca(&self.certificate_path())
         }
         #[cfg(all(unix, not(target_os = "macos")))]
         {
@@ -211,13 +203,7 @@ impl TrustStore {
         #[cfg(windows)]
         {
             let _ = self;
-            let Ok(bytes) = fs::read(certificate) else {
-                return false;
-            };
-            if bytes.is_empty() || fs::read(self.certificate_path()).ok() != Some(bytes) {
-                return false;
-            }
-            windows_store_contains(certificate)
+            windows_certificate_present(certificate).unwrap_or(false)
         }
         #[cfg(all(unix, not(target_os = "macos")))]
         {
@@ -437,7 +423,7 @@ fn linux_browser_ca_trusted(certificate: &Path, database: &Path) -> bool {
         })
 }
 
-#[cfg(all(unix, not(target_os = "macos")))]
+#[cfg(any(windows, all(unix, not(target_os = "macos"))))]
 fn certificate_der(bytes: &[u8]) -> Option<Vec<u8>> {
     x509_parser::pem::parse_x509_pem(bytes)
         .ok()
@@ -522,67 +508,114 @@ fn sha1_fingerprint(certificate: &Path) -> Option<String> {
     Some(normalize_fingerprint(value))
 }
 
+/// Trusts the CA in the caller's Windows profile, without changing accounts
+/// through UAC. Both the desktop CLI and MCP use this operation.
+///
+/// # Errors
+/// Returns an error if import fails or the exact certificate cannot be found.
 #[cfg(windows)]
-fn windows_certutil(args: &[&str]) -> Result<()> {
-    let output = Command::new(windows_system_directory()?.join("certutil.exe"))
-        .args(args)
+pub fn install_current_user_ca(certificate: &Path) -> Result<()> {
+    if windows_certificate_present(certificate)? {
+        return Ok(());
+    }
+    let output = windows_certutil_command()?
+        .args(["-user", "-addstore", "-f", "Root"])
+        .arg(certificate)
         .output()?;
     if !output.status.success() {
-        return Err(LocalWebError::Service(format!(
-            "certutil {} failed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
+        return Err(windows_certificate_error(&output));
+    }
+    if !windows_certificate_present(certificate)? {
+        return Err(LocalWebError::Service(
+            "Windows did not trust the HTTPS certificate for this account".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Revokes only the exact CA in the caller's Windows certificate store.
+///
+/// # Errors
+/// Returns an error if querying, deleting or verifying removal fails.
+#[cfg(windows)]
+pub fn remove_current_user_ca(certificate: &Path) -> Result<()> {
+    if !windows_certificate_present(certificate)? {
+        return Ok(());
+    }
+    let fingerprint = windows_sha1_fingerprint(certificate)?;
+    let output = windows_certutil_command()?
+        .args(["-user", "-delstore", "Root", &fingerprint])
+        .output()?;
+    if !output.status.success() {
+        return Err(windows_certificate_error(&output));
+    }
+    if windows_certificate_present(certificate)? {
+        return Err(LocalWebError::Service(
+            "Windows still trusts the HTTPS certificate for this account".into(),
+        ));
     }
     Ok(())
 }
 
 #[cfg(windows)]
-fn windows_store_contains(certificate: &Path) -> bool {
-    let Some(fingerprint) = windows_sha1_fingerprint(certificate) else {
-        return false;
-    };
-    let Ok(directory) = windows_system_directory() else {
-        return false;
-    };
-    let Ok(output) = Command::new(directory.join("certutil.exe"))
-        .args(["-user", "-store", "Root"])
-        .output()
-    else {
-        return false;
-    };
-    if !output.status.success() {
-        return false;
-    }
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| line.split_once(':'))
-        .any(|(label, value)| {
-            label.trim().eq_ignore_ascii_case("Cert Hash(sha1)")
-                && normalize_fingerprint(value) == fingerprint
-        })
+fn windows_certutil_command() -> Result<Command> {
+    use std::os::windows::process::CommandExt as _;
+    let mut command = Command::new(windows_system_directory()?.join("certutil.exe"));
+    command
+        .creation_flags(0x0800_0000)
+        .stdin(std::process::Stdio::null());
+    Ok(command)
 }
 
 #[cfg(windows)]
-fn windows_sha1_fingerprint(certificate: &Path) -> Option<String> {
-    let output = Command::new(windows_system_directory().ok()?.join("certutil.exe"))
-        .arg("-hashfile")
-        .arg(certificate)
-        .arg("SHA1")
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .find_map(|line| {
-            let cleaned = normalize_fingerprint(line);
-            (cleaned.len() == 40).then_some(cleaned)
-        })
+fn windows_certificate_error(output: &std::process::Output) -> LocalWebError {
+    let details = if output.stderr.is_empty() {
+        &output.stdout
+    } else {
+        &output.stderr
+    };
+    LocalWebError::Service(format!(
+        "Windows certificate command failed ({}): {}",
+        output.status,
+        String::from_utf8_lossy(details)
+            .trim()
+            .chars()
+            .take(2000)
+            .collect::<String>()
+    ))
 }
 
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(windows)]
+fn windows_certificate_present(certificate: &Path) -> Result<bool> {
+    let fingerprint = windows_sha1_fingerprint(certificate)?;
+    let output = windows_certutil_command()?
+        .args(["-user", "-silent", "-store", "Root", &fingerprint])
+        .output()?;
+    if output.status.success() {
+        return Ok(true);
+    }
+    if output.status.code() == Some(windows_sys::Win32::Foundation::CRYPT_E_NOT_FOUND) {
+        return Ok(false);
+    }
+    Err(windows_certificate_error(&output))
+}
+
+#[cfg(windows)]
+fn windows_sha1_fingerprint(certificate: &Path) -> Result<String> {
+    use std::fmt::Write as _;
+    let der = certificate_der(&fs::read(certificate)?)
+        .ok_or_else(|| LocalWebError::Config("invalid PEM certificate".into()))?;
+    // SHA-1 is the Windows store's legacy certificate identifier. Hash the
+    // DER certificate, not the surrounding PEM text or a signature input.
+    let digest = ring::digest::digest(&ring::digest::SHA1_FOR_LEGACY_USE_ONLY, &der);
+    let mut fingerprint = String::with_capacity(40);
+    for byte in digest.as_ref() {
+        write!(fingerprint, "{byte:02X}").unwrap();
+    }
+    Ok(fingerprint)
+}
+
+#[cfg(target_os = "macos")]
 fn normalize_fingerprint(value: &str) -> String {
     value
         .chars()
@@ -593,11 +626,54 @@ fn normalize_fingerprint(value: &str) -> String {
 
 #[cfg(all(test, windows))]
 mod windows_tests {
+    use super::*;
+
     #[test]
     fn system_tools_resolve_inside_the_native_system_directory() {
         let directory = super::windows_system_directory().unwrap();
         assert!(directory.is_absolute());
         assert!(directory.join("cmd.exe").is_file());
+    }
+
+    #[test]
+    #[ignore = "temporarily modifies the current user's Root store; run explicitly on an isolated Windows runner"]
+    fn windows_current_user_ca_install_query_and_remove() {
+        let base = std::env::temp_dir().join(format!("lw-user-ca-{}", uuid::Uuid::new_v4()));
+        let paths = crate::Paths {
+            config: base.join("c"),
+            data: base.join("d"),
+            state: base.join("s"),
+            runtime: base.join("r"),
+        };
+        paths.create().unwrap();
+        let ca = crate::certificate::CaPaths::new(&paths);
+        ca.ensure_ca().unwrap();
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = remove_current_user_ca(&self.0);
+            }
+        }
+        let cleanup = Cleanup(ca.cert.clone());
+        assert!(!TrustStore::Windows.trusted(&ca.cert));
+        install_current_user_ca(&ca.cert).unwrap();
+        assert!(TrustStore::Windows.trusted(&ca.cert));
+        install_current_user_ca(&ca.cert).unwrap();
+        let alternate = base.join("same-ca-crlf.pem");
+        fs::write(
+            &alternate,
+            fs::read_to_string(&ca.cert).unwrap().replace('\n', "\r\n"),
+        )
+        .unwrap();
+        assert!(
+            TrustStore::Windows.trusted(&alternate),
+            "trust follows DER identity, not PEM file bytes"
+        );
+        remove_current_user_ca(&alternate).unwrap();
+        assert!(!TrustStore::Windows.trusted(&ca.cert));
+        remove_current_user_ca(&ca.cert).unwrap();
+        drop(cleanup);
+        fs::remove_dir_all(base).unwrap();
     }
 }
 

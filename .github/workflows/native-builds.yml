@@ -123,8 +123,14 @@ jobs:
         run: |
           cargo test --workspace --all-targets --no-fail-fast 2>&1 | Tee-Object -FilePath "$env:RUNNER_TEMP/localweb-tests.log"
           exit $LASTEXITCODE
+      - name: Verify current-user certificate trust
+        id: windows-cert-tests
+        if: ${{ !cancelled() }}
+        run: |
+          cargo test -p localweb-core windows_current_user_ca_install_query_and_remove -- --ignored --test-threads=1 2>&1 | Tee-Object -FilePath "$env:RUNNER_TEMP/localweb-tests.log" -Append
+          exit $LASTEXITCODE
       - name: Report failing tests
-        if: failure() && steps.windows-tests.outcome == 'failure'
+        if: failure() && (steps.windows-tests.outcome == 'failure' || steps.windows-cert-tests.outcome == 'failure')
         run: python .github/ci/report-failure.py "$env:RUNNER_TEMP/localweb-tests.log"
 
   macos-package:

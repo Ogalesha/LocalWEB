@@ -24,6 +24,8 @@ All notable changes to this project are documented here. The format follows
 - Retry failed state writes, cancel scheduled commands on restart/shutdown, and report settings restoration separately from runtime recovery.
 - Keep startup status probes responsive while restoring projects, with mutations queued until restoration finishes.
 - Recreate interrupted services and database proxy listeners when Start is requested for a previously running project.
+- Release daemon endpoint locks explicitly when descriptors are duplicated during process creation.
+- Use the Windows hosts file and the current user's certificate store; compare DER certificate thumbprints without parsing localized output.
 - Install and remove the CA in both Chromium NSS locations; verify SSL trust flags and reissue stale leaf certificates.
 
 ### Added

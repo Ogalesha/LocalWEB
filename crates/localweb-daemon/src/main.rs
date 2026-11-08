@@ -1710,7 +1710,14 @@ fn write_routes(state: &State, active: &BTreeSet<String>) -> localweb_core::Resu
 }
 
 fn hosts_has_domain(domain: &str, address: Ipv4Addr) -> bool {
-    let Ok(contents) = fs::read_to_string("/etc/hosts") else {
+    #[cfg(windows)]
+    let path = match localweb_core::platform::windows_system_directory() {
+        Ok(directory) => directory.join("drivers/etc/hosts"),
+        Err(_) => return false,
+    };
+    #[cfg(not(windows))]
+    let path = std::path::PathBuf::from("/etc/hosts");
+    let Ok(contents) = fs::read_to_string(path) else {
         return false;
     };
     let expected_address = address.to_string();

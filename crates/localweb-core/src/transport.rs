@@ -6,6 +6,19 @@
 use crate::{LocalWebError, Paths, Result};
 use std::path::{Path, PathBuf};
 
+#[cfg(unix)]
+#[derive(Debug)]
+struct EndpointLock(std::fs::File);
+
+#[cfg(unix)]
+impl Drop for EndpointLock {
+    fn drop(&mut self) {
+        // Explicit unlock also releases ownership if a concurrently spawned
+        // child briefly inherited a duplicate descriptor before exec.
+        let _ = self.0.unlock();
+    }
+}
+
 /// Client end of a daemon connection.
 #[cfg(unix)]
 pub type ClientStream = tokio::net::UnixStream;
@@ -27,7 +40,7 @@ pub struct DaemonListener {
     #[cfg(unix)]
     listener: tokio::net::UnixListener,
     #[cfg(unix)]
-    _lock: std::fs::File,
+    _lock: EndpointLock,
     #[cfg(windows)]
     pending: tokio::net::windows::named_pipe::NamedPipeServer,
 }
@@ -67,6 +80,7 @@ impl DaemonListener {
                     "cannot lock the daemon endpoint; another daemon may be running: {error}"
                 ))
             })?;
+            let lock = EndpointLock(lock);
             if let Ok(metadata) = std::fs::symlink_metadata(&path) {
                 if !metadata.file_type().is_socket() {
                     return Err(LocalWebError::Config(format!(
@@ -214,10 +228,16 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    #[expect(
+        clippy::used_underscore_binding,
+        reason = "models an inherited copy of the deliberately held RAII lock"
+    )]
     async fn only_one_daemon_can_own_the_endpoint() {
         let (root, paths) = fixture();
         let first = DaemonListener::bind(&paths).await.unwrap();
         DaemonListener::bind(&paths).await.unwrap_err();
+        // Model the descriptor a concurrent fork can retain until exec.
+        let inherited = first._lock.0.try_clone().unwrap();
         first.cleanup().unwrap();
         drop(first);
         // Recover the stale socket left by a process that died without cleanup.
@@ -226,6 +246,7 @@ mod tests {
         let recovered = DaemonListener::bind(&paths).await.unwrap();
         recovered.cleanup().unwrap();
         drop(recovered);
+        drop(inherited);
         std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -689,9 +689,20 @@ async fn ca_install() -> Result<String, String> {
     let paths = paths()?;
     let ca = CaPaths::new(&paths);
     ca.ensure_ca().map_err(|error| error.to_string())?;
+    #[cfg(windows)]
+    let certificate = ca.cert.clone();
+    #[cfg(windows)]
+    tokio::task::spawn_blocking(move || {
+        localweb_core::platform::install_current_user_ca(&certificate)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())?;
+    #[cfg(not(windows))]
     let certificate = tokio::fs::read(&ca.cert)
         .await
         .map_err(|error| format!("Couldn't read the HTTPS certificate: {error}"))?;
+    #[cfg(not(windows))]
     run_helper("install-ca", certificate).await?;
     localweb_core::platform::install_browser_ca(&ca.cert).map_err(|error| error.to_string())?;
     Ok(copy::HTTPS_TRUSTED.to_owned())

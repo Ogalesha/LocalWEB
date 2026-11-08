@@ -265,7 +265,10 @@ fn remove_system_integration() -> Result<()> {
     let trust = store.certificate_path();
     if trust.exists() {
         ensure_regular_root_owned(&trust)?;
+        #[cfg(windows)]
+        store.untrust_certificate()?;
         fs::remove_file(&trust)?;
+        #[cfg(not(windows))]
         store.untrust_certificate()?;
     }
     Ok(())
@@ -371,7 +374,10 @@ fn remove_ca(input: Option<&Path>) -> Result<()> {
     if fs::read(&trust)? != pem_bytes {
         bail!("the trusted LocalWeb CA belongs to a different account; refusing to remove it");
     }
+    #[cfg(windows)]
+    store.untrust_certificate()?;
     fs::remove_file(&trust)?;
+    #[cfg(not(windows))]
     store.untrust_certificate()?;
     Ok(())
 }

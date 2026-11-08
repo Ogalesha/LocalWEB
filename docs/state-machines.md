@@ -13,6 +13,7 @@ requests or ownership of a resource.
 | Tray initialization | Uninitialized, unavailable, ready with an owned tray icon. | Closing the window hides it only when a working tray can restore it. |
 | Form and folder navigation | Add/edit mode, pending command, optional queued add; bounded back/forward history. | Existing identity and draft-preservation rules remain; queued adds wait for a reachable daemon. |
 | Daemon request lifecycle | Restoring → serving → stopping → stopped. Failed shutdown returns to serving for retry. | Status stays responsive during restoration while mutations queue behind the startup guard. Queued mutations cannot start services after successful shutdown. |
+| Unix daemon endpoint ownership | Lock acquired → listener bound → listener closed → explicit unlock. | A child retaining a duplicated descriptor cannot leave ownership stuck after the listener is dropped. The regression retains that duplicate through rebinding. |
 | Project activation | Start, restore or restart intent; prepare → health check → durable commit, with rollback on failure. | Typed intent replaces paired flags. Restart cancels the project's old scheduled commands before replacing services. |
 | Observed/persisted running set | Committed or retry needed. A completed stop changes memory before persistence; failed writes retry during maintenance. | A disk error cannot keep a stopped project marked running. Boot rewrites the successfully restored set. |
 | Partial runtime failure | Running or recovery needed; successful activation clears recovery. | Failed stop/rollback cannot become a false idempotent Start. Recovering a project recreates its owned services; boot reconciles leftover inactive services. |
@@ -23,6 +24,7 @@ requests or ownership of a resource.
 | Worker/service ownership | Absent, live matching process, stale identity, unverifiable legacy record; optional supervised restart owner. | Existing PID/creation-time verification, cancellation and service-manager stop guards remain. Windows system tools now resolve through the native system directory. |
 | Certificates | Missing pair, incomplete pair or complete pair; complete material must pass validation before reuse. | Preserve and reject invalid CA identity. Reissue a stale leaf when its CA, hostname, key, validity or server usage no longer matches. Restore the previous key if replacing its certificate fails. |
 | Certificate trust | System and browser trust are checked independently against the exact CA. | Current and legacy NSS stores are handled during install and removal; SSL trust flags are required. |
+| Windows user trust | Import → verify exact DER thumbprint → trusted; delete that thumbprint → verify absent. | CLI, desktop and MCP act in the caller's user store without UAC account switching. A required native Windows check verifies import, idempotency, PEM-format independence and removal. |
 | Gateway | Selected endpoint → service start → persisted active endpoint; fallback is selected only after standard binding fails. Routes distinguish unknown, stopped and active projects. | Existing endpoint validation and loopback ownership remain. |
 | MCP session | Awaiting initialize → awaiting initialized notification → ready. | Tool requests before the handshake and repeated initialization are rejected. Input frames are bounded; oversized input ends the session safely. |
 | Bounded child commands | Spawned owned process tree → drained output → reaped child; cancellation drops the owner and terminates descendants. | Existing bounded-output and ownership rules remain. |
@@ -39,6 +41,8 @@ are reported separately.
 Wine does not enforce `FILE_FLAG_FIRST_PIPE_INSTANCE`; its smoke suite
 excludes only that OS exclusivity test. The required native Windows job
 runs it, along with the complete workspace suite, without that exclusion.
+The user-certificate integration test is opt-in for local developers and
+runs explicitly on the isolated Windows CI host, with cleanup on failure.
 
 Verified locally on Ubuntu on 8 November 2026: 134 workspace tests, seven
 native service tests, nine publisher regressions, Clippy with warnings
