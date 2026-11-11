@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Regenerate partial leaf certificates and serialize concurrent first-run CA creation.
+- Keep LocalWeb responsive when a project file is corrupt; Doctor reports the skipped file.
+- Wait for project restoration before CLI, MCP and desktop requests mutate state; queued additions survive daemon startup.
+- Reload an active gateway after project removal so its hostname disappears immediately.
+- Accept the highlighted folder in the folder picker and bound its navigation history.
+- Prevent CA installation and environment disclosure from overlapping other foreground commands.
+
 ## [0.1.4] - 2026-11-08
 
 ### Security

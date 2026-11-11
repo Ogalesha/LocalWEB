@@ -2016,20 +2016,20 @@ impl Lang {
 
     pub fn picker_open(self, name: &str) -> String {
         match self {
-            Self::English => format!("Open folder: {name}"),
-            Self::Italiano => format!("Apri cartella: {name}"),
-            Self::Shqip => format!("Hap dosjen: {name}"),
-            Self::Spanish => format!("Abrir carpeta: {name}"),
-            Self::French => format!("Ouvrir le dossier : {name}"),
-            Self::Portuguese => format!("Abrir pasta: {name}"),
-            Self::Russian => format!("Открыть папку: {name}"),
-            Self::Polish => format!("Otwórz folder: {name}"),
-            Self::Ukrainian => format!("Відкрити теку: {name}"),
-            Self::Turkish => format!("Klasörü aç: {name}"),
-            Self::Greek => format!("Άνοιγμα φακέλου: {name}"),
-            Self::Hindi => format!("फ़ोल्डर खोलें: {name}"),
-            Self::Chinese => format!("打开文件夹：{name}"),
-            Self::Swedish => format!("Öppna mapp: {name}"),
+            Self::English => format!("Select or open folder: {name}"),
+            Self::Italiano => format!("Seleziona o apri la cartella: {name}"),
+            Self::Shqip => format!("Zgjidh ose hap dosjen: {name}"),
+            Self::Spanish => format!("Seleccionar o abrir la carpeta: {name}"),
+            Self::French => format!("Sélectionner ou ouvrir le dossier : {name}"),
+            Self::Portuguese => format!("Selecionar ou abrir a pasta: {name}"),
+            Self::Russian => format!("Выбрать или открыть папку: {name}"),
+            Self::Polish => format!("Wybierz lub otwórz folder: {name}"),
+            Self::Ukrainian => format!("Вибрати або відкрити теку: {name}"),
+            Self::Turkish => format!("Klasörü seç veya aç: {name}"),
+            Self::Greek => format!("Επιλογή ή άνοιγμα φακέλου: {name}"),
+            Self::Hindi => format!("फ़ोल्डर चुनें या खोलें: {name}"),
+            Self::Chinese => format!("选择或打开文件夹：{name}"),
+            Self::Swedish => format!("Välj eller öppna mapp: {name}"),
         }
     }
 

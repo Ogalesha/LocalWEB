@@ -20,6 +20,8 @@ use tokio::{process::Command, time::timeout};
 
 /// How long one daemon request may take before the tool reports a timeout.
 const DAEMON_TIMEOUT: Duration = Duration::from_secs(120);
+/// How long `localweb_daemon_start` waits for project restoration.
+const STARTUP_READY_TIMEOUT: Duration = Duration::from_secs(60);
 /// Default wall-clock limit for `localweb_project_exec`.
 const EXEC_TIMEOUT_DEFAULT: u64 = 300;
 /// Hard cap for the `timeout_seconds` argument of `localweb_project_exec`.
@@ -48,7 +50,7 @@ pub(crate) fn definitions() -> Value {
         },
         {
             "name": "localweb_daemon_start",
-            "description": "Start or restart LocalWeb and wait until it responds.",
+            "description": "Start or restart LocalWeb and wait until it is ready.",
             "inputSchema": { "type": "object", "properties": {} },
         },
         {
@@ -375,7 +377,7 @@ async fn status() -> Result<String, String> {
     }
 }
 
-/// Starts the user daemon and waits until it answers.
+/// Starts the user daemon and waits until restoration finished.
 async fn daemon_start() -> Result<String, String> {
     tokio::task::spawn_blocking(localweb_core::service::restart_daemon)
         .await
@@ -383,15 +385,24 @@ async fn daemon_start() -> Result<String, String> {
         .map_err(|error| format!("Couldn't start LocalWeb: {error}"))?;
     let paths = paths()?;
     let mut last = String::new();
-    for _ in 0..20 {
+    let deadline = tokio::time::Instant::now() + STARTUP_READY_TIMEOUT;
+    loop {
         match converse(&paths, Request::Status).await {
-            Ok(Response::Status(status)) => return render(&status),
+            Ok(Response::Status(status)) if status.ready => return render(&status),
+            Ok(Response::Status(_)) => {
+                "LocalWeb is still restoring projects".clone_into(&mut last);
+            }
             Ok(_) => last = unexpected(),
             Err(reason) => last = reason,
         }
+        if tokio::time::Instant::now() >= deadline {
+            break;
+        }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
-    Err(format!("LocalWeb did not respond after startup: {last}"))
+    Err(format!(
+        "LocalWeb did not become ready after startup: {last}"
+    ))
 }
 
 /// Stops the daemon and every managed service.

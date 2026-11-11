@@ -154,11 +154,19 @@ impl DaemonState {
         matches!(self, Self::SettingUp | Self::Starting | Self::Stopping)
     }
 
-    /// Applies a successful status probe.
+    /// Applies a successful, ready status probe.
     fn after_status_ok(self) -> Self {
         match self {
-            Self::Stopping | Self::SettingUp | Self::Starting => self,
+            Self::Stopping | Self::SettingUp => self,
             _ => Self::Running,
+        }
+    }
+
+    /// Applies a status probe that answered before restoration finished.
+    fn after_status_not_ready(self) -> Self {
+        match self {
+            Self::Stopping | Self::SettingUp => self,
+            _ => Self::Starting,
         }
     }
 
@@ -552,9 +560,14 @@ impl LocalWebApp {
         let shutdown = matches!(&action, Action::Shutdown);
         match (action, response) {
             (Action::RefreshStatus, Response::Status(status)) => {
-                self.daemon = self.daemon.after_status_ok();
+                self.daemon = if status.ready {
+                    self.daemon.after_status_ok()
+                } else {
+                    self.daemon.after_status_not_ready()
+                };
+                let ready = status.ready;
                 self.status = Some(status);
-                if let Some(request) = self.queued_add.take() {
+                if ready && let Some(request) = self.queued_add.take() {
                     self.request(Action::AddProject, Request::ProjectAdd(request));
                 }
             }
@@ -747,6 +760,9 @@ impl LocalWebApp {
     }
 
     fn install_ca(&mut self) {
+        if self.requests.foreground_pending() != 0 {
+            return;
+        }
         match localweb_cli_path() {
             Ok(program) => self.run_command(
                 Action::InstallCa,
@@ -1167,6 +1183,7 @@ impl LocalWebApp {
                             if Pill::new(lang.install_ca(), PillKind::Primary)
                                 .icon(Icon::Download)
                                 .height(36.0)
+                                .enabled(self.requests.foreground_pending() == 0)
                                 .show(ui)
                                 .clicked()
                             {
@@ -2050,7 +2067,7 @@ impl LocalWebApp {
         if self.environment.is_none() && self.environment_error.is_none() {
             if Pill::new(lang.reveal_environment(), PillKind::Secondary)
                 .height(36.0)
-                .enabled(self.daemon_online() && self.requests.background_pending() == 0)
+                .enabled(self.daemon_online() && self.requests.foreground_pending() == 0)
                 .show(ui)
                 .clicked()
             {
@@ -3076,6 +3093,9 @@ impl AddProjectForm {
     }
 }
 
+/// Maximum number of folders kept in the picker's back/forward history.
+const PICKER_HISTORY_LIMIT: usize = 50;
+
 struct DirectoryPicker {
     current: PathBuf,
     history: Vec<PathBuf>,
@@ -3104,11 +3124,22 @@ impl DirectoryPicker {
         if directory != self.current {
             self.history.truncate(self.history_position + 1);
             self.history.push(directory.clone());
+            if self.history.len() > PICKER_HISTORY_LIMIT {
+                self.history.remove(0);
+            }
             self.history_position = self.history.len() - 1;
             self.current = directory;
         }
         self.selected = None;
         self.error = None;
+    }
+
+    /// Accepting uses the highlighted subfolder when present, otherwise the
+    /// folder currently shown in the breadcrumb.
+    fn accepted_path(&self) -> PathBuf {
+        self.selected
+            .clone()
+            .unwrap_or_else(|| self.current.clone())
     }
 
     fn go_back(&mut self) {
@@ -3208,7 +3239,7 @@ impl DirectoryPicker {
             self.navigate_to(directory);
         }
         if accept {
-            selected = Some(self.current.clone());
+            selected = Some(self.accepted_path());
         }
         if request_close || modal.should_close() {
             self.open = false;
@@ -3688,6 +3719,7 @@ mod tests {
                 action: Action::RefreshStatus,
                 result: Box::new(Ok(Response::Status(Status {
                     daemon_running: true,
+                    ready: true,
                     gateway_running: true,
                     gateway_bind_address: None,
                     gateway_https_port: None,
@@ -3788,6 +3820,24 @@ mod tests {
             Action::RefreshStatus,
             Ok(Response::Status(Status {
                 daemon_running: true,
+                ready: false,
+                gateway_running: false,
+                gateway_bind_address: None,
+                gateway_https_port: None,
+                project_count: 0,
+                active_projects: 0,
+            })),
+        );
+        assert!(
+            app.queued_add.is_some(),
+            "the project must wait until restoration finishes"
+        );
+        assert_eq!(app.daemon, DaemonState::Starting);
+        app.handle_response(
+            Action::RefreshStatus,
+            Ok(Response::Status(Status {
+                daemon_running: true,
+                ready: true,
                 gateway_running: false,
                 gateway_bind_address: None,
                 gateway_https_port: None,
@@ -3797,7 +3847,7 @@ mod tests {
         );
         assert!(
             app.queued_add.is_none(),
-            "the project is sent once the daemon answers"
+            "the project is sent once the daemon is ready"
         );
         assert!(app.daemon_online());
         assert_eq!(app.daemon, DaemonState::Running);
@@ -3835,6 +3885,22 @@ mod tests {
             DaemonState::Stopping
         );
         assert_eq!(DaemonState::Stopped.after_status_ok(), DaemonState::Running);
+        assert_eq!(
+            DaemonState::Starting.after_status_ok(),
+            DaemonState::Running
+        );
+        assert_eq!(
+            DaemonState::Checking.after_status_not_ready(),
+            DaemonState::Starting
+        );
+        assert_eq!(
+            DaemonState::Stopped.after_status_not_ready(),
+            DaemonState::Starting
+        );
+        assert_eq!(
+            DaemonState::Stopping.after_status_not_ready(),
+            DaemonState::Stopping
+        );
     }
 
     #[test]
@@ -3882,6 +3948,7 @@ mod tests {
             Action::RefreshStatus,
             Ok(Response::Status(Status {
                 daemon_running: true,
+                ready: true,
                 gateway_running: false,
                 gateway_bind_address: None,
                 gateway_https_port: None,
@@ -4293,6 +4360,44 @@ mod tests {
         picker.go_back();
         picker.go_back();
         assert_eq!(picker.current, Path::new("/a"));
+    }
+
+    #[test]
+    fn picker_accepts_the_highlighted_folder_before_the_current_folder() {
+        let mut picker = DirectoryPicker {
+            current: PathBuf::from("/a"),
+            history: vec![PathBuf::from("/a")],
+            history_position: 0,
+            selected: Some(PathBuf::from("/a/project")),
+            open: true,
+            error: None,
+        };
+        assert_eq!(picker.accepted_path(), Path::new("/a/project"));
+        picker.selected = None;
+        assert_eq!(picker.accepted_path(), Path::new("/a"));
+    }
+
+    #[test]
+    fn picker_history_stays_bounded() {
+        let mut picker = DirectoryPicker {
+            current: PathBuf::from("/a"),
+            history: vec![PathBuf::from("/a")],
+            history_position: 0,
+            selected: None,
+            open: true,
+            error: None,
+        };
+        for index in 0..(PICKER_HISTORY_LIMIT + 10) {
+            picker.navigate_to(PathBuf::from(format!("/a/{index}")));
+        }
+        assert_eq!(picker.history.len(), PICKER_HISTORY_LIMIT);
+        let last_index = PICKER_HISTORY_LIMIT + 9;
+        assert_eq!(picker.current, PathBuf::from(format!("/a/{last_index}")));
+        for _ in 0..PICKER_HISTORY_LIMIT {
+            picker.go_back();
+        }
+        let oldest_index = last_index - (PICKER_HISTORY_LIMIT - 1);
+        assert_eq!(picker.current, PathBuf::from(format!("/a/{oldest_index}")));
     }
 
     #[test]

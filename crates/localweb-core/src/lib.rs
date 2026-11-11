@@ -1460,6 +1460,11 @@ pub struct CaStatus {
 pub struct Status {
     /// Whether the daemon answered this request.
     pub daemon_running: bool,
+    /// Whether startup restoration finished and mutations are accepted.
+    ///
+    /// Older daemons omit this field; clients treat an absent value as not ready.
+    #[serde(default)]
+    pub ready: bool,
     /// Whether the HTTPS gateway unit is active.
     pub gateway_running: bool,
     /// Dedicated IPv4 loopback address selected for the gateway.

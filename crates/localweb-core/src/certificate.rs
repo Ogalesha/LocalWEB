@@ -56,14 +56,43 @@ impl CaPaths {
         }
     }
 
+    /// Serializes access to the CA identity across processes.
+    ///
+    /// The lock file is separate from the certificate pair so an interrupted
+    /// first run cannot masquerade as certificate material.
+    fn lock_material(&self) -> Result<std::fs::File> {
+        let parent = self
+            .cert
+            .parent()
+            .ok_or_else(|| LocalWebError::Config("CA certificate path has no parent".into()))?;
+        fs::create_dir_all(parent)?;
+        let path = self.cert.with_extension("lock");
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600)
+        };
+        let file = options.open(&path)?;
+        file.lock().map_err(|error| {
+            LocalWebError::Service(format!(
+                "cannot lock the certificate authority state: {error}"
+            ))
+        })?;
+        Ok(file)
+    }
+
     /// Creates the development certificate authority when absent.
     ///
     /// Existing CA material is preserved. Partial material is reported instead of regenerated.
+    /// Concurrent first-run creation is serialized so every caller observes the same pair.
     ///
     /// # Errors
     ///
     /// Returns an error for incomplete CA state, generation failures, or filesystem failures.
     pub fn ensure_ca(&self) -> Result<()> {
+        let _lock = self.lock_material()?;
         match material_state(&self.cert, &self.key)? {
             MaterialState::Complete => return validate_ca(&fs::read(&self.cert)?, &fs::read_to_string(&self.key)?),
             MaterialState::Incomplete => return Err(LocalWebError::Config("incomplete CA state; restore the missing file rather than silently replacing the CA".into())),
@@ -85,9 +114,12 @@ impl CaPaths {
 
     /// Creates a CA-signed certificate for one validated DNS name.
     ///
+    /// Leaf material is derived data: a key without its certificate or a
+    /// certificate without its key is removed and issued again.
+    ///
     /// # Errors
     ///
-    /// Returns an error for invalid domains, incomplete files, cryptographic failures, or I/O.
+    /// Returns an error for invalid domains, cryptographic failures, or I/O.
     pub fn ensure_leaf(&self, domain: &str) -> Result<(PathBuf, PathBuf)> {
         validate_domain(domain)?;
         self.ensure_ca()?;
@@ -102,9 +134,17 @@ impl CaPaths {
                 Some(key)
             }
             MaterialState::Incomplete => {
-                return Err(LocalWebError::Config(format!(
-                    "incomplete certificate state for {domain}"
-                )));
+                // A lone key or certificate cannot be used and is cheap to
+                // recreate. Removing both sides prevents a stale partial file
+                // from blocking every route write.
+                for path in [&cert_path, &key_path] {
+                    match fs::remove_file(path) {
+                        Ok(()) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+                None
             }
             MaterialState::Missing => None,
         };
@@ -222,6 +262,75 @@ mod tests {
         assert!(ca.ensure_ca().is_err());
         assert!(!ca.key.exists());
         assert_eq!(fs::read(&ca.cert).unwrap(), certificate);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn certificate_only_leaf_material_is_replaced() {
+        let (base, ca) = fixture();
+        let (cert, key) = ca.ensure_leaf("acme.dev").unwrap();
+        let stale_certificate = fs::read(&cert).unwrap();
+        let stale_key = fs::read(&key).unwrap();
+        fs::remove_file(&key).unwrap();
+        ca.ensure_leaf("acme.dev").unwrap();
+        assert!(cert.is_file());
+        assert!(key.is_file());
+        assert_ne!(fs::read(&cert).unwrap(), stale_certificate);
+        assert_ne!(fs::read(&key).unwrap(), stale_key);
+        assert!(leaf_matches(
+            &fs::read(&cert).unwrap(),
+            &fs::read(&key).unwrap(),
+            &fs::read(&ca.cert).unwrap(),
+            "acme.dev"
+        ));
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn key_only_leaf_material_is_replaced() {
+        let (base, ca) = fixture();
+        let (cert, key) = ca.ensure_leaf("acme.dev").unwrap();
+        let stale_certificate = fs::read(&cert).unwrap();
+        let stale_key = fs::read(&key).unwrap();
+        fs::remove_file(&cert).unwrap();
+        ca.ensure_leaf("acme.dev").unwrap();
+        assert!(cert.is_file());
+        assert!(key.is_file());
+        assert_ne!(fs::read(&cert).unwrap(), stale_certificate);
+        assert_ne!(fs::read(&key).unwrap(), stale_key);
+        assert!(leaf_matches(
+            &fs::read(&cert).unwrap(),
+            &fs::read(&key).unwrap(),
+            &fs::read(&ca.cert).unwrap(),
+            "acme.dev"
+        ));
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn concurrent_first_run_publishes_one_matching_ca_pair() {
+        use std::sync::{Arc, Barrier};
+        let (base, ca) = fixture();
+        let ca = Arc::new(ca);
+        let barrier = Arc::new(Barrier::new(8));
+        let workers = (0..8)
+            .map(|_| {
+                let ca = Arc::clone(&ca);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    ca.ensure_ca()
+                })
+            })
+            .collect::<Vec<_>>();
+        for worker in workers {
+            worker.join().unwrap().unwrap();
+        }
+        validate_ca(
+            &fs::read(&ca.cert).unwrap(),
+            &fs::read_to_string(&ca.key).unwrap(),
+        )
+        .unwrap();
         fs::remove_dir_all(base).unwrap();
     }
 

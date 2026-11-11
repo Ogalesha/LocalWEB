@@ -8,7 +8,10 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     net::{Ipv4Addr, TcpListener},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 use tokio::{
@@ -194,6 +197,7 @@ struct State {
     config: GlobalConfig,
     running: Mutex<RunningState>,
     operations: Mutex<DaemonPhase>,
+    ready: AtomicBool,
     db_proxies: Mutex<BTreeMap<String, DbProxy>>,
     cron_jobs: Mutex<BTreeMap<(String, usize), tokio::task::JoinHandle<()>>>,
     cron_last_minute: Mutex<BTreeMap<(String, usize), i64>>,
@@ -250,6 +254,7 @@ async fn main() -> Result<()> {
         config,
         running: Mutex::new(RunningState::new()),
         operations: Mutex::new(DaemonPhase::Restoring),
+        ready: AtomicBool::new(false),
         db_proxies: Mutex::new(BTreeMap::new()),
         cron_jobs: Mutex::new(BTreeMap::new()),
         cron_last_minute: Mutex::new(BTreeMap::new()),
@@ -334,6 +339,7 @@ async fn restore_services(
         .mark_recovery(&state.paths, &recovery)?;
     state.running.lock().await.force_persist(&state.paths)?;
     *phase = DaemonPhase::Serving;
+    state.ready.store(true, Ordering::Release);
     Ok(())
 }
 
@@ -421,6 +427,7 @@ async fn execute(request: Request, state: &Arc<State>) -> localweb_core::Result<
             let gateway_endpoint = load_gateway_endpoint(&state.paths);
             Ok(Response::Status(Status {
                 daemon_running: true,
+                ready: state.ready.load(Ordering::Acquire),
                 gateway_running,
                 gateway_bind_address: gateway_endpoint.map(|endpoint| endpoint.bind_address),
                 gateway_https_port: gateway_endpoint.map(|endpoint| endpoint.https_port),
@@ -431,6 +438,7 @@ async fn execute(request: Request, state: &Arc<State>) -> localweb_core::Result<
         Request::Shutdown => {
             let mut phase = state.begin_operation().await?;
             *phase = DaemonPhase::Stopping;
+            state.ready.store(false, Ordering::Release);
             cancel_all_cron(state).await;
             let proxies = std::mem::take(&mut *state.db_proxies.lock().await);
             for (_, proxy) in proxies {
@@ -452,6 +460,7 @@ async fn execute(request: Request, state: &Arc<State>) -> localweb_core::Result<
                         .commit(&state.paths, BTreeSet::new())
                     {
                         *phase = DaemonPhase::Serving;
+                        state.ready.store(true, Ordering::Release);
                         return Err(error);
                     }
                     *phase = DaemonPhase::Stopped;
@@ -463,6 +472,7 @@ async fn execute(request: Request, state: &Arc<State>) -> localweb_core::Result<
                     let active = state.running.lock().await.snapshot();
                     require_recovery(state, &active).await;
                     *phase = DaemonPhase::Serving;
+                    state.ready.store(true, Ordering::Release);
                     error!(%error, "shutdown left services running; desired state was preserved");
                     Err(error)
                 }
@@ -624,6 +634,12 @@ async fn execute(request: Request, state: &Arc<State>) -> localweb_core::Result<
                 .await
                 .retain(|(project, _), _| project != &name);
             cleanup_project_runtime(&state.paths, &project);
+            let active = state.running.lock().await.snapshot();
+            let task_state = Arc::clone(state);
+            tokio::task::spawn_blocking(move || refresh_gateway_routes(&task_state, &active))
+                .await
+                .map_err(|error| join_failed(&error))
+                .and_then(std::convert::identity)?;
             Ok(Response::Message(localweb_core::copy::project_removed(
                 &name,
                 was_running,
@@ -1222,8 +1238,17 @@ fn load_desired_running(paths: &Paths) -> localweb_core::Result<BTreeSet<String>
     if !file.is_file() {
         return Ok(BTreeSet::new());
     }
-    serde_json::from_slice(&fs::read(file)?)
-        .map_err(|error| LocalWebError::Config(format!("invalid active project state: {error}")))
+    match serde_json::from_slice::<BTreeSet<String>>(&fs::read(&file)?) {
+        Ok(running) => Ok(running),
+        Err(error) => {
+            warn!(
+                path = %file.display(),
+                %error,
+                "ignoring invalid active project state; boot will rewrite it"
+            );
+            Ok(BTreeSet::new())
+        }
+    }
 }
 
 fn persist_running(paths: &Paths, running: &BTreeSet<String>) -> localweb_core::Result<()> {
@@ -1629,6 +1654,22 @@ fn apply_services(state: &State, active: &BTreeSet<String>) -> localweb_core::Re
         Services::stop("localweb-apache")?;
     }
     write_routes(state, active)?;
+    start_gateway(state)
+}
+
+/// Rewrites routes after a project disappears and reloads an active gateway.
+///
+/// The gateway reads its route table only at startup, so removing a stopped
+/// project still requires a restart when the gateway is already running.
+fn refresh_gateway_routes(state: &State, active: &BTreeSet<String>) -> localweb_core::Result<()> {
+    write_routes(state, active)?;
+    if is_active("localweb-gateway") {
+        start_gateway(state)?;
+    }
+    Ok(())
+}
+
+fn start_gateway(state: &State) -> localweb_core::Result<()> {
     let gateway = std::env::current_exe()?
         .with_file_name(format!("localweb-gateway{}", std::env::consts::EXE_SUFFIX));
     let gateway_active = is_active("localweb-gateway");
@@ -2040,33 +2081,73 @@ fn mail_web_url(paths: &Paths, project: &Project) -> Option<String> {
         .cloned()
 }
 
-fn load_projects(paths: &Paths) -> localweb_core::Result<Vec<Project>> {
+#[derive(Default)]
+struct ProjectScan {
+    projects: Vec<Project>,
+    issues: Vec<ProjectIssue>,
+}
+
+struct ProjectIssue {
+    path: std::path::PathBuf,
+    message: String,
+}
+
+/// Reads every usable project file and reports the rest without failing the set.
+///
+/// One corrupt file must not take the daemon, status reporting or unrelated
+/// projects down. Doctor exposes the skipped files so they can be repaired.
+fn scan_projects(paths: &Paths) -> localweb_core::Result<ProjectScan> {
+    let mut entries =
+        fs::read_dir(paths.config.join("projects"))?.collect::<std::io::Result<Vec<_>>>()?;
+    entries.sort_by_key(std::fs::DirEntry::path);
     let mut projects = Vec::new();
+    let mut issues = Vec::new();
     let mut names = BTreeSet::new();
     let mut hosts = BTreeSet::new();
-    for entry in fs::read_dir(paths.config.join("projects"))? {
-        let entry = entry?;
-        if entry.path().extension().is_some_and(|e| e == "toml") {
-            let project: Project = toml::from_str(&fs::read_to_string(entry.path())?)
-                .map_err(|e| LocalWebError::Config(e.to_string()))?;
+    for entry in entries {
+        let path = entry.path();
+        if path.extension().is_none_or(|extension| extension != "toml") {
+            continue;
+        }
+        let parsed = (|| -> localweb_core::Result<Project> {
+            let project: Project = toml::from_str(&fs::read_to_string(&path)?)
+                .map_err(|error| LocalWebError::Config(error.to_string()))?;
             project.validate()?;
-            if paths.project_file(project.id) != entry.path() {
+            if paths.project_file(project.id) != path {
                 return Err(LocalWebError::Config(format!(
                     "project file {} must be named {}.toml",
-                    entry.path().display(),
+                    path.display(),
                     project.id
                 )));
             }
-            if !names.insert(project.name.clone()) || !hosts.insert(project.hostname.clone()) {
-                return Err(LocalWebError::Config(
-                    "duplicate project name or hostname".into(),
-                ));
+            Ok(project)
+        })();
+        match parsed {
+            Ok(project) if names.contains(&project.name) => issues.push(ProjectIssue {
+                path,
+                message: format!("duplicate project name: {}", project.name),
+            }),
+            Ok(project) if hosts.contains(&project.hostname) => issues.push(ProjectIssue {
+                path,
+                message: format!("duplicate project hostname: {}", project.hostname),
+            }),
+            Ok(project) => {
+                names.insert(project.name.clone());
+                hosts.insert(project.hostname.clone());
+                projects.push(project);
             }
-            projects.push(project);
+            Err(error) => issues.push(ProjectIssue {
+                path,
+                message: error.to_string(),
+            }),
         }
     }
     projects.sort_by(|a, b| a.name.cmp(&b.name));
-    Ok(projects)
+    Ok(ProjectScan { projects, issues })
+}
+
+fn load_projects(paths: &Paths) -> localweb_core::Result<Vec<Project>> {
+    Ok(scan_projects(paths)?.projects)
 }
 
 fn find_project(paths: &Paths, name: &str) -> localweb_core::Result<Project> {
@@ -2186,8 +2267,25 @@ fn doctor(state: &State) -> Vec<Diagnostic> {
     });
     let expected_address =
         selected_gateway.map_or(Ipv4Addr::LOCALHOST, |endpoint| endpoint.bind_address);
-    let missing_hosts = load_projects(&state.paths)
-        .unwrap_or_default()
+    let scan = scan_projects(&state.paths).unwrap_or_else(|error| {
+        checks.push(Diagnostic {
+            level: "ERROR".into(),
+            check: "project files".into(),
+            detail: error.to_string(),
+            fix: Some("Check the project configuration directory permissions".into()),
+        });
+        ProjectScan::default()
+    });
+    for issue in scan.issues {
+        checks.push(Diagnostic {
+            level: "ERROR".into(),
+            check: "project file".into(),
+            detail: format!("{}: {}", issue.path.display(), issue.message),
+            fix: Some("Fix or remove this file; LocalWeb ignores it until it is valid".into()),
+        });
+    }
+    let missing_hosts = scan
+        .projects
         .into_iter()
         .filter(|project| !hosts_has_domain(&project.hostname, expected_address))
         .map(|project| project.hostname)
@@ -2316,12 +2414,69 @@ mod tests {
         assert_eq!(load_projects(&paths).unwrap().len(), 1);
         project.name = "../../outside".into();
         save_project(&paths, &project).unwrap();
-        load_projects(&paths).unwrap_err();
+        assert!(load_projects(&paths).unwrap().is_empty());
+        assert_eq!(scan_projects(&paths).unwrap().issues.len(), 1);
         project.name = "demo".into();
         project.schema_version = 999;
         save_project(&paths, &project).unwrap();
-        load_projects(&paths).unwrap_err();
+        assert!(load_projects(&paths).unwrap().is_empty());
+        assert_eq!(scan_projects(&paths).unwrap().issues.len(), 1);
         fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn corrupt_desired_running_state_is_treated_as_empty() {
+        let (base, paths, _) = project_fixture();
+        fs::write(paths.state.join("active-projects.json"), b"{not json").unwrap();
+        assert!(load_desired_running(&paths).unwrap().is_empty());
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn route_rewrites_after_removal_cover_running_and_stopped_projects() {
+        let (base, paths, mut project) = project_fixture();
+        project.web_port = Some(WEB_PORT_START);
+        let mut other = project.clone();
+        other.id = uuid::Uuid::new_v4();
+        other.name = "other".into();
+        other.hostname = "other.test".into();
+        other.web_port = Some(WEB_PORT_START + 1);
+        save_project(&paths, &project).unwrap();
+        save_project(&paths, &other).unwrap();
+        let state = State {
+            paths,
+            config: GlobalConfig::default(),
+            running: Mutex::new(RunningState::new()),
+            operations: Mutex::new(DaemonPhase::Serving),
+            ready: AtomicBool::new(true),
+            db_proxies: Mutex::new(BTreeMap::new()),
+            cron_jobs: Mutex::new(BTreeMap::new()),
+            cron_last_minute: Mutex::new(BTreeMap::new()),
+            shutdown: watch::channel(false).0,
+        };
+        write_routes(
+            &state,
+            &BTreeSet::from([project.name.clone(), other.name.clone()]),
+        )
+        .unwrap();
+        assert_eq!(gateway_routes(&state.paths).len(), 2);
+
+        fs::remove_file(state.paths.project_file(project.id)).unwrap();
+        write_routes(&state, &BTreeSet::from([other.name.clone()])).unwrap();
+        let routes = gateway_routes(&state.paths);
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].hostname, other.hostname);
+        assert_eq!(routes[0].upstream_port, other.web_port);
+
+        fs::remove_file(state.paths.project_file(other.id)).unwrap();
+        write_routes(&state, &BTreeSet::new()).unwrap();
+        assert!(gateway_routes(&state.paths).is_empty());
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    fn gateway_routes(paths: &Paths) -> Vec<GatewayRoute> {
+        serde_json::from_slice(&fs::read(paths.runtime.join("gateway-routes.json")).unwrap())
+            .unwrap()
     }
 
     #[test]
@@ -2370,6 +2525,7 @@ mod tests {
             config: GlobalConfig::default(),
             running: Mutex::new(RunningState::new()),
             operations: Mutex::new(DaemonPhase::Serving),
+            ready: AtomicBool::new(true),
             db_proxies: Mutex::new(BTreeMap::new()),
             cron_jobs: Mutex::new(BTreeMap::new()),
             cron_last_minute: Mutex::new(BTreeMap::new()),
@@ -2396,6 +2552,7 @@ mod tests {
             config: GlobalConfig::default(),
             running: Mutex::new(RunningState::new()),
             operations: Mutex::new(DaemonPhase::Restoring),
+            ready: AtomicBool::new(false),
             db_proxies: Mutex::new(BTreeMap::new()),
             cron_jobs: Mutex::new(BTreeMap::new()),
             cron_last_minute: Mutex::new(BTreeMap::new()),
@@ -2406,7 +2563,10 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert!(matches!(status, Response::Status(_)));
+        assert!(matches!(
+            status,
+            Response::Status(Status { ready: false, .. })
+        ));
         let input = serde_json::from_value(serde_json::json!({"path":project.path,"name":"queued","hostname":"queued.test","autostart":false})).unwrap();
         let mutation = execute(Request::ProjectAdd(input), &state);
         tokio::pin!(mutation);
@@ -2415,6 +2575,7 @@ mod tests {
             .unwrap_err();
         assert!(load_projects(&state.paths).unwrap().is_empty());
         *guard = DaemonPhase::Serving;
+        state.ready.store(true, Ordering::Release);
         drop(guard);
         assert!(matches!(mutation.await.unwrap(), Response::Project(_)));
         assert_eq!(load_projects(&state.paths).unwrap().len(), 1);
@@ -2429,6 +2590,7 @@ mod tests {
             config: GlobalConfig::default(),
             running: Mutex::new(RunningState::new()),
             operations: Mutex::new(DaemonPhase::Serving),
+            ready: AtomicBool::new(true),
             db_proxies: Mutex::new(BTreeMap::new()),
             cron_jobs: Mutex::new(BTreeMap::new()),
             cron_last_minute: Mutex::new(BTreeMap::new()),

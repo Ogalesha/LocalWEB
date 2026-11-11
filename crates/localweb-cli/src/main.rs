@@ -15,6 +15,9 @@ use std::{
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+/// How long `localweb start` waits for project restoration before reporting an error.
+const STARTUP_READY_TIMEOUT: Duration = Duration::from_secs(60);
+
 #[derive(Parser)]
 #[command(name = "localweb", version, about = "Run local web projects")]
 struct Cli {
@@ -860,7 +863,7 @@ async fn start_daemon(paths: &Paths) -> Result<()> {
 }
 
 async fn wait_for_daemon(paths: &Paths) -> Result<()> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    let deadline = tokio::time::Instant::now() + STARTUP_READY_TIMEOUT;
     loop {
         let error = match tokio::time::timeout(
             Duration::from_secs(2),
@@ -868,7 +871,9 @@ async fn wait_for_daemon(paths: &Paths) -> Result<()> {
         )
         .await
         {
-            Ok(Ok(_)) => return Ok(()),
+            Ok(Ok(Response::Status(status))) if status.ready => return Ok(()),
+            Ok(Ok(Response::Status(_))) => "LocalWeb is still restoring projects".to_owned(),
+            Ok(Ok(response)) => format!("unexpected daemon response: {response:?}"),
             Ok(Err(error)) => error.to_string(),
             Err(_) => copy::NO_RESPONSE.to_owned(),
         };
