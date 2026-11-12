@@ -89,7 +89,19 @@ impl Session {
                 "invalid JSON-RPC request",
             ));
         }
-        let method = message.get("method").and_then(Value::as_str)?;
+        let Some(method) = message.get("method").and_then(Value::as_str) else {
+            // A response (result/error) has no method and must stay silent, but
+            // an id-bearing frame that is neither a request nor a response is
+            // malformed and cannot be dropped without leaving the client waiting.
+            let is_response = message.get("result").is_some() || message.get("error").is_some();
+            return (message.get("id").is_some() && !is_response).then(|| {
+                error_response(
+                    &Value::Null,
+                    -32600,
+                    "invalid JSON-RPC request: missing method",
+                )
+            });
+        };
         let Some(id) = message.get("id") else {
             if method == "notifications/initialized" && self.phase == Phase::AwaitingInitialized {
                 self.phase = Phase::Ready;
@@ -281,6 +293,28 @@ mod tests {
             .await
             .expect("requests are answered");
         assert_eq!(reply["error"]["code"], -32601);
+    }
+
+    #[tokio::test]
+    async fn requests_without_a_method_are_rejected_instead_of_ignored() {
+        let reply = Session::default()
+            .handle(json!({ "jsonrpc": "2.0", "id": 9 }))
+            .await
+            .expect("malformed requests are answered");
+        assert_eq!(reply["error"]["code"], -32600);
+        assert_eq!(reply["id"], Value::Null);
+        assert!(
+            Session::default()
+                .handle(json!({ "jsonrpc": "2.0", "id": 10, "method": 42 }))
+                .await
+                .is_some()
+        );
+        assert!(
+            Session::default()
+                .handle(json!({ "jsonrpc": "2.0", "id": 11, "result": {} }))
+                .await
+                .is_none()
+        );
     }
 
     #[tokio::test]

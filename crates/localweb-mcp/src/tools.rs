@@ -6,8 +6,11 @@
 
 use localweb_core::{
     Cache, Database, ExecutionSpec, NewProject, Paths, Request, Response, SupervisorConfig,
-    WebServer, certificate::CaPaths, copy, hosts::HostsSync, parse_cron_line, send_request,
-    validate_php_version,
+    WebServer,
+    certificate::CaPaths,
+    copy,
+    hosts::{HostsSync, HostsSyncLock},
+    parse_cron_line, send_request, validate_php_version,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -722,6 +725,9 @@ async fn ca_install() -> Result<String, String> {
 /// Rewrites the managed hosts block with every project hostname.
 async fn hosts_sync() -> Result<String, String> {
     let paths = paths()?;
+    // Serialize with CLI and other MCP processes before reading the project
+    // snapshot and invoking the privileged helper.
+    let _lock = HostsSyncLock::acquire(&paths).map_err(|error| error.to_string())?;
     let hostnames = project_hostnames(&paths).await?;
     let Response::Status(status) = converse(&paths, Request::Status).await? else {
         return Err(unexpected());

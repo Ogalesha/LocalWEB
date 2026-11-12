@@ -34,6 +34,8 @@ type HttpClient = Client<HttpConnector, Incoming>;
 
 /// How long a client may take to complete the TLS handshake before being dropped.
 const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Pause before retrying a failed accept so a transient error cannot spin.
+const ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(100);
 /// How long an upstream project server may take to answer a proxied request.
 const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -79,7 +81,17 @@ async fn main() -> Result<()> {
     let https = https_listener(args.bind_address, args.https_port).await?;
     let tls = TlsAcceptor::from(Arc::new(config));
     loop {
-        let (stream, peer) = https.accept().await?;
+        let (stream, peer) = match https.accept().await {
+            Ok(accepted) => accepted,
+            Err(error) => {
+                // A single failed accept (for example a descriptor exhaustion
+                // or a connection reset between poll and accept) must not take
+                // the gateway down for every project.
+                eprintln!("gateway accept failed: {error}");
+                tokio::time::sleep(ACCEPT_RETRY_DELAY).await;
+                continue;
+            }
+        };
         let app = app.clone();
         let tls = tls.clone();
         tokio::spawn(async move {

@@ -2,7 +2,11 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use localweb_core::{
     Cache, Database, ExecutionSpec, NewProject, Paths, Profile, Project, Request, Response,
-    SupervisorConfig, WebServer, certificate::CaPaths, copy, hosts::HostsSync, send_request,
+    SupervisorConfig, WebServer,
+    certificate::CaPaths,
+    copy,
+    hosts::{HostsSync, HostsSyncLock},
+    send_request,
 };
 use std::{
     ffi::OsString,
@@ -1200,6 +1204,9 @@ fn remove_ca(paths: &Paths) -> Result<()> {
 }
 
 async fn sync_hosts(paths: &Paths) -> Result<()> {
+    // Serialize the whole snapshot-and-write sequence with other CLI/MCP
+    // processes; otherwise an older project list can overwrite a newer block.
+    let _lock = HostsSyncLock::acquire(paths)?;
     let projects = match send_request(paths, Request::ProjectList).await? {
         Response::Projects(items) => items,
         Response::Error { code, message } => bail!("{code}: {message}"),

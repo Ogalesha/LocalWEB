@@ -22,11 +22,11 @@ Windows must keep the same guarantees the Linux and macOS builds provide:
 
 | Area | Windows implementation |
 | --- | --- |
-| Transport | `crates/localweb-core/src/transport.rs`: a per-account named pipe keyed by the native SID, with an explicit DACL and server-account verification. |
+| Transport | `crates/localweb-core/src/transport.rs`: a per-account named pipe keyed by the native SID, with an explicit DACL and server-account verification. A failed replacement pipe instance is remembered as missing so the next accept recreates it instead of leaving the listener wedged. |
 | Paths | `crates/localweb-core/src/lib.rs` and `platform.rs`: per-user directories under `%LOCALAPPDATA%`. |
 | Trust store | `crates/localweb-core/src/platform.rs`: CLI, desktop and MCP use `certutil -user -addstore -f Root` without elevation. Query and removal select the exact DER certificate thumbprint, independently of display language or PEM formatting. |
 | Privileges | `crates/localweb-core/src/privilege.rs`: the same helper binary runs with a Windows launcher instead of `pkexec`/`osascript`. |
-| Service manager | `crates/localweb-core/src/service.rs`: the daemon is registered as the scheduled task `LocalWeb Daemon`; `crates/localweb-daemon/src/backend.rs` spawns daemon-owned children with pidfiles and restart loops instead of `systemd-run` units. |
+| Service manager | `crates/localweb-core/src/service.rs`: the daemon is registered as the scheduled task `LocalWeb Daemon`; `crates/localweb-daemon/src/backend.rs` spawns daemon-owned children with pidfiles and restart loops instead of `systemd-run` units. The HTTPS gateway uses the same restart loop as supervised workers. |
 | Runtimes | `crates/localweb-core/src/runtime.rs`: the runtime root defaults to `%ProgramFiles%\LocalWeb\runtime` (override with `LOCALWEB_RUNTIME_ROOT`), PHP is probed as `php.exe`/`php-cgi.exe` per version, and Composer is discovered through Scoop and Chocolatey installs. |
 | GUI | `crates/localweb-gui`: eframe build exercised under Wine with `EFRAME_SCREENSHOT_TO`; the ZIP carries all six executables. |
 | CI | `.github/workflows/native-builds.yml`: native Windows runs Clippy, workspace regressions and an explicit current-user CA integration check. The separate `windows-wine` job cross-builds and exercises the portable ZIP. Both gate publication. |

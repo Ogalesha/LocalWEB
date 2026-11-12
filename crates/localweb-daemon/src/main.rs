@@ -316,7 +316,11 @@ async fn main() -> Result<()> {
                     }
                 }
             }
-            _ = shutdown.changed() => break Ok(()),
+            // Do not drop restoration halfway. A shutdown that arrives while
+            // projects are being restored is handled after the restore future
+            // commits its observed state; mutations already queue on the phase
+            // lock, so this arm cannot strand an accepted request.
+            _ = shutdown.changed(), if !restoring => break Ok(()),
         }
     };
     listener.cleanup()?;
@@ -1743,7 +1747,7 @@ fn start_gateway(state: &State) -> localweb_core::Result<()> {
         .with_file_name(format!("localweb-gateway{}", std::env::consts::EXE_SUFFIX));
     let gateway_active = is_active("localweb-gateway");
     let mut endpoint = select_gateway_endpoint(&state.paths, gateway_active)?;
-    if let Err(primary) = start_gateway_service(&gateway, endpoint) {
+    if let Err(primary) = start_gateway_service(&state.paths, &gateway, endpoint) {
         if endpoint.https_port != GATEWAY_HTTPS_PORT {
             return Err(primary);
         }
@@ -1756,7 +1760,7 @@ fn start_gateway(state: &State) -> localweb_core::Result<()> {
                 ))
             })?;
         endpoint.https_port = fallback_port;
-        start_gateway_service(&gateway, endpoint).map_err(|fallback| {
+        start_gateway_service(&state.paths, &gateway, endpoint).map_err(|fallback| {
             LocalWebError::Service(format!(
                 "standard HTTPS endpoint failed ({primary}); fallback failed ({fallback})"
             ))
@@ -1780,9 +1784,14 @@ fn start_gateway(state: &State) -> localweb_core::Result<()> {
 }
 
 fn start_gateway_service(
+    paths: &Paths,
     gateway: &std::path::Path,
     endpoint: GatewayState,
 ) -> localweb_core::Result<()> {
+    #[cfg(target_os = "macos")]
+    localweb_core::service::write_gateway_agent(paths, endpoint.bind_address, endpoint.https_port)?;
+    #[cfg(not(target_os = "macos"))]
+    let _ = paths;
     let bind_address = endpoint.bind_address.to_string();
     let https_port = endpoint.https_port.to_string();
     Services::start_or_restart(

@@ -42,7 +42,7 @@ pub struct DaemonListener {
     #[cfg(unix)]
     _lock: EndpointLock,
     #[cfg(windows)]
-    pending: tokio::net::windows::named_pipe::NamedPipeServer,
+    pending: Option<tokio::net::windows::named_pipe::NamedPipeServer>,
 }
 
 impl DaemonListener {
@@ -123,7 +123,10 @@ impl DaemonListener {
             .to_str()
             .ok_or_else(|| LocalWebError::Config("non-UTF-8 pipe name".into()))?;
         let pending = crate::windows_ipc::create_server(name, true)?;
-        Ok(Self { path, pending })
+        Ok(Self {
+            path,
+            pending: Some(pending),
+        })
     }
 
     /// Returns the endpoint path or pipe name.
@@ -145,14 +148,31 @@ impl DaemonListener {
         }
         #[cfg(windows)]
         {
-            self.pending.connect().await?;
             let name = self
                 .path
                 .to_str()
                 .ok_or_else(|| LocalWebError::Config("non-UTF-8 pipe name".into()))?;
-            let next = crate::windows_ipc::create_server(name, false)?;
-            let connected = std::mem::replace(&mut self.pending, next);
-            Ok(connected)
+            // A previous accept may have failed to create its replacement
+            // instance. Recreate it here instead of leaving the listener wedged.
+            let pending = match self.pending.take() {
+                Some(pending) => pending,
+                None => crate::windows_ipc::create_server(name, false)?,
+            };
+            if let Err(error) = pending.connect().await {
+                // The failed instance is dropped; the next accept starts from a
+                // fresh instance instead of reusing a partially connected one.
+                return Err(error.into());
+            }
+            match crate::windows_ipc::create_server(name, false) {
+                Ok(next) => self.pending = Some(next),
+                Err(error) => {
+                    // The accepted connection is still valid. Remember that the
+                    // next instance is missing so the following accept recovers.
+                    eprintln!("cannot create the next daemon pipe instance: {error}");
+                    self.pending = None;
+                }
+            }
+            Ok(pending)
         }
     }
 
@@ -262,5 +282,38 @@ mod tests {
     fn windows_socket_is_a_named_pipe() {
         let paths = Paths::discover().unwrap();
         assert!(paths.socket().to_string_lossy().starts_with(r"\\.\pipe\"));
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_listener_recovers_a_missing_pending_instance() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let name = format!(r"\\.\pipe\lw-recover-{}", uuid::Uuid::new_v4());
+        let mut listener = DaemonListener {
+            path: PathBuf::from(&name),
+            pending: Some(crate::windows_ipc::create_server(&name, true).unwrap()),
+        };
+
+        let client_name = name.clone();
+        let client = tokio::spawn(async move { crate::windows_ipc::connect(&client_name).await });
+        let mut server = listener.accept().await.unwrap();
+        let mut client = client.await.unwrap().unwrap();
+        client.write_all(b"one").await.unwrap();
+        let mut buffer = [0; 3];
+        server.read_exact(&mut buffer).await.unwrap();
+        assert_eq!(&buffer, b"one");
+        drop((client, server));
+
+        // Model a failed replacement-instance creation after the first accept.
+        listener.pending = None;
+        let client_name = name.clone();
+        let client = tokio::spawn(async move { crate::windows_ipc::connect(&client_name).await });
+        let mut server = listener.accept().await.unwrap();
+        let mut client = client.await.unwrap().unwrap();
+        client.write_all(b"two").await.unwrap();
+        let mut buffer = [0; 3];
+        server.read_exact(&mut buffer).await.unwrap();
+        assert_eq!(&buffer, b"two");
     }
 }

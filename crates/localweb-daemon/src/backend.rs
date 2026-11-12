@@ -181,7 +181,11 @@ mod linux {
         ]);
         // The gateway keeps its file capability: both NoNewPrivileges
         // and PrivateTmp (via a user namespace) would neutralise it.
-        if unit != "localweb-gateway" {
+        if unit == "localweb-gateway" {
+            // The supervisor must recreate the HTTPS endpoint after a crash,
+            // exactly like worker units do.
+            command.args(gateway_restart_properties());
+        } else {
             command.arg("--property=NoNewPrivileges=yes");
             command.arg("--property=PrivateTmp=yes");
         }
@@ -291,6 +295,10 @@ mod linux {
             )));
         }
         Ok(())
+    }
+
+    fn gateway_restart_properties() -> &'static [&'static str] {
+        &["--property=Restart=always", "--property=RestartSec=2s"]
     }
 
     fn supervisor_systemd_args(
@@ -455,6 +463,12 @@ mod linux {
         }
 
         #[test]
+        fn gateway_units_restart_after_exit() {
+            assert!(gateway_restart_properties().contains(&"--property=Restart=always"));
+            assert!(gateway_restart_properties().contains(&"--property=RestartSec=2s"));
+        }
+
+        #[test]
         fn supervisor_arguments_never_pass_through_a_shell() {
             let arguments = supervisor_systemd_args(
                 "localweb-project-demo-supervisor",
@@ -535,6 +549,10 @@ mod windows {
     pub(super) fn start_or_restart(unit: &str, executable: &Path, args: &[&str]) -> Result<()> {
         stop(unit)?;
         let arguments: Vec<OsString> = args.iter().map(OsString::from).collect();
+        if unit == "localweb-gateway" {
+            start_restarting(unit, executable, &arguments, None, &BTreeMap::new())?;
+            return wait_active(unit, "HTTPS gateway");
+        }
         let log = log_path(unit)?;
         let mut child = spawn_child(executable, &arguments, None, &log, &BTreeMap::new())?;
         if let Err(error) = write_pid(unit, child.id()) {
@@ -557,10 +575,29 @@ mod windows {
         environment: &BTreeMap<String, String>,
     ) -> Result<()> {
         stop(unit)?;
+        let arguments: Vec<OsString> = worker_args.iter().map(OsString::from).collect();
+        start_restarting(
+            unit,
+            executable,
+            &arguments,
+            Some(working_directory),
+            environment,
+        )?;
+        wait_active(unit, "background worker")
+    }
+
+    /// Starts a supervisor thread that replaces the process after any exit.
+    fn start_restarting(
+        unit: &str,
+        executable: &Path,
+        arguments: &[OsString],
+        working_directory: Option<&Path>,
+        environment: &BTreeMap<String, String>,
+    ) -> Result<()> {
         let environment = environment.clone();
         let executable = executable.to_path_buf();
-        let arguments: Vec<OsString> = worker_args.iter().map(OsString::from).collect();
-        let working = working_directory.to_path_buf();
+        let arguments = arguments.to_vec();
+        let working = working_directory.map(Path::to_path_buf);
         let cancel = Arc::new(AtomicBool::new(false));
         let unit_owned = unit.to_owned();
         let log = log_path(unit)?;
@@ -578,7 +615,13 @@ mod windows {
                     {
                         break;
                     }
-                    match spawn_child(&executable, &arguments, Some(&working), &log, &environment) {
+                    match spawn_child(
+                        &executable,
+                        &arguments,
+                        working.as_deref(),
+                        &log,
+                        &environment,
+                    ) {
                         Ok(mut child) => {
                             if write_pid(&unit_owned, child.id()).is_err() {
                                 let _ = child.kill();
@@ -600,7 +643,7 @@ mod windows {
                 thread::sleep(Duration::from_secs(2));
             }
         });
-        wait_active(unit, "background worker")
+        Ok(())
     }
 
     pub(super) fn stop(unit: &str) -> Result<()> {
@@ -801,7 +844,7 @@ mod macos {
 
     pub(super) fn is_active(unit: &str) -> bool {
         if unit == "localweb-gateway" {
-            return gateway_loaded();
+            return gateway_running();
         }
         pid_path(unit)
             .ok()
@@ -915,17 +958,29 @@ mod macos {
         }
         let domain = gui_domain();
         let target = format!("{domain}/{GATEWAY_LABEL}");
-        if !gateway_loaded() {
-            let plist = plist.to_string_lossy().into_owned();
+        // Reload the agent so launchd adopts the socket endpoint written for
+        // this start. A kickstart alone would keep the previously loaded
+        // socket address when the daemon selected a fallback endpoint.
+        if gateway_loaded() {
             let output = Command::new("/bin/launchctl")
-                .args(["bootstrap", &domain, &plist])
+                .args(["bootout", &target])
                 .output()?;
             if !output.status.success() {
                 return Err(LocalWebError::Service(format!(
-                    "launchctl could not bootstrap the gateway: {}",
+                    "launchctl could not unload the previous gateway: {}",
                     String::from_utf8_lossy(&output.stderr).trim()
                 )));
             }
+        }
+        let plist = plist.to_string_lossy().into_owned();
+        let output = Command::new("/bin/launchctl")
+            .args(["bootstrap", &domain, &plist])
+            .output()?;
+        if !output.status.success() {
+            return Err(LocalWebError::Service(format!(
+                "launchctl could not bootstrap the gateway: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
         }
         let output = Command::new("/bin/launchctl")
             .args(["kickstart", "-k", &target])
@@ -964,6 +1019,27 @@ mod macos {
             .stderr(Stdio::null())
             .status()
             .is_ok_and(|status| status.success())
+    }
+
+    /// Reports whether launchd currently runs the gateway process.
+    ///
+    /// A loaded agent can be waiting for a retry after an exit, so loading the
+    /// label is not enough to call the gateway available.
+    fn gateway_running() -> bool {
+        let target = format!("{}/{}", gui_domain(), GATEWAY_LABEL);
+        Command::new("/bin/launchctl")
+            .args(["print", &target])
+            .output()
+            .is_ok_and(|output| {
+                output.status.success()
+                    && launchd_state(&String::from_utf8_lossy(&output.stdout)) == Some("running")
+            })
+    }
+
+    fn launchd_state(output: &str) -> Option<&str> {
+        output
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("state =").map(str::trim))
     }
 
     fn pid_path(unit: &str) -> Result<PathBuf> {
@@ -1020,5 +1096,21 @@ mod macos {
     fn macos_path() -> String {
         let inherited = std::env::var("PATH").unwrap_or_default();
         format!("/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:{inherited}")
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn launchd_state_distinguishes_running_from_loaded() {
+            let running = "gui/501/dev.localweb.gateway = {\n\tactive count = 1\n\tstate = running\n\tprogram = /usr/local/libexec/localweb/localweb-gateway\n}\n";
+            assert_eq!(launchd_state(running), Some("running"));
+            let waiting =
+                "gui/501/dev.localweb.gateway = {\n\tactive count = 0\n\tstate = not running\n}\n";
+            assert_eq!(launchd_state(waiting), Some("not running"));
+            assert_ne!(launchd_state(waiting), Some("running"));
+            assert_eq!(launchd_state("no state reported"), None);
+        }
     }
 }

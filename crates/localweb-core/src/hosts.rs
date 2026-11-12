@@ -2,9 +2,14 @@
 //!
 //! All functions preserve content outside the managed marker pair and reject malformed blocks.
 
-use crate::{LocalWebError, Result, validate_domain};
+use crate::{LocalWebError, Paths, Result, validate_domain};
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeSet, net::Ipv4Addr};
+use std::{
+    collections::BTreeSet,
+    fs::{File, OpenOptions},
+    net::Ipv4Addr,
+    path::Path,
+};
 
 /// Starts the LocalWeb-owned hosts section.
 pub const BEGIN: &str = "# BEGIN LOCALWEB - DO NOT EDIT";
@@ -25,6 +30,56 @@ pub struct HostsSync {
     pub address: Ipv4Addr,
     /// Exact project hostnames that `LocalWeb` manages.
     pub domains: Vec<String>,
+}
+
+/// Cross-process lock that serializes read-modify-write hosts synchronization.
+///
+/// CLI and MCP invocations share one lock file, so a stale project snapshot
+/// cannot overwrite a newer synchronized block.
+#[derive(Debug)]
+pub struct HostsSyncLock {
+    file: File,
+}
+
+impl HostsSyncLock {
+    /// Acquires the per-user lock, waiting for another `LocalWeb` process.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the lock file cannot be opened or locked.
+    pub fn acquire(paths: &Paths) -> Result<Self> {
+        let file = open_lock(&paths.state.join("hosts-sync.lock"))?;
+        file.lock()?;
+        Ok(Self { file })
+    }
+
+    #[cfg(test)]
+    fn try_acquire(paths: &Paths) -> Result<Option<Self>> {
+        let file = open_lock(&paths.state.join("hosts-sync.lock"))?;
+        match file.try_lock() {
+            Ok(()) => Ok(Some(Self { file })),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+            Err(std::fs::TryLockError::Error(error)) => Err(error.into()),
+        }
+    }
+}
+
+impl Drop for HostsSyncLock {
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
+    }
+}
+
+fn open_lock(path: &Path) -> Result<File> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    Ok(OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(path)?)
 }
 
 /// Replaces the managed hosts section with exact loopback mappings.
@@ -156,5 +211,26 @@ mod tests {
             remove_managed_block(original).unwrap(),
             "127.0.0.1 localhost\n::1 localhost\n"
         );
+    }
+
+    #[test]
+    fn hosts_sync_lock_is_exclusive_across_callers() {
+        let root = std::env::temp_dir().join(format!(
+            "lw-hosts-lock-{}",
+            &uuid::Uuid::new_v4().simple().to_string()[..8]
+        ));
+        let paths = Paths {
+            config: root.join("c"),
+            data: root.join("d"),
+            state: root.join("s"),
+            runtime: root.join("r"),
+        };
+        let first = HostsSyncLock::try_acquire(&paths).unwrap().unwrap();
+        assert!(HostsSyncLock::try_acquire(&paths).unwrap().is_none());
+        drop(first);
+        let second = HostsSyncLock::try_acquire(&paths).unwrap();
+        assert!(second.is_some());
+        drop(second);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

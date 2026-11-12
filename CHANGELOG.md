@@ -16,6 +16,13 @@ All notable changes to this project are documented here. The format follows
 - Keep the daemon ready and the in-memory state authoritative when persisting restoration or stop results fails, with maintenance retries.
 - Accept the highlighted folder in the folder picker and bound its navigation history.
 - Prevent CA installation and environment disclosure from overlapping other foreground commands.
+- Wait for project restoration to finish before honoring shutdown, so a stop cannot cancel recovery halfway.
+- Treat the macOS gateway as running only when launchd reports `running`, and rewrite its launch agent socket to the persisted endpoint before every activation.
+- Restart the Linux and Windows gateways after an unexpected exit, as their workers already do.
+- Keep the gateway accepting connections after a transient accept error instead of terminating it.
+- Answer id-bearing MCP frames that lack a method with an invalid-request error while ignoring genuine stray responses.
+- Serialize hosts synchronization across CLI and MCP processes with a shared per-user lock.
+- Recover the Windows daemon pipe listener when the replacement instance cannot be created.
 
 ## [0.1.4] - 2026-11-08
 

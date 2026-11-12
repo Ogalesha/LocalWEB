@@ -6,6 +6,8 @@ use crate::atomic_write;
 use crate::{LocalWebError, Paths, Result};
 #[cfg(not(windows))]
 use std::fs;
+#[cfg(target_os = "macos")]
+use std::net::Ipv4Addr;
 use std::{path::PathBuf, process::Command};
 
 /// systemd unit that runs the daemon on Linux.
@@ -114,6 +116,19 @@ pub fn write_user_units(paths: &Paths) -> Result<()> {
         let _ = paths;
         linux::write_user_units()
     }
+}
+
+/// Rewrites the launchd gateway agent for the selected loopback endpoint.
+///
+/// The gateway takes its listening socket from launchd on macOS, so the plist
+/// must describe the same address and port that the daemon reports.
+#[cfg(target_os = "macos")]
+pub fn write_gateway_agent(
+    paths: &Paths,
+    bind_address: Ipv4Addr,
+    https_port: u16,
+) -> Result<PathBuf> {
+    macos::write_gateway_agent(paths, bind_address, https_port)
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -322,13 +337,45 @@ mod macos {
             daemon_plist.as_bytes(),
             0o600,
         )?;
-        let gateway_plist = gateway_plist(&gateway, &logs.join("gateway.log"));
+        let gateway_plist = gateway_plist(
+            &gateway,
+            &logs.join("gateway.log"),
+            std::net::Ipv4Addr::LOCALHOST,
+            443,
+        );
         atomic_write(
             &directory.join(format!("{GATEWAY_LABEL}.plist")),
             gateway_plist.as_bytes(),
             0o600,
         )?;
         Ok(())
+    }
+
+    pub(super) fn write_gateway_agent(
+        paths: &Paths,
+        bind_address: std::net::Ipv4Addr,
+        https_port: u16,
+    ) -> Result<PathBuf> {
+        let gateway = daemon_binary()?.with_file_name("localweb-gateway");
+        if !gateway.is_file() {
+            return Err(LocalWebError::Service(format!(
+                "the LocalWeb gateway is missing at {}",
+                gateway.display()
+            )));
+        }
+        let logs = paths.state.join("logs");
+        fs::create_dir_all(&logs)?;
+        let plist = gateway_plist(
+            &gateway,
+            &logs.join("gateway.log"),
+            bind_address,
+            https_port,
+        );
+        let directory = plist_dir()?;
+        fs::create_dir_all(&directory)?;
+        let path = directory.join(format!("{GATEWAY_LABEL}.plist"));
+        atomic_write(&path, plist.as_bytes(), 0o600)?;
+        Ok(path)
     }
 
     fn daemon_plist(daemon: &std::path::Path, log: &std::path::Path) -> String {
@@ -353,7 +400,12 @@ mod macos {
         )
     }
 
-    fn gateway_plist(gateway: &std::path::Path, log: &std::path::Path) -> String {
+    fn gateway_plist(
+        gateway: &std::path::Path,
+        log: &std::path::Path,
+        bind_address: std::net::Ipv4Addr,
+        https_port: u16,
+    ) -> String {
         format!(
             concat!(
                 "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n",
@@ -365,8 +417,8 @@ mod macos {
                 "  <key>KeepAlive</key><true/>\n",
                 "  <key>EnvironmentVariables</key><dict><key>PATH</key><string>{path}</string></dict>\n",
                 "  <key>Sockets</key><dict><key>LocalWebHTTPS</key><dict>\n",
-                "    <key>SockNodeName</key><string>127.0.0.1</string>\n",
-                "    <key>SockServiceName</key><string>443</string>\n",
+                "    <key>SockNodeName</key><string>{address}</string>\n",
+                "    <key>SockServiceName</key><string>{port}</string>\n",
                 "    <key>SockType</key><string>stream</string>\n",
                 "  </dict></dict>\n",
                 "  <key>StandardOutPath</key><string>{log}</string>\n",
@@ -377,7 +429,27 @@ mod macos {
             program = xml_escape(&gateway.to_string_lossy()),
             path = runtime_path_value(),
             log = xml_escape(&log.to_string_lossy()),
+            address = bind_address,
+            port = https_port,
         )
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn gateway_plist_tracks_the_selected_endpoint() {
+            let plist = gateway_plist(
+                std::path::Path::new("/usr/local/libexec/localweb/localweb-gateway"),
+                std::path::Path::new("/tmp/gateway.log"),
+                std::net::Ipv4Addr::new(127, 0, 0, 2),
+                8443,
+            );
+            assert!(plist.contains("<key>SockNodeName</key><string>127.0.0.2</string>"));
+            assert!(plist.contains("<key>SockServiceName</key><string>8443</string>"));
+            assert!(plist.contains("<key>LocalWebHTTPS</key>"));
+        }
     }
 
     fn runtime_path_value() -> &'static str {
