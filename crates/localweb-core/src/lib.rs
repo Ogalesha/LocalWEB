@@ -1484,6 +1484,13 @@ pub struct Status {
     pub project_count: usize,
     /// Number of projects currently running.
     pub active_projects: usize,
+    /// Projects whose previous stop or rollback could not clean up every
+    /// service. They require an explicit stop before they can be started
+    /// cleanly again.
+    ///
+    /// Older daemons omit this field; clients treat an absent value as empty.
+    #[serde(default)]
+    pub projects_needing_recovery: Vec<String>,
 }
 
 /// One project together with its observed runtime state.
@@ -1493,6 +1500,12 @@ pub struct ProjectStatus {
     pub project: Project,
     /// Whether the project services are active.
     pub running: bool,
+    /// Whether a previous stop or rollback left services that still need
+    /// cleanup. A recovery project is not reported as running.
+    ///
+    /// Older daemons omit this field; clients treat an absent value as false.
+    #[serde(default)]
+    pub recovery_needed: bool,
     /// Mailpit web UI URL when the project has mail enabled.
     #[serde(default)]
     pub mail_web_url: Option<String>,
@@ -1945,15 +1958,18 @@ mod tests {
         let status = ProjectStatus {
             project,
             running: false,
+            recovery_needed: false,
             mail_web_url: None,
             public_url: None,
         };
         let mut value = serde_json::to_value(&status).unwrap();
         value.as_object_mut().unwrap().remove("mail_web_url");
         value.as_object_mut().unwrap().remove("public_url");
+        value.as_object_mut().unwrap().remove("recovery_needed");
         let parsed: ProjectStatus = serde_json::from_value(value).unwrap();
         assert_eq!(parsed.mail_web_url, None);
         assert_eq!(parsed.public_url, None);
+        assert!(!parsed.recovery_needed);
         std::fs::remove_dir_all(path).unwrap();
     }
 }

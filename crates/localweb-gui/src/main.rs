@@ -3725,6 +3725,7 @@ mod tests {
                     gateway_https_port: None,
                     project_count: 1,
                     active_projects: 1,
+                    projects_needing_recovery: Vec::new(),
                 }))),
             })
             .unwrap();
@@ -3826,6 +3827,7 @@ mod tests {
                 gateway_https_port: None,
                 project_count: 0,
                 active_projects: 0,
+                projects_needing_recovery: Vec::new(),
             })),
         );
         assert!(
@@ -3843,6 +3845,7 @@ mod tests {
                 gateway_https_port: None,
                 project_count: 0,
                 active_projects: 0,
+                projects_needing_recovery: Vec::new(),
             })),
         );
         assert!(
@@ -3954,6 +3957,7 @@ mod tests {
                 gateway_https_port: None,
                 project_count: 0,
                 active_projects: 0,
+                projects_needing_recovery: Vec::new(),
             })),
         );
         assert_eq!(app.daemon, DaemonState::Stopping);
@@ -4134,6 +4138,7 @@ mod tests {
         app.projects.push(ProjectStatus {
             project,
             running: true,
+            recovery_needed: false,
             mail_web_url: None,
             public_url: Some("https://connection.test:8443".into()),
         });
@@ -4272,6 +4277,7 @@ mod tests {
             app.projects.push(ProjectStatus {
                 project: project.clone(),
                 running: false,
+                recovery_needed: false,
                 mail_web_url: None,
                 public_url: None,
             });

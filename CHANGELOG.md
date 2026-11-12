@@ -11,7 +11,9 @@ All notable changes to this project are documented here. The format follows
 - Regenerate partial leaf certificates and serialize concurrent first-run CA creation.
 - Keep LocalWeb responsive when a project file is corrupt; Doctor reports the skipped file.
 - Wait for project restoration before CLI, MCP and desktop requests mutate state; queued additions survive daemon startup.
-- Reload an active gateway after project removal so its hostname disappears immediately.
+- Derive gateway routes and certificates when a project is added, and retry route rewrites after a committed add or removal instead of failing the mutation.
+- Expose projects that need recovery through status, project responses and Doctor; stop leftover services before updating a recovery project.
+- Keep the daemon ready and the in-memory state authoritative when persisting restoration or stop results fails, with maintenance retries.
 - Accept the highlighted folder in the folder picker and bound its navigation history.
 - Prevent CA installation and environment disclosure from overlapping other foreground commands.
 

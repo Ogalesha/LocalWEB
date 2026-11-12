@@ -112,6 +112,23 @@ impl RunningState {
         self.projects.get(name) == Some(&ProjectRuntime::RecoveryNeeded)
     }
 
+    /// Whether stopping this project can still release services, either
+    /// because it is running or because a previous cleanup failed.
+    fn requires_stop(&self, name: &str) -> bool {
+        matches!(
+            self.projects.get(name),
+            Some(ProjectRuntime::Running | ProjectRuntime::RecoveryNeeded)
+        )
+    }
+
+    fn recovery_snapshot(&self) -> BTreeSet<String> {
+        self.projects
+            .iter()
+            .filter(|(_, state)| **state == ProjectRuntime::RecoveryNeeded)
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+
     fn mark_recovery(
         &mut self,
         paths: &Paths,
@@ -201,6 +218,9 @@ struct State {
     db_proxies: Mutex<BTreeMap<String, DbProxy>>,
     cron_jobs: Mutex<BTreeMap<(String, usize), tokio::task::JoinHandle<()>>>,
     cron_last_minute: Mutex<BTreeMap<(String, usize), i64>>,
+    /// A committed project mutation could not rewrite the derived gateway
+    /// route table. Maintenance retries until the file and gateway catch up.
+    routes_dirty: AtomicBool,
     shutdown: watch::Sender<bool>,
 }
 
@@ -258,6 +278,7 @@ async fn main() -> Result<()> {
         db_proxies: Mutex::new(BTreeMap::new()),
         cron_jobs: Mutex::new(BTreeMap::new()),
         cron_last_minute: Mutex::new(BTreeMap::new()),
+        routes_dirty: AtomicBool::new(false),
         shutdown: watch::channel(false).0,
     });
     let boot_guard = state.operations.lock().await;
@@ -332,12 +353,17 @@ async fn restore_services(
         }
         Ok(recovery)
     }).await.map_err(|error| join_failed(&error))??;
-    state
+    if let Err(error) = state
         .running
         .lock()
         .await
-        .mark_recovery(&state.paths, &recovery)?;
-    state.running.lock().await.force_persist(&state.paths)?;
+        .mark_recovery(&state.paths, &recovery)
+    {
+        error!(%error, "could not persist projects needing recovery; will retry");
+    }
+    if let Err(error) = state.running.lock().await.force_persist(&state.paths) {
+        error!(%error, "could not persist restored projects; will retry");
+    }
     *phase = DaemonPhase::Serving;
     state.ready.store(true, Ordering::Release);
     Ok(())
@@ -425,6 +451,7 @@ async fn execute(request: Request, state: &Arc<State>) -> localweb_core::Result<
             let projects = load_projects(&state.paths)?;
             let gateway_running = is_active("localweb-gateway");
             let gateway_endpoint = load_gateway_endpoint(&state.paths);
+            let running = state.running.lock().await;
             Ok(Response::Status(Status {
                 daemon_running: true,
                 ready: state.ready.load(Ordering::Acquire),
@@ -432,7 +459,8 @@ async fn execute(request: Request, state: &Arc<State>) -> localweb_core::Result<
                 gateway_bind_address: gateway_endpoint.map(|endpoint| endpoint.bind_address),
                 gateway_https_port: gateway_endpoint.map(|endpoint| endpoint.https_port),
                 project_count: projects.len(),
-                active_projects: state.running.lock().await.count(),
+                active_projects: running.count(),
+                projects_needing_recovery: running.recovery_snapshot().into_iter().collect(),
             }))
         }
         Request::Shutdown => {
@@ -486,12 +514,14 @@ async fn execute(request: Request, state: &Arc<State>) -> localweb_core::Result<
                     .into_iter()
                     .map(|project| {
                         let active = running.contains(&project.name);
+                        let recovery_needed = running.needs_recovery(&project.name);
                         let mail_web_url = mail_web_url(&state.paths, &project);
                         ProjectStatus {
                             public_url: gateway_endpoint
                                 .map(|endpoint| gateway_url(&project.hostname, endpoint)),
                             project,
                             running: active,
+                            recovery_needed,
                             mail_web_url,
                         }
                     })
@@ -500,13 +530,17 @@ async fn execute(request: Request, state: &Arc<State>) -> localweb_core::Result<
         }
         Request::ProjectGet { name } => {
             let project = find_project(&state.paths, &name)?;
-            let running = state.running.lock().await.contains(&name);
+            let (running, recovery_needed) = {
+                let running = state.running.lock().await;
+                (running.contains(&name), running.needs_recovery(&name))
+            };
             let mail_web_url = mail_web_url(&state.paths, &project);
             Ok(Response::Project(ProjectStatus {
                 public_url: active_gateway_endpoint(&state.paths)
                     .map(|endpoint| gateway_url(&project.hostname, endpoint)),
                 project,
                 running,
+                recovery_needed,
                 mail_web_url,
             }))
         }
@@ -537,11 +571,17 @@ async fn execute(request: Request, state: &Arc<State>) -> localweb_core::Result<
             }
             assign_project_ports(&projects, &mut project)?;
             save_project(&state.paths, &project)?;
+            // The project file is committed. Route material is derived from
+            // it, so a refresh failure must not turn the add into an error.
+            let routes_ready = sync_gateway_routes(state).await;
             Ok(Response::Project(ProjectStatus {
-                public_url: active_gateway_endpoint(&state.paths)
+                public_url: routes_ready
+                    .then(|| active_gateway_endpoint(&state.paths))
+                    .flatten()
                     .map(|endpoint| gateway_url(&project.hostname, endpoint)),
                 project,
                 running: false,
+                recovery_needed: false,
                 mail_web_url: None,
             }))
         }
@@ -572,8 +612,11 @@ async fn execute(request: Request, state: &Arc<State>) -> localweb_core::Result<
                 paths: &state.paths,
             };
             services.check_project(&updated)?;
-            let was_running = state.running.lock().await.contains(&name);
-            if was_running {
+            let (was_running, requires_stop) = {
+                let running = state.running.lock().await;
+                (running.contains(&name), running.requires_stop(&name))
+            };
+            if requires_stop {
                 stop_project_locked(state, &name).await?;
             }
             if let Err(error) = save_project(&state.paths, &updated) {
@@ -618,6 +661,7 @@ async fn execute(request: Request, state: &Arc<State>) -> localweb_core::Result<
                 mail_web_url: mail_web_url(&state.paths, &updated),
                 project: updated,
                 running,
+                recovery_needed: false,
             }))
         }
         Request::ProjectRemove { name } => {
@@ -634,12 +678,9 @@ async fn execute(request: Request, state: &Arc<State>) -> localweb_core::Result<
                 .await
                 .retain(|(project, _), _| project != &name);
             cleanup_project_runtime(&state.paths, &project);
-            let active = state.running.lock().await.snapshot();
-            let task_state = Arc::clone(state);
-            tokio::task::spawn_blocking(move || refresh_gateway_routes(&task_state, &active))
-                .await
-                .map_err(|error| join_failed(&error))
-                .and_then(std::convert::identity)?;
+            // The removal is committed. A route failure only leaves derived
+            // state stale; maintenance retries it.
+            sync_gateway_routes(state).await;
             Ok(Response::Message(localweb_core::copy::project_removed(
                 &name,
                 was_running,
@@ -1069,8 +1110,11 @@ async fn stop_project_locked(state: &Arc<State>, name: &str) -> localweb_core::R
         return Err(error);
     }
     stop_db_proxy(state, name).await;
-    state.running.lock().await.forget(name);
-    state.running.lock().await.commit(&state.paths, active)?;
+    let mut running = state.running.lock().await;
+    running.forget(name);
+    if let Err(error) = running.commit(&state.paths, active) {
+        error!(project = %name, %error, "could not persist stopped project; will retry");
+    }
     Ok(())
 }
 
@@ -1657,6 +1701,31 @@ fn apply_services(state: &State, active: &BTreeSet<String>) -> localweb_core::Re
     start_gateway(state)
 }
 
+/// Rewrites derived routes after a committed project mutation.
+///
+/// A failure schedules a maintenance retry; it must not turn an add or remove
+/// that already changed project files into an error. Returns whether the route
+/// file and any active gateway are current.
+async fn sync_gateway_routes(state: &Arc<State>) -> bool {
+    let active = state.running.lock().await.snapshot();
+    let task_state = Arc::clone(state);
+    let result = tokio::task::spawn_blocking(move || refresh_gateway_routes(&task_state, &active))
+        .await
+        .map_err(|error| join_failed(&error))
+        .and_then(std::convert::identity);
+    match result {
+        Ok(()) => {
+            state.routes_dirty.store(false, Ordering::Release);
+            true
+        }
+        Err(error) => {
+            state.routes_dirty.store(true, Ordering::Release);
+            error!(%error, "could not refresh gateway routes; will retry");
+            false
+        }
+    }
+}
+
 /// Rewrites routes after a project disappears and reloads an active gateway.
 ///
 /// The gateway reads its route table only at startup, so removing a stopped
@@ -1898,6 +1967,9 @@ async fn cron_tick(state: &Arc<State>) {
     };
     if let Err(error) = state.running.lock().await.reconcile(&state.paths) {
         error!(%error, "could not persist the observed running projects; will retry");
+    }
+    if state.routes_dirty.load(Ordering::Acquire) {
+        sync_gateway_routes(state).await;
     }
     let now = chrono::Local::now();
     let projects = match load_projects(&state.paths) {
@@ -2305,6 +2377,22 @@ fn doctor(state: &State) -> Vec<Diagnostic> {
         },
         fix: (!missing_hosts.is_empty()).then(|| "Run `localweb hosts sync`".into()),
     });
+    let recovery = state
+        .running
+        .try_lock()
+        .map(|running| running.recovery_snapshot())
+        .unwrap_or_default();
+    if !recovery.is_empty() {
+        checks.push(Diagnostic {
+            level: "WARNING".into(),
+            check: "project recovery".into(),
+            detail: format!(
+                "cleanup required: {}",
+                recovery.into_iter().collect::<Vec<_>>().join(", ")
+            ),
+            fix: Some("Run `localweb project stop NAME`, then start it again".into()),
+        });
+    }
     checks.extend(runtime_diagnostics());
     checks
 }
@@ -2452,6 +2540,7 @@ mod tests {
             db_proxies: Mutex::new(BTreeMap::new()),
             cron_jobs: Mutex::new(BTreeMap::new()),
             cron_last_minute: Mutex::new(BTreeMap::new()),
+            routes_dirty: AtomicBool::new(false),
             shutdown: watch::channel(false).0,
         };
         write_routes(
@@ -2471,6 +2560,153 @@ mod tests {
         fs::remove_file(state.paths.project_file(other.id)).unwrap();
         write_routes(&state, &BTreeSet::new()).unwrap();
         assert!(gateway_routes(&state.paths).is_empty());
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    fn test_state(paths: Paths) -> Arc<State> {
+        Arc::new(State {
+            paths,
+            config: GlobalConfig::default(),
+            running: Mutex::new(RunningState::new()),
+            operations: Mutex::new(DaemonPhase::Serving),
+            ready: AtomicBool::new(true),
+            db_proxies: Mutex::new(BTreeMap::new()),
+            cron_jobs: Mutex::new(BTreeMap::new()),
+            cron_last_minute: Mutex::new(BTreeMap::new()),
+            routes_dirty: AtomicBool::new(false),
+            shutdown: watch::channel(false).0,
+        })
+    }
+
+    #[tokio::test]
+    async fn project_add_writes_routes_for_a_stopped_project() {
+        let (base, paths, _) = project_fixture();
+        let source = base.join("added");
+        fs::create_dir(&source).unwrap();
+        let state = test_state(paths);
+        let input = serde_json::from_value(serde_json::json!({
+            "path": source,
+            "name": "added",
+            "hostname": "added.test",
+            "autostart": false
+        }))
+        .unwrap();
+        let response = execute(Request::ProjectAdd(input), &state).await.unwrap();
+        let Response::Project(status) = response else {
+            panic!("expected a project response");
+        };
+        assert!(!status.running);
+        assert!(!status.recovery_needed);
+        let routes = gateway_routes(&state.paths);
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].hostname, "added.test");
+        assert_eq!(routes[0].upstream_port, None);
+        assert!(!state.routes_dirty.load(Ordering::Acquire));
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn project_remove_succeeds_and_retries_after_route_failure() {
+        let (base, paths, project) = project_fixture();
+        save_project(&paths, &project).unwrap();
+        let state = test_state(paths);
+        let routes = state.paths.runtime.join("gateway-routes.json");
+        fs::create_dir(&routes).unwrap();
+        let response = execute(
+            Request::ProjectRemove {
+                name: "demo".into(),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(response, Response::Message(_)));
+        find_project(&state.paths, "demo").unwrap_err();
+        assert!(state.routes_dirty.load(Ordering::Acquire));
+        fs::remove_dir(&routes).unwrap();
+        sync_gateway_routes(&state).await;
+        assert!(!state.routes_dirty.load(Ordering::Acquire));
+        assert!(gateway_routes(&state.paths).is_empty());
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn status_and_project_list_expose_recovery_projects() {
+        let (base, paths, project) = project_fixture();
+        save_project(&paths, &project).unwrap();
+        let state = test_state(paths);
+        state
+            .running
+            .lock()
+            .await
+            .projects
+            .insert("demo".into(), ProjectRuntime::RecoveryNeeded);
+        let status = execute(Request::Status, &state).await.unwrap();
+        let Response::Status(status) = status else {
+            panic!("expected a status response");
+        };
+        assert_eq!(status.active_projects, 0);
+        assert_eq!(status.projects_needing_recovery, vec!["demo".to_owned()]);
+        let list = execute(Request::ProjectList, &state).await.unwrap();
+        let Response::Projects(items) = list else {
+            panic!("expected a project list");
+        };
+        assert_eq!(items.len(), 1);
+        assert!(!items[0].running);
+        assert!(items[0].recovery_needed);
+        let get = execute(
+            Request::ProjectGet {
+                name: "demo".into(),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+        let Response::Project(item) = get else {
+            panic!("expected a project response");
+        };
+        assert!(!item.running);
+        assert!(item.recovery_needed);
+        assert!(
+            doctor(&state)
+                .iter()
+                .any(|check| check.check == "project recovery" && check.level == "WARNING")
+        );
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn recovery_projects_require_a_stop_before_update() {
+        let mut running = RunningState::new();
+        running
+            .projects
+            .insert("demo".into(), ProjectRuntime::RecoveryNeeded);
+        assert!(!running.contains("demo"));
+        assert!(running.needs_recovery("demo"));
+        assert!(running.requires_stop("demo"));
+        running
+            .projects
+            .insert("other".into(), ProjectRuntime::Running);
+        assert!(running.requires_stop("other"));
+        assert!(!running.requires_stop("missing"));
+    }
+
+    #[test]
+    fn failed_recovery_persist_keeps_retry_state_and_entries() {
+        let (base, paths, _) = project_fixture();
+        let file = paths.state.join("active-projects.json");
+        fs::create_dir(&file).unwrap();
+        let mut running = RunningState::new();
+        assert!(
+            running
+                .mark_recovery(&paths, &BTreeSet::from(["demo".into()]))
+                .is_err()
+        );
+        assert!(running.needs_recovery("demo"));
+        assert_eq!(running.persistence, Persistence::RetryNeeded);
+        fs::remove_dir(&file).unwrap();
+        running.reconcile(&paths).unwrap();
+        assert_eq!(running.persistence, Persistence::Committed);
         fs::remove_dir_all(base).unwrap();
     }
 
@@ -2529,6 +2765,7 @@ mod tests {
             db_proxies: Mutex::new(BTreeMap::new()),
             cron_jobs: Mutex::new(BTreeMap::new()),
             cron_last_minute: Mutex::new(BTreeMap::new()),
+            routes_dirty: AtomicBool::new(false),
             shutdown: watch::channel(false).0,
         };
         let job = tokio::spawn(std::future::pending());
@@ -2556,6 +2793,7 @@ mod tests {
             db_proxies: Mutex::new(BTreeMap::new()),
             cron_jobs: Mutex::new(BTreeMap::new()),
             cron_last_minute: Mutex::new(BTreeMap::new()),
+            routes_dirty: AtomicBool::new(false),
             shutdown: watch::channel(false).0,
         });
         let mut guard = state.operations.lock().await;
@@ -2594,6 +2832,7 @@ mod tests {
             db_proxies: Mutex::new(BTreeMap::new()),
             cron_jobs: Mutex::new(BTreeMap::new()),
             cron_last_minute: Mutex::new(BTreeMap::new()),
+            routes_dirty: AtomicBool::new(false),
             shutdown: watch::channel(false).0,
         };
         let selected = tokio::spawn(std::future::pending());
