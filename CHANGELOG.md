@@ -23,6 +23,7 @@ All notable changes to this project are documented here. The format follows
 - Answer id-bearing MCP frames that lack a method with an invalid-request error while ignoring genuine stray responses.
 - Serialize hosts synchronization across CLI and MCP processes with a shared per-user lock.
 - Recover the Windows daemon pipe listener when the replacement instance cannot be created.
+- Build the legacy PHP 8.1 runtime against bundled OpenSSL so hosts shipping OpenSSL 4 can package it.
 
 ## [0.1.4] - 2026-11-08
 

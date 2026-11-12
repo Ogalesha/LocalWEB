@@ -7,6 +7,11 @@ output=${LOCALWEB_PHP_ROOT:-$workspace/packaging/php-builds}
 mkdir -p "$output"
 sh "$workspace/.github/ci/build-php-deps.sh"
 compat="$workspace/packaging/ci-inputs/php-deps"
+host_openssl_major=0
+if command -v pkg-config >/dev/null 2>&1; then
+    host_openssl=$(pkg-config --modversion openssl 2>/dev/null || true)
+    case "${host_openssl%%.*}" in ''|*[!0-9]*) ;; *) host_openssl_major=${host_openssl%%.*} ;; esac
+fi
 while read -r version release digest; do
     [ -n "$version" ] || continue
     case "$version" in \#*) continue ;; esac
@@ -46,7 +51,11 @@ PY
         cd "$source_dir"
         if [ -f Makefile ]; then make clean; fi
         export PKG_CONFIG_PATH="$compat/libxml/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
-        if [ "$version" = 8.0 ]; then
+        # PHP 8.1 still references ERR_NUM_ERRORS, which OpenSSL 4 removed.
+        # Keep the host library on older hosts, and fall back to the bundled
+        # 1.1.1 compatibility build only where the host headers cannot work.
+        if [ "$version" = 8.0 ] ||
+            { [ "$version" = 8.1 ] && [ "$host_openssl_major" -ge 4 ]; }; then
             export PKG_CONFIG_PATH="$compat/openssl/lib/pkgconfig:$PKG_CONFIG_PATH"
         fi
         export LD_LIBRARY_PATH="$compat/libxml/lib:$compat/openssl/lib:${LD_LIBRARY_PATH:-}"
