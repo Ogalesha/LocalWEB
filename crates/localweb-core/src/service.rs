@@ -122,6 +122,11 @@ pub fn write_user_units(paths: &Paths) -> Result<()> {
 ///
 /// The gateway takes its listening socket from launchd on macOS, so the plist
 /// must describe the same address and port that the daemon reports.
+///
+/// # Errors
+///
+/// Returns an error when the gateway binary is missing or the agent
+/// definition cannot be written.
 #[cfg(target_os = "macos")]
 pub fn write_gateway_agent(
     paths: &Paths,
@@ -434,24 +439,6 @@ mod macos {
         )
     }
 
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-
-        #[test]
-        fn gateway_plist_tracks_the_selected_endpoint() {
-            let plist = gateway_plist(
-                std::path::Path::new("/usr/local/libexec/localweb/localweb-gateway"),
-                std::path::Path::new("/tmp/gateway.log"),
-                std::net::Ipv4Addr::new(127, 0, 0, 2),
-                8443,
-            );
-            assert!(plist.contains("<key>SockNodeName</key><string>127.0.0.2</string>"));
-            assert!(plist.contains("<key>SockServiceName</key><string>8443</string>"));
-            assert!(plist.contains("<key>LocalWebHTTPS</key>"));
-        }
-    }
-
     fn runtime_path_value() -> &'static str {
         "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/usr/sbin:/sbin"
     }
@@ -494,5 +481,23 @@ mod macos {
             .replace('<', "&lt;")
             .replace('>', "&gt;")
             .replace('"', "&quot;")
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn gateway_plist_tracks_the_selected_endpoint() {
+            let plist = gateway_plist(
+                std::path::Path::new("/usr/local/libexec/localweb/localweb-gateway"),
+                std::path::Path::new("/tmp/gateway.log"),
+                std::net::Ipv4Addr::new(127, 0, 0, 2),
+                8443,
+            );
+            assert!(plist.contains("<key>SockNodeName</key><string>127.0.0.2</string>"));
+            assert!(plist.contains("<key>SockServiceName</key><string>8443</string>"));
+            assert!(plist.contains("<key>LocalWebHTTPS</key>"));
+        }
     }
 }
