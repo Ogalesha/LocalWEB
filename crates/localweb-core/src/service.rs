@@ -181,16 +181,79 @@ mod windows {
     use std::process::Stdio;
 
     pub(super) fn restart_daemon() -> Result<()> {
-        ensure_task()?;
-        let _ = Command::new(crate::platform::windows_system_directory()?.join("taskkill.exe"))
-            .args(["/IM", "localwebd.exe", "/F"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-        run(
-            &["/Run", "/TN", DAEMON_TASK],
-            "schtasks could not run the LocalWeb daemon task",
+        use std::os::windows::process::CommandExt as _;
+        // This sync API is also called from async CLI/MCP contexts. Keep its
+        // temporary runtime on a dedicated thread, never nested in their runtime.
+        std::thread::spawn(|| -> Result<()> {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?
+                .block_on(stop_current_daemon())
+        })
+        .join()
+        .map_err(|_panic| LocalWebError::Service("daemon restart task failed".into()))??;
+        let paths = Paths::discover()?;
+        paths.create()?;
+        let log = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(paths.state.join("logs/daemon.log"))?;
+        // Manual start does not change whether the login task is enabled.
+        Command::new(daemon_binary()?)
+            .creation_flags(0x0800_0000)
+            .stdin(Stdio::null())
+            .stderr(Stdio::from(log.try_clone()?))
+            .stdout(Stdio::from(log))
+            .spawn()?;
+        Ok(())
+    }
+
+    async fn stop_current_daemon() -> Result<()> {
+        use std::{os::windows::io::AsRawHandle as _, time::Duration};
+        use windows_sys::Win32::{
+            Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT},
+            System::Threading::{TerminateProcess, WaitForSingleObject},
+        };
+        let paths = Paths::discover()?;
+        let client = match crate::transport::connect(&paths).await {
+            Ok(client) => client,
+            Err(crate::LocalWebError::Io(error))
+                if error.kind() == std::io::ErrorKind::NotFound =>
+            {
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
+        let process = crate::windows_ipc::daemon_process(&client, &daemon_binary()?)?;
+        drop(client);
+        if let Ok(Ok(crate::Response::Error { message, .. })) = tokio::time::timeout(
+            Duration::from_secs(30),
+            crate::send_request(&paths, crate::Request::Shutdown),
         )
+        .await
+        {
+            return Err(LocalWebError::Service(format!(
+                "LocalWeb could not stop safely: {message}"
+            )));
+        }
+        // SAFETY: process is the still-owned, SID/executable-verified server.
+        let wait = unsafe { WaitForSingleObject(process.as_raw_handle(), 5000) };
+        if wait == WAIT_OBJECT_0 {
+            return Ok(());
+        }
+        if wait != WAIT_TIMEOUT {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        // SAFETY: a retained handle targets this exact verified process, never
+        // a same-name process or a subsequently reused PID.
+        if unsafe { TerminateProcess(process.as_raw_handle(), 1) } == 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        // SAFETY: the handle remains owned until exit has been observed.
+        if unsafe { WaitForSingleObject(process.as_raw_handle(), 5000) } != WAIT_OBJECT_0 {
+            return Err(LocalWebError::Service("LocalWeb did not stop".into()));
+        }
+        Ok(())
     }
 
     pub(super) fn set_autostart(enable: bool) -> Result<()> {

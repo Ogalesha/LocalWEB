@@ -112,6 +112,69 @@ pub fn stop(unit: &str) -> Result<()> {
     }
 }
 
+/// Discovers project service ownership independently of project configuration.
+///
+/// # Errors
+/// Returns an error if the native service inventory cannot be read.
+pub fn project_units(paths: &localweb_core::Paths) -> Result<std::collections::BTreeSet<String>> {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let _ = paths;
+        let output = std::process::Command::new("systemctl")
+            .args([
+                "--user",
+                "list-units",
+                "--all",
+                "--type=service",
+                "--plain",
+                "--no-legend",
+                "localweb-project-*",
+            ])
+            .output()?;
+        if !output.status.success() {
+            return Err(LocalWebError::Service(format!(
+                "cannot inventory project services: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| line.split_whitespace().next())
+            .filter_map(project_unit_name)
+            .map(str::to_owned)
+            .collect())
+    }
+    #[cfg(any(windows, target_os = "macos"))]
+    {
+        let directory = paths.runtime.join("services");
+        if !directory.exists() {
+            return Ok(std::collections::BTreeSet::new());
+        }
+        let mut units = std::collections::BTreeSet::new();
+        for entry in std::fs::read_dir(directory)? {
+            let name = entry?.file_name();
+            if let Some(unit) = name
+                .to_str()
+                .and_then(|name| name.strip_suffix(".pid"))
+                .and_then(project_unit_name)
+            {
+                units.insert(unit.to_owned());
+            }
+        }
+        Ok(units)
+    }
+}
+
+fn project_unit_name(name: &str) -> Option<&str> {
+    let unit = name.strip_suffix(".service").unwrap_or(name);
+    let project = unit.strip_prefix("localweb-project-")?;
+    let project = ["-redis", "-mailpit", "-supervisor"]
+        .iter()
+        .find_map(|suffix| project.strip_suffix(suffix))?;
+    localweb_core::validate_name(project).ok()?;
+    Some(unit)
+}
+
 /// Reports whether a managed service is currently running.
 #[must_use]
 pub fn is_active(unit: &str) -> bool {
@@ -1111,6 +1174,32 @@ mod macos {
             assert_eq!(launchd_state(waiting), Some("not running"));
             assert_ne!(launchd_state(waiting), Some("running"));
             assert_eq!(launchd_state("no state reported"), None);
+        }
+    }
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use super::project_unit_name;
+
+    #[test]
+    fn inventory_only_accepts_owned_project_units() {
+        for kind in ["redis", "mailpit", "supervisor"] {
+            let unit = format!("localweb-project-demo-one-{kind}");
+            assert_eq!(project_unit_name(&unit), Some(unit.as_str()));
+            assert_eq!(
+                project_unit_name(&format!("{unit}.service")),
+                Some(unit.as_str())
+            );
+        }
+        for unit in [
+            "redis.service",
+            "localweb-project-demo-nginx.service",
+            "localweb-project-../x-redis.service",
+            "localweb-project--redis",
+            "localweb-project-demo-redis.timer",
+        ] {
+            assert_eq!(project_unit_name(unit), None, "{unit}");
         }
     }
 }

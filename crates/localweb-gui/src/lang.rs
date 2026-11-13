@@ -2279,6 +2279,37 @@ impl Lang {
         }
     }
 
+    pub fn notice_startup_timeout(self) -> &'static str {
+        match self {
+            Self::English => "LocalWeb did not become ready. Check its log and try Start again.",
+            Self::Italiano => "LocalWeb non è pronto. Controlla il log e riprova ad avviarlo.",
+            Self::Shqip => "LocalWeb nuk është gati. Kontrollo regjistrin dhe provo sërish Nis.",
+            Self::Spanish => {
+                "LocalWeb no está listo. Revisa el registro e intenta iniciarlo de nuevo."
+            }
+            Self::Portuguese => {
+                "O LocalWeb não está pronto. Verifica o registo e tenta iniciar novamente."
+            }
+            Self::French => {
+                "LocalWeb n’est pas prêt. Consultez le journal et réessayez de le démarrer."
+            }
+            Self::Russian => "LocalWeb не готов. Проверьте журнал и попробуйте запустить снова.",
+            Self::Polish => {
+                "LocalWeb nie jest gotowy. Sprawdź dziennik i spróbuj uruchomić ponownie."
+            }
+            Self::Ukrainian => "LocalWeb не готовий. Перевірте журнал і спробуйте запустити знову.",
+            Self::Turkish => {
+                "LocalWeb hazır değil. Günlüğü kontrol edip yeniden başlatmayı deneyin."
+            }
+            Self::Greek => {
+                "Το LocalWeb δεν είναι έτοιμο. Ελέγξτε το αρχείο καταγραφής και δοκιμάστε ξανά."
+            }
+            Self::Hindi => "LocalWeb तैयार नहीं है। लॉग देखें और फिर से शुरू करें।",
+            Self::Chinese => "LocalWeb 尚未就绪。请检查日志并尝试重新启动。",
+            Self::Swedish => "LocalWeb är inte redo. Kontrollera loggen och försök starta igen.",
+        }
+    }
+
     pub fn notice_started(self) -> &'static str {
         match self {
             Self::English => copy::LOCALWEB_STARTED,

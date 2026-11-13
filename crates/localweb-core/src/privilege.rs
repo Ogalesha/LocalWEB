@@ -1,19 +1,96 @@
 //! Runs the privileged helper through the native administrative prompt.
 
 use crate::{LocalWebError, Result};
-use std::path::Path;
+use std::{
+    io::Write as _,
+    path::Path,
+    process::{Command, Stdio},
+};
 
-/// Runs `helper operation` with administrator rights, feeding `input` on stdin.
-///
-/// Uses `pkexec` on Linux, `osascript` on macOS and the UAC `runas` verb on
-/// Windows. The caller must have validated that `input` is safe to hand to a
-/// root process.
+/// Runs `helper operation` with administrator rights and validated input.
 ///
 /// # Errors
 ///
-/// Returns an error when the prompt is unavailable, cancelled, or the helper
-/// exits unsuccessfully.
+/// Returns an error when authorization or the helper fails.
 pub fn run_helper(helper: &Path, operation: &str, input: &[u8]) -> Result<()> {
+    let (mut command, payload) = helper_command(helper, operation, input)?;
+    command.stdin(if payload.is_none() {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    });
+    let mut child = command.spawn()?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(input)?;
+    }
+    check_status(child.wait()?.success(), operation)
+}
+
+/// Runs a helper with bounded output and a five-minute authorization deadline.
+///
+/// Cancellation stops the owned launcher. An elevated transaction may already
+/// have committed; callers must refresh before retrying after interruption.
+///
+/// # Errors
+///
+/// Returns an error on denial, timeout, or helper failure.
+pub async fn run_helper_async(helper: &Path, operation: &str, input: &[u8]) -> Result<()> {
+    let (command, payload) = helper_command(helper, operation, input)?;
+    let mut command = tokio::process::Command::from(command);
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(300),
+        crate::process::output_with_input(&mut command, 65536, payload.is_none().then_some(input)),
+    )
+    .await
+    .map_err(|_elapsed| {
+        LocalWebError::Service(
+            "Administrator approval timed out. Refresh the current state before retrying.".into(),
+        )
+    })??;
+    check_status(result.status.success(), operation)
+}
+
+fn check_status(success: bool, operation: &str) -> Result<()> {
+    if !success {
+        return Err(LocalWebError::Service(format!(
+            "The administrator action `{operation}` did not complete. Check authorization and refresh before retrying."
+        )));
+    }
+    Ok(())
+}
+
+// Retaining this guard across the command also removes payloads on cancellation.
+struct Payload(std::path::PathBuf);
+
+impl Drop for Payload {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+impl Payload {
+    fn create(input: &[u8]) -> Result<Self> {
+        let payload = Self(
+            std::env::temp_dir().join(format!("localweb-helper-{}.json", uuid::Uuid::new_v4())),
+        );
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600)
+        };
+        options.open(&payload.0)?.write_all(input)?;
+        Ok(payload)
+    }
+}
+
+fn helper_command(
+    helper: &Path,
+    operation: &str,
+    input: &[u8],
+) -> Result<(Command, Option<Payload>)> {
     if operation.is_empty()
         || !operation
             .bytes()
@@ -21,188 +98,61 @@ pub fn run_helper(helper: &Path, operation: &str, input: &[u8]) -> Result<()> {
     {
         return Err(LocalWebError::Config("invalid helper operation".into()));
     }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let _ = input;
+        let mut command = Command::new("pkexec");
+        command.arg(helper).arg(operation);
+        Ok((command, None))
+    }
     #[cfg(target_os = "macos")]
     {
-        macos::run(helper, operation, input)
+        let payload = Payload::create(input)?;
+        // SAFETY: getuid has no preconditions.
+        let uid = unsafe { libc::getuid() };
+        let mut shell = format!("LOCALWEB_INVOKING_UID={uid}");
+        if let Ok(paths) = crate::Paths::discover() {
+            shell.push_str(" LOCALWEB_RUNTIME_DIR=");
+            shell.push_str(&shell_quote(&paths.runtime.to_string_lossy()));
+        }
+        for argument in [&*helper.to_string_lossy(), operation] {
+            shell.push(' ');
+            shell.push_str(&shell_quote(argument));
+        }
+        shell.push_str(" < ");
+        shell.push_str(&shell_quote(&payload.0.to_string_lossy()));
+        let script = format!(
+            "do shell script \"{}\" with administrator privileges",
+            apple_script_escape(&shell)
+        );
+        let mut command = Command::new("/usr/bin/osascript");
+        command.args(["-e", &script]);
+        Ok((command, Some(payload)))
     }
     #[cfg(windows)]
     {
-        windows::run(helper, operation, input)
-    }
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        linux::run(helper, operation, input)
-    }
-}
-
-#[cfg(all(unix, not(target_os = "macos")))]
-mod linux {
-    use super::{LocalWebError, Result};
-    use std::{
-        io::Write as _,
-        path::Path,
-        process::{Command, Stdio},
-    };
-
-    pub(super) fn run(helper: &Path, operation: &str, input: &[u8]) -> Result<()> {
-        let mut child = Command::new("pkexec")
-            .arg(helper)
-            .arg(operation)
-            .stdin(Stdio::piped())
-            .spawn()
-            .map_err(|error| LocalWebError::Service(format!("cannot launch pkexec: {error}")))?;
-        child
-            .stdin
-            .take()
-            .ok_or_else(|| LocalWebError::Service("helper stdin unavailable".into()))?
-            .write_all(input)?;
-        if !child.wait()?.success() {
-            return Err(LocalWebError::Service(format!(
-                "privileged helper `{operation}` failed; a polkit agent must be running and the authorization granted"
-            )));
-        }
-        Ok(())
-    }
-}
-
-#[cfg(target_os = "macos")]
-mod macos {
-    use super::{LocalWebError, Result, apple_script_escape, shell_quote};
-    use crate::Paths;
-    use std::{
-        fs,
-        io::Write as _,
-        os::unix::fs::OpenOptionsExt as _,
-        path::{Path, PathBuf},
-        process::Command,
-        time::{SystemTime, UNIX_EPOCH},
-    };
-
-    pub(super) fn run(helper: &Path, operation: &str, input: &[u8]) -> Result<()> {
-        let payload = payload_path()?;
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&payload)?;
-        file.write_all(input)?;
-        drop(file);
-
-        // SAFETY: getuid has no preconditions and always succeeds.
-        let uid = unsafe { libc::getuid() };
-        let mut command = format!("LOCALWEB_INVOKING_UID={uid}");
-        if let Ok(paths) = Paths::discover() {
-            command.push_str(" LOCALWEB_RUNTIME_DIR=");
-            command.push_str(&shell_quote(&paths.runtime.to_string_lossy()));
-        }
-        command.push(' ');
-        command.push_str(&shell_quote(&helper.to_string_lossy()));
-        command.push(' ');
-        command.push_str(&shell_quote(operation));
-        command.push_str(" < ");
-        command.push_str(&shell_quote(&payload.to_string_lossy()));
-
-        let script = format!(
-            "do shell script \"{}\" with administrator privileges",
-            apple_script_escape(&command)
-        );
-        let status = Command::new("/usr/bin/osascript")
-            .arg("-e")
-            .arg(&script)
-            .status();
-        let _ = fs::remove_file(&payload);
-        if !status
-            .map_err(|error| LocalWebError::Service(format!("cannot launch osascript: {error}")))?
-            .success()
-        {
-            return Err(LocalWebError::Service(format!(
-                "privileged helper `{operation}` failed; the administrator prompt may have been cancelled"
-            )));
-        }
-        Ok(())
-    }
-
-    fn payload_path() -> Result<PathBuf> {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|error| LocalWebError::Service(error.to_string()))?
-            .as_nanos();
-        Ok(std::env::temp_dir().join(format!(
-            "localweb-helper-{}-{nanos}.json",
-            std::process::id()
-        )))
-    }
-}
-
-#[cfg(windows)]
-mod windows {
-    use super::{LocalWebError, Result};
-    use std::{
-        fs,
-        io::Write as _,
-        path::{Path, PathBuf},
-        process::Command,
-        time::{SystemTime, UNIX_EPOCH},
-    };
-
-    pub(super) fn run(helper: &Path, operation: &str, input: &[u8]) -> Result<()> {
-        let payload = payload_path()?;
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&payload)?;
-        file.write_all(input)?;
-        drop(file);
-
-        // A payload file is used instead of stdin because the UAC `runas`
-        // verb launches the helper through ShellExecute and cannot redirect
-        // the standard input handle.
+        let payload = Payload::create(input)?;
         let arguments = format!(
             "{operation} --input \"{}\"",
-            payload.display().to_string().replace('"', "\"\"")
+            payload.0.display().to_string().replace('"', "\"\"")
         );
         let script = format!(
             "$ErrorActionPreference='Stop'; $p = Start-Process -FilePath '{}' -ArgumentList '{}' -Verb RunAs -Wait -PassThru; exit $p.ExitCode",
-            ps_escape(&helper.display().to_string()),
-            ps_escape(&arguments)
+            helper.display().to_string().replace('\'', "''"),
+            arguments.replace('\'', "''")
         );
-        let status = Command::new(
+        let mut command = Command::new(
             crate::platform::windows_system_directory()?
                 .join("WindowsPowerShell/v1.0/powershell.exe"),
-        )
-        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-        .status();
-        let _ = fs::remove_file(&payload);
-        match status {
-            Ok(status) if status.success() => Ok(()),
-            Ok(_) => Err(LocalWebError::Service(format!(
-                "privileged helper `{operation}` failed; the administrator prompt may have been cancelled"
-            ))),
-            Err(error) => Err(LocalWebError::Service(format!(
-                "cannot launch powershell.exe: {error}"
-            ))),
-        }
-    }
-
-    fn ps_escape(value: &str) -> String {
-        value.replace('\'', "''")
-    }
-
-    fn payload_path() -> Result<PathBuf> {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|error| LocalWebError::Service(error.to_string()))?
-            .as_nanos();
-        Ok(std::env::temp_dir().join(format!(
-            "localweb-helper-{}-{nanos}.json",
-            std::process::id()
-        )))
+        );
+        command.args(["-NoProfile", "-NonInteractive", "-Command", &script]);
+        Ok((command, Some(payload)))
     }
 }
 
 #[cfg_attr(
     not(target_os = "macos"),
-    allow(dead_code, reason = "used only by the macOS privilege launcher")
+    allow(dead_code, reason = "macOS privilege launcher")
 )]
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
@@ -210,7 +160,7 @@ fn shell_quote(value: &str) -> String {
 
 #[cfg_attr(
     not(target_os = "macos"),
-    allow(dead_code, reason = "used only by the macOS privilege launcher")
+    allow(dead_code, reason = "macOS privilege launcher")
 )]
 fn apple_script_escape(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")

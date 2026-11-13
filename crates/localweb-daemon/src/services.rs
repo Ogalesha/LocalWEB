@@ -660,7 +660,7 @@ impl Services<'_> {
         let base = self.paths.data.join("databases/mariadb/11.8");
         let data = base.join("data");
         fs::create_dir_all(&data)?;
-        if !data.join("mysql").is_dir() {
+        if begin_database_initialization(&data, data.join("mysql").is_dir())? {
             let basedir = runtime.mariadb_basedir();
             let output = Command::new(&initializer)
                 .arg("--no-defaults")
@@ -678,6 +678,7 @@ impl Services<'_> {
                 )));
             }
         }
+        finish_database_initialization(&data)?;
         let config = self.render_mariadb(&data)?;
         if is_active("localweb-db-mariadb") && self.database_admin_ready(Database::Mariadb)? {
             return Ok(());
@@ -744,7 +745,7 @@ impl Services<'_> {
         let base = self.paths.data.join("databases/mysql/8.4");
         let data = base.join("data");
         fs::create_dir_all(&data)?;
-        if !data.join("mysql").is_dir() {
+        if begin_database_initialization(&data, data.join("mysql").is_dir())? {
             let output = Command::new(&server)
                 .arg("--no-defaults")
                 .arg("--initialize-insecure")
@@ -763,6 +764,7 @@ impl Services<'_> {
                 )));
             }
         }
+        finish_database_initialization(&data)?;
         let config = self.render_mysql(&data)?;
         if is_active("localweb-db-mysql") && self.database_admin_ready(Database::Mysql)? {
             return Ok(());
@@ -889,7 +891,7 @@ impl Services<'_> {
         fs::create_dir_all(&data)?;
         #[cfg(unix)]
         fs::set_permissions(&data, fs::Permissions::from_mode(0o700))?;
-        if !data.join("PG_VERSION").is_file() {
+        if begin_database_initialization(&data, data.join("PG_VERSION").is_file())? {
             let output = Command::new(initdb)
                 .arg("-D")
                 .arg(&data)
@@ -911,6 +913,7 @@ impl Services<'_> {
                 )));
             }
         }
+        finish_database_initialization(&data)?;
         let socket_dir = self.paths.runtime.join("services/postgres");
         fs::create_dir_all(&socket_dir)?;
         #[cfg(unix)]
@@ -1534,6 +1537,31 @@ fn postgres_provision_sql(secrets: &ProjectSecrets) -> Result<String> {
     ))
 }
 
+// Record intent before invoking an initializer. Its native sentinel may be
+// created before the initializer finishes, so it cannot alone prove success.
+fn begin_database_initialization(data: &Path, initialized: bool) -> Result<bool> {
+    let marker = data.join(".localweb-initializing");
+    if marker.exists() || (!initialized && fs::read_dir(data)?.next().is_some()) {
+        return Err(LocalWebError::Service(format!(
+            "Database initialization is incomplete at {}. Existing data was preserved; inspect or restore it before starting again.",
+            data.display()
+        )));
+    }
+    if initialized {
+        return Ok(false);
+    }
+    atomic_write(&marker, b"initialization pending\n", 0o600)?;
+    Ok(true)
+}
+
+fn finish_database_initialization(data: &Path) -> Result<()> {
+    match fs::remove_file(data.join(".localweb-initializing")) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
 fn wait_for_tcp(port: u16, service: &str) -> Result<()> {
     let address = SocketAddrV4::new(Ipv4Addr::LOCALHOST, port);
     for _ in 0..50 {
@@ -1627,6 +1655,27 @@ fn safe_config_path(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn interrupted_database_initialization_preserves_data_and_rejects_false_sentinels() {
+        let base = std::env::temp_dir().join(format!("lw-init-{}", Uuid::new_v4()));
+        fs::create_dir(&base).unwrap();
+        assert!(begin_database_initialization(&base, false).unwrap());
+        fs::create_dir(base.join("mysql")).unwrap();
+        fs::write(base.join("mysql/important"), b"preserved").unwrap();
+        begin_database_initialization(&base, true).unwrap_err();
+        assert_eq!(
+            fs::read(base.join("mysql/important")).unwrap(),
+            b"preserved"
+        );
+        finish_database_initialization(&base).unwrap();
+        assert!(!begin_database_initialization(&base, true).unwrap());
+        fs::remove_dir_all(base.join("mysql")).unwrap();
+        fs::write(base.join("unknown-data"), b"preserved").unwrap();
+        begin_database_initialization(&base, false).unwrap_err();
+        assert_eq!(fs::read(base.join("unknown-data")).unwrap(), b"preserved");
+        fs::remove_dir_all(base).unwrap();
+    }
 
     pub(super) fn fixture() -> (PathBuf, Paths, Project) {
         let base = std::env::temp_dir().join(format!("localweb-services-{}", Uuid::new_v4()));

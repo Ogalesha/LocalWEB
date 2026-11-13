@@ -53,8 +53,12 @@ impl HostsSyncLock {
         Ok(Self { file })
     }
 
-    #[cfg(test)]
-    fn try_acquire(paths: &Paths) -> Result<Option<Self>> {
+    /// Acquires the lock without blocking, returning `None` while it is busy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when opening or locking the lock file fails.
+    pub fn try_acquire(paths: &Paths) -> Result<Option<Self>> {
         let file = open_lock(&paths.state.join("hosts-sync.lock"))?;
         match file.try_lock() {
             Ok(()) => Ok(Some(Self { file })),

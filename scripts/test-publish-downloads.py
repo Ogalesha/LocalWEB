@@ -5,6 +5,7 @@ import importlib.util
 import contextlib
 import io
 import json
+import hashlib
 from pathlib import Path
 import subprocess
 import tempfile
@@ -118,31 +119,182 @@ class DownloadsTest(unittest.TestCase):
                      "localweb-0.1.2-1-x86_64.pkg.tar.zst", "localweb-0.1.2-windows-x86_64.zip"]:
             self.assertTrue(publisher.obsolete_asset(name), name)
 
-    def test_failed_upload_does_not_clean_existing_assets(self):
-        with patch.object(publisher.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)), \
-             patch.object(publisher, "gh", side_effect=RuntimeError("upload failed")) as gh:
-            with self.assertRaises(RuntimeError):
-                publisher.publish(Path("output"), Path("notes.md"), REPOSITORY, SHA)
-            self.assertEqual(gh.call_count, 1)
-            self.assertEqual(gh.call_args.args[:3], ("release", "upload", "rolling"))
+    def publication_fixture(self, root):
+        self.make_installers(root / "input")
+        notes = publisher.prepare(root / "input", root / "output", REPOSITORY, SHA, 123)
+        (root / "notes.md").write_text(notes)
+        return FakeRelease(), root / "output", root / "notes.md"
 
-    def test_publication_keeps_aligned_source_and_cleans_only_old_installers(self):
-        calls = []
-        def gh(*args):
-            calls.append(args)
-            if args[:2] == ("api", f"repos/{REPOSITORY}/git/ref/tags/rolling"):
-                return json.dumps({"object": {"sha": SHA}})
-            if args[:3] == ("release", "view", "rolling"):
-                return json.dumps({"assets": [{"name": name} for name in
-                    ["localweb_0.1.2_amd64.deb", "notes.txt", *publisher.CURRENT_ASSETS]]})
-            return ""
-        with patch.object(publisher.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)), \
-             patch.object(publisher, "gh", side_effect=gh):
-            publisher.publish(Path("output"), Path("notes.md"), REPOSITORY, SHA)
-        deletes = [args for args in calls if args[:2] == ("release", "delete-asset")]
-        self.assertEqual(deletes, [("release", "delete-asset", "rolling", "localweb_0.1.2_amd64.deb", "--yes")])
-        self.assertEqual(calls[0][:2], ("release", "upload"))
-        self.assertFalse(any("PATCH" in args for args in calls))
+    def test_promotion_preserves_previous_bundle_and_unrelated_assets(self):
+        with tempfile.TemporaryDirectory() as temp:
+            remote, output, notes = self.publication_fixture(Path(temp))
+            with patch.object(publisher.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)), patch.object(publisher, "gh", side_effect=remote.gh):
+                publisher.publish(output, notes, REPOSITORY, SHA)
+            remote.assert_bundle(self, output, SHA, notes.read_text())
+            self.assertNotIn(publisher.JOURNAL, remote.by_name())
+            self.assertEqual(sum(name.startswith("previous-") for name in remote.by_name()), 5)
+            self.assertIn("notes.txt", remote.by_name())
+
+    def test_failed_staging_never_changes_public_downloads(self):
+        with tempfile.TemporaryDirectory() as temp:
+            remote, output, notes = self.publication_fixture(Path(temp))
+            remote.fail = ("upload", 3, "after")
+            with patch.object(publisher.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)), patch.object(publisher, "gh", side_effect=remote.gh), self.assertRaises(RuntimeError):
+                publisher.publish(output, notes, REPOSITORY, SHA)
+            remote.assert_previous(self)
+            self.assertNotIn(publisher.JOURNAL, remote.by_name())
+
+    def test_every_partial_rename_and_source_failure_is_recovered(self):
+        for event, count, timing in [("rename", n, when) for n in range(1, 11) for when in ("before", "after")] + [("source", 1, when) for when in ("before", "after")] + [("notes", 1, "before")]:
+            with self.subTest(event=event, count=count, timing=timing), tempfile.TemporaryDirectory() as temp:
+                remote, output, notes = self.publication_fixture(Path(temp))
+                remote.fail = (event, count, timing)
+                with patch.object(publisher.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)), patch.object(publisher, "gh", side_effect=remote.gh), self.assertRaises(RuntimeError):
+                    publisher.publish(output, notes, REPOSITORY, SHA)
+                remote.assert_previous(self)
+                self.assertNotIn(publisher.JOURNAL, remote.by_name())
+
+    def test_durable_journal_recovers_after_a_runner_is_lost(self):
+        with tempfile.TemporaryDirectory() as temp:
+            remote, output, notes = self.publication_fixture(Path(temp))
+            recover = publisher.recover_publication
+            def interrupted_recovery(*args):
+                if remote.failed:
+                    raise RuntimeError("runner lost")
+                return recover(*args)
+            remote.fail = ("rename", 4, "after")
+            with patch.object(publisher.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)), patch.object(publisher, "gh", side_effect=remote.gh), patch.object(publisher, "recover_publication", side_effect=interrupted_recovery), self.assertRaises(RuntimeError):
+                publisher.publish(output, notes, REPOSITORY, SHA)
+            self.assertIn(publisher.JOURNAL, remote.by_name())
+            with patch.object(publisher, "gh", side_effect=remote.gh):
+                publisher.recover_publication(REPOSITORY, publisher.release_state(REPOSITORY))
+            remote.assert_previous(self)
+
+    def test_lost_response_after_metadata_commit_preserves_verified_publication(self):
+        with tempfile.TemporaryDirectory() as temp:
+            remote, output, notes = self.publication_fixture(Path(temp))
+            remote.fail = ("notes", 1, "after")
+            with patch.object(publisher.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)), patch.object(publisher, "gh", side_effect=remote.gh):
+                publisher.publish(output, notes, REPOSITORY, SHA)
+            remote.assert_bundle(self, output, SHA, notes.read_text())
+            self.assertNotIn(publisher.JOURNAL, remote.by_name())
+
+    def test_missing_server_digest_downloads_without_overwriting_local_input(self):
+        with tempfile.TemporaryDirectory() as temp:
+            remote, output, notes = self.publication_fixture(Path(temp))
+            remote.include_digest = False
+            before = {p.name: p.read_bytes() for p in output.iterdir()}
+            with patch.object(publisher.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)), patch.object(publisher, "gh", side_effect=remote.gh):
+                publisher.publish(output, notes, REPOSITORY, SHA)
+            self.assertEqual(before, {p.name: p.read_bytes() for p in output.iterdir()})
+            remote.assert_bundle(self, output, SHA, notes.read_text())
+
+    def test_bad_staged_digest_and_older_build_cannot_replace_downloads(self):
+        for mode in ("digest", "older"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as temp:
+                remote, output, notes = self.publication_fixture(Path(temp))
+                if mode == "digest":
+                    remote.corrupt_digest = True
+                else:
+                    remote.body = "Source /actions/runs/999"
+                    remote.old_body = remote.body
+                with patch.object(publisher.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)), patch.object(publisher, "gh", side_effect=remote.gh), self.assertRaises(ValueError):
+                    publisher.publish(output, notes, REPOSITORY, SHA)
+                remote.assert_previous(self)
+
+
+class FakeRelease:
+    """Stateful GitHub fixture: failures can happen after a remote mutation."""
+    def __init__(self):
+        self.assets = {}
+        self.sequence = 0
+        self.sha = "b" * 40
+        self.body = self.old_body = "Previous verified build /actions/runs/9"
+        self.fail = None
+        self.failed = False
+        self.events = {}
+        self.include_digest = True
+        self.corrupt_digest = False
+        for name in sorted(publisher.CURRENT_ASSETS | {"notes.txt"}):
+            self.add(name, f"previous {name}".encode())
+
+    def add(self, name, data):
+        if name in self.by_name():
+            raise RuntimeError("asset already exists")
+        self.sequence += 1
+        self.assets[self.sequence] = {"id": self.sequence, "name": name, "data": data}
+
+    def by_name(self):
+        return {asset["name"]: asset for asset in self.assets.values()}
+
+    def event(self, name, action):
+        count = self.events.get(name, 0) + 1
+        self.events[name] = count
+        for timing in ("before", "after"):
+            if self.fail == (name, count, timing) and not self.failed:
+                self.failed = True
+                raise RuntimeError(f"injected {name} {timing}")
+            if timing == "before":
+                action()
+
+    def gh(self, *args):
+        if args[:2] == ("release", "upload"):
+            path = Path(args[3])
+            self.event("upload", lambda: self.add(path.name, path.read_bytes()))
+        elif args[:2] == ("release", "delete-asset"):
+            asset = self.by_name()[args[3]]
+            del self.assets[asset["id"]]
+        elif args[:2] == ("release", "download"):
+            name = args[args.index("--pattern") + 1]
+            path = Path(args[args.index("--dir") + 1]) / name
+            path.write_bytes(self.by_name()[name]["data"])
+        elif args[0] == "api":
+            endpoint = next(arg for arg in args if arg.startswith("repos/"))
+            if "--method" not in args:
+                if endpoint.endswith("releases/tags/rolling"):
+                    assets = []
+                    for asset in self.assets.values():
+                        item = {key: asset[key] for key in ("id", "name")}
+                        if self.include_digest:
+                            item["digest"] = "sha256:" + ("0" * 64 if self.corrupt_digest and asset["name"].startswith("candidate-") else hashlib.sha256(asset["data"]).hexdigest())
+                        assets.append(item)
+                    return json.dumps({"id": 100, "body": self.body, "assets": assets})
+                if endpoint.endswith("git/ref/tags/rolling"):
+                    return json.dumps({"object": {"sha": self.sha}})
+                if "/releases/assets/" in endpoint:
+                    return self.assets[int(endpoint.rsplit("/", 1)[1])]["data"].decode()
+                raise AssertionError(args)
+            field = args[args.index("-f") + 1]
+            key, value = field.split("=", 1)
+            if key == "name":
+                asset = self.assets[int(endpoint.rsplit("/", 1)[1])]
+                def rename():
+                    existing = self.by_name().get(value)
+                    if existing and existing["id"] != asset["id"]:
+                        raise RuntimeError("duplicate public alias")
+                    asset["name"] = value
+                self.event("rename", rename)
+            elif key == "sha":
+                self.event("source", lambda: setattr(self, "sha", value))
+            elif key == "body":
+                self.event("notes", lambda: setattr(self, "body", value))
+            else:
+                raise AssertionError(args)
+        else:
+            raise AssertionError(args)
+        return ""
+
+    def assert_previous(self, test):
+        test.assertEqual(self.sha, "b" * 40)
+        test.assertEqual(self.body, self.old_body)
+        for name in publisher.CURRENT_ASSETS:
+            test.assertEqual(self.by_name()[name]["data"], f"previous {name}".encode())
+
+    def assert_bundle(self, test, output, sha, body):
+        test.assertEqual(self.sha, sha)
+        test.assertEqual(self.body, body)
+        for name in publisher.CURRENT_ASSETS:
+            test.assertEqual(self.by_name()[name]["data"], (output / name).read_bytes())
 
 
 if __name__ == "__main__":

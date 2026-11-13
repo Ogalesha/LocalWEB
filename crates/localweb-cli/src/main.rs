@@ -733,9 +733,10 @@ async fn main() -> Result<()> {
                         None
                     },
                 };
-                Request::ProjectUpdate {
+                Request::ProjectUpdateIfCurrent {
                     name,
                     input: update_input(&existing.project, options),
+                    expected: Box::new(existing.project),
                 }
             }
             ProjectCommand::Start { name } => Request::ProjectStart { name },

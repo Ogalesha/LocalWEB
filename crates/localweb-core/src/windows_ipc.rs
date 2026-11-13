@@ -160,6 +160,66 @@ fn verify_server(client: &NamedPipeClient, expected_sid: &str) -> io::Result<()>
     Ok(())
 }
 
+/// Holds the authenticated daemon instance so its PID cannot be reused during
+/// a restart. Other executables, even for this account, are never terminated.
+pub(crate) fn daemon_process(
+    client: &NamedPipeClient,
+    expected_executable: &std::path::Path,
+) -> io::Result<OwnedHandle> {
+    use std::{ffi::OsString, os::windows::ffi::OsStringExt as _};
+    use windows_sys::Win32::System::Threading::{
+        PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, QueryFullProcessImageNameW,
+    };
+    let mut pid = 0;
+    // SAFETY: client owns the live pipe handle and pid is a valid out-pointer.
+    if unsafe { GetNamedPipeServerProcessId(client.as_raw_handle(), &raw mut pid) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: this opens a handle for one PID; no borrowed memory is passed.
+    let raw = unsafe {
+        OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE | PROCESS_TERMINATE,
+            0,
+            pid,
+        )
+    };
+    if raw.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: OpenProcess returned a uniquely owned live process handle.
+    let process = unsafe { OwnedHandle::from_raw_handle(raw) };
+    if user_sid(process.as_raw_handle())? != current_sid()? {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "daemon belongs to another account",
+        ));
+    }
+    let mut buffer = vec![0u16; 32_768];
+    let mut length = u32::try_from(buffer.len()).map_err(io::Error::other)?;
+    // SAFETY: process remains owned, and buffer/length are valid writable storage.
+    if unsafe {
+        QueryFullProcessImageNameW(
+            process.as_raw_handle(),
+            0,
+            buffer.as_mut_ptr(),
+            &raw mut length,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    let actual = PathBuf::from(OsString::from_wide(
+        &buffer[..usize::try_from(length).map_err(io::Error::other)?],
+    ));
+    if actual.canonicalize()? != expected_executable.canonicalize()? {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "daemon endpoint is owned by another executable",
+        ));
+    }
+    Ok(process)
+}
+
 pub(crate) async fn connect(name: &str) -> io::Result<NamedPipeClient> {
     let sid = current_sid()?;
     for attempt in 0..50 {

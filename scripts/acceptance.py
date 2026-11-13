@@ -40,7 +40,7 @@ if not mac:
     env["PKEXEC_UID"] = uid
 
 
-def request(kind, data=None):
+def request(kind, data=None, allow_error=False):
     payload = {"type": kind}
     if data is not None:
         payload["data"] = data
@@ -54,6 +54,8 @@ def request(kind, data=None):
             assert chunk, "Daemon closed the socket without a response"
             result += chunk
     response = json.loads(result)["payload"]
+    if allow_error:
+        return response
     assert response["type"] != "error", response
     return response.get("data")
 
@@ -112,6 +114,31 @@ try:
     domains = [f"php8-{minor}-{web}-{db}.test" for minor in range(6) for web in ("nginx", "apache") for db in ("mariadb", "mysql", "postgres", "sqlite")]
     domains.append("php-update.test")
     helper("sync-hosts", json.dumps({"address": gateway_address, "domains": domains}).encode())
+    if not mac:
+        # The helper lock is global, even when callers use different profiles.
+        ready = base / "integration-lock.ready"
+        release_lock = base / "integration-lock.release"
+        locker = subprocess.Popen(["sudo", "python3", "-c",
+            "import fcntl,time,sys; from pathlib import Path; "
+            "f=open('/etc/.localweb-integration.lock','a'); fcntl.flock(f,fcntl.LOCK_EX); "
+            "Path(sys.argv[1]).write_text('ready'); "
+            "exec(\"for _ in range(200):\\n if Path(sys.argv[2]).exists(): break\\n time.sleep(.05)\")",
+            str(ready), str(release_lock)])
+        for _ in range(200):
+            if ready.exists():
+                break
+            time.sleep(0.025)
+        assert ready.exists(), "Could not acquire the native integration lock"
+        locked = subprocess.Popen(["sudo", "env", f"PKEXEC_UID={uid}", str(binary_dir / "localweb-helper"), "sync-hosts"], stdin=subprocess.PIPE)
+        locked.stdin.write(json.dumps({"address": gateway_address, "domains": domains}).encode())
+        locked.stdin.close()
+        time.sleep(0.2)
+        assert locked.poll() is None, "Privileged integration ignored the global lock"
+        release_lock.write_text("release")
+        locked.wait(timeout=10)
+        locker.wait(timeout=10)
+        assert locked.returncode == locker.returncode == 0
+        print("PASS global privileged integration lock", flush=True)
     ca = request("ca_status")
     if mac:
         helper("install-ca", Path(ca["certificate"]).read_bytes())
@@ -174,6 +201,12 @@ try:
     assert not stopped["running"]
     assert stopped["project"]["database"] == "sqlite"
     assert stopped["project"]["database_port"] is None
+    conditional_input = changed | {"database": "sqlite", "cache": "none", "mail": False, "autostart": False}
+    conditional = request("project_update_if_current", {"name": update_name, "input": conditional_input, "expected": stopped["project"]})
+    assert not conditional["project"]["autostart"]
+    rejected = request("project_update_if_current", {"name": update_name, "input": changed, "expected": stopped["project"]}, allow_error=True)
+    assert rejected["type"] == "error" and "changed while you were editing" in rejected["data"]["message"], rejected
+    assert request("project_get", {"name": update_name})["project"] == conditional["project"]
     redis_config = base / "config/localweb/generated/redis" / f"{update_name}.conf"
     assert redis_config.is_file(), "the Redis configuration was not generated"
     subprocess.check_call([str(binary_dir / "localweb"), "php", update_name, "--", "-r", "exit(0);"], env=env)
@@ -254,8 +287,77 @@ try:
                 request("project_remove", {"name": name})
                 assert (path / "index.php").is_file(), "Removal touched source files"
                 print(f"PASS {name}: HTTPS, PDO, Redis, Mailpit, CLI, stop/remove", flush=True)
+    # These fault tests run only on the disposable native CI host.
+    fault_projects = []
+    for name in ("fault-one", "fault-two"):
+        path = base / name
+        path.mkdir()
+        (path / "index.php").write_text("<?php echo 'owned';")
+        spec = {"path": str(path), "name": name, "hostname": f"{name}.test", "php": "8.5", "database": "none", "cache": "redis", "mail": True,
+                "supervisor": {"enabled": True, "command": ["@php", "-r", "sleep(300);"]}, "autostart": False}
+        request("project_add", spec)
+        request("project_start", {"name": name})
+        fault_projects.append(request("project_get", {"name": name}))
+    config = base / "config/localweb/generated/nginx/nginx.conf"
+    backup = config.with_suffix(".saved")
+    config.rename(backup)
+    config.mkdir()  # atomic config replacement must fail even when CI is root.
+    failed = request("project_stop", {"name": "fault-one"}, allow_error=True)
+    assert failed["type"] == "error", failed
+    for name in ("fault-one", "fault-two"):
+        status = request("project_get", {"name": name})
+        assert status["recovery_needed"] and not status["running"], status
+    config.rmdir()
+    backup.rename(config)
+    for name in ("fault-one", "fault-two"):
+        request("project_stop", {"name": name})
+        request("project_start", {"name": name})
+    print("PASS failed shared rewrite: all affected projects need recovery", flush=True)
+
+    # A real long-running tool must not block ping, cancellation, or EOF.
+    for mode in ("cancel", "eof"):
+        mcp = subprocess.Popen([str(binary_dir / "localweb-mcp")], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, env=env)
+        mcp_call(mcp, {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}})
+        mcp.stdin.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n")
+        marker = base / "fault-one" / f"mcp-{mode}.pid"
+        continued = marker.with_suffix(".continued")
+        code = f"file_put_contents('{marker}', getmypid()); usleep(1500000); file_put_contents('{continued}', 'leaked'); sleep(30);"
+        mcp.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "localweb_project_exec", "arguments": {"name": "fault-one", "command": ["@php", "-r", code]}}}) + "\n")
+        mcp.stdin.flush()
+        for _ in range(200):
+            if marker.exists():
+                break
+            time.sleep(0.025)
+        assert marker.exists(), "MCP command did not start"
+        if mode == "cancel":
+            ping = mcp_call(mcp, {"jsonrpc": "2.0", "id": 3, "method": "ping"})
+            assert ping["id"] == 3 and "result" in ping, ping
+            mcp.stdin.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": 2}}) + "\n")
+            ping = mcp_call(mcp, {"jsonrpc": "2.0", "id": 4, "method": "ping"})
+            assert ping["id"] == 4 and "result" in ping, ping
+        mcp.stdin.close()
+        mcp.wait(timeout=10)
+        assert mcp.returncode == 0
+        time.sleep(1.7)
+        assert not continued.exists(), f"MCP {mode} left its command running"
+        mcp = None
+    print("PASS MCP control transport: ping, cancellation and EOF", flush=True)
+
+    # Neither invalid nor deleted project files may hide owned processes.
+    for index, item in enumerate(fault_projects):
+        file = base / "config/localweb/projects" / f"{item['project']['id']}.toml"
+        if index == 0:
+            file.write_text("invalid = [")
+        else:
+            file.unlink()
     request("shutdown")
     daemon.wait(timeout=30)
+    for item in fault_projects:
+        if not mac:
+            for kind in ("redis", "mailpit", "supervisor"):
+                result = subprocess.run(["systemctl", "--user", "is-active", f"localweb-project-{item['project']['name']}-{kind}"], env=env, capture_output=True)
+                assert result.returncode != 0, "Shutdown left an orphan project unit active"
+    print("PASS orphan shutdown: malformed and deleted project configs", flush=True)
     assert daemon.returncode == 0
     print("Acceptance passed: 48 native PHP/web/database combinations")
 finally:

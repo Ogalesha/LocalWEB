@@ -6,6 +6,21 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-11-13
+
+### Fixed
+
+- Stop owned project services even when their configuration is missing or invalid, and clean up orphan services during restoration.
+- Mark all affected projects for recovery after a failed shared-service rewrite.
+- Preserve certificate identity across failed revocation attempts, verify compiled Linux trust, and revoke the exact macOS certificate.
+- Serialize privileged integration changes across accounts.
+- Start Windows manually with login autostart disabled; restart only the authenticated daemon instance.
+- Recover desktop controls after startup and refresh failures; bound administrative commands and keep status probes responsive.
+- Process MCP ping, cancellation and EOF while a tool runs; stop owned commands and report uncertain daemon outcomes accurately.
+- Reject stale CLI and desktop edits before side effects while retaining the existing unconditional update API.
+- Preserve unchanged cron minute history across edits and retain interrupted database initialization data for inspection.
+- Stage and verify complete download bundles, preserve the previous installers, and recover interrupted publications with a durable journal in a separate serialized workflow.
+
 ## [0.1.5] - 2026-11-13
 
 ### Fixed

@@ -8,6 +8,10 @@ on:
       - scripts/publish-downloads.py
       - scripts/test-publish-downloads.py
       - .github/workflows/publish-downloads.yml
+  workflow_run:
+    workflows: [Native packages and acceptance]
+    types: [completed]
+    branches: [main]
   workflow_dispatch:
 
 concurrency:
@@ -20,6 +24,7 @@ permissions:
 
 jobs:
   publish:
+    if: github.event_name != 'workflow_run' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_repository.full_name == github.repository)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:

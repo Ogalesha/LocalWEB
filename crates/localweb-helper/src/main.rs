@@ -69,6 +69,7 @@ fn main() -> Result<()> {
         #[cfg(unix)]
         invoking_uid().context("localweb-helper requires administrator authorization")?;
     }
+    let _integration = IntegrationLock::acquire()?;
     match operation.as_str() {
         "sync-hosts" => sync_hosts(input_file.as_deref()),
         "install-ca" => install_ca(input_file.as_deref()),
@@ -82,6 +83,35 @@ fn main() -> Result<()> {
         "remove-integration" => remove_system_integration(),
         "package-remove" if package_removal => remove_system_integration(),
         _ => bail!("unknown privileged operation"),
+    }
+}
+
+/// One system-wide transaction, independent of the invoking user's profile.
+struct IntegrationLock(fs::File);
+
+impl IntegrationLock {
+    fn acquire() -> Result<Self> {
+        let path = hosts_path()?.with_file_name(".localweb-integration.lock");
+        if path.exists() {
+            ensure_regular_root_owned(&path)?;
+        }
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600)
+        };
+        let file = options.open(&path)?;
+        ensure_regular_root_owned(&path)?;
+        file.lock()?;
+        Ok(Self(file))
+    }
+}
+
+impl Drop for IntegrationLock {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
     }
 }
 
@@ -265,10 +295,9 @@ fn remove_system_integration() -> Result<()> {
     let trust = store.certificate_path();
     if trust.exists() {
         ensure_regular_root_owned(&trust)?;
-        #[cfg(windows)]
-        store.untrust_certificate()?;
-        fs::remove_file(&trust)?;
-        #[cfg(not(windows))]
+        revoke_ca(store, &trust)?;
+    } else {
+        #[cfg(all(unix, not(target_os = "macos")))]
         store.untrust_certificate()?;
     }
     Ok(())
@@ -368,17 +397,41 @@ fn remove_ca(input: Option<&Path>) -> Result<()> {
     let store = TrustStore::detect()?;
     let trust = store.certificate_path();
     if !trust.exists() {
+        // A previous attempt may have removed the anchor but failed to
+        // rebuild native trust. Reconciliation must still run on retry.
+        #[cfg(all(unix, not(target_os = "macos")))]
+        store.untrust_certificate()?;
         return Ok(());
     }
     ensure_regular_root_owned(&trust)?;
     if fs::read(&trust)? != pem_bytes {
         bail!("the trusted LocalWeb CA belongs to a different account; refusing to remove it");
     }
-    #[cfg(windows)]
-    store.untrust_certificate()?;
-    fs::remove_file(&trust)?;
-    #[cfg(not(windows))]
-    store.untrust_certificate()?;
+    revoke_ca(store, &trust)?;
+    Ok(())
+}
+
+fn revoke_ca(store: TrustStore, trust: &Path) -> Result<()> {
+    #[cfg(any(windows, target_os = "macos"))]
+    {
+        // The exact identity remains available until native revocation succeeds.
+        store.untrust_certificate()?;
+        fs::remove_file(trust)?;
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    revoke_anchor(trust, || store.untrust_certificate())?;
+    Ok(())
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn revoke_anchor(trust: &Path, untrust: impl FnOnce() -> localweb_core::Result<()>) -> Result<()> {
+    let previous = fs::read(trust)?;
+    fs::remove_file(trust)?;
+    if let Err(error) = untrust() {
+        atomic_write(trust, &previous, 0o644)
+            .context("native revocation failed and the retry anchor could not be restored")?;
+        return Err(error.into());
+    }
     Ok(())
 }
 
@@ -423,6 +476,27 @@ fn ensure_regular_root_owned(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn failed_revocation_retains_the_anchor_and_a_retry_rebuilds_trust() {
+        let trust = std::env::temp_dir().join(format!("lw-revoke-{}", std::process::id()));
+        fs::write(&trust, b"exact CA").unwrap();
+        revoke_anchor(&trust, || {
+            assert!(!trust.exists());
+            Err(localweb_core::LocalWebError::Service(
+                "rebuild failed".into(),
+            ))
+        })
+        .unwrap_err();
+        assert_eq!(fs::read(&trust).unwrap(), b"exact CA");
+        revoke_anchor(&trust, || {
+            assert!(!trust.exists());
+            Ok(())
+        })
+        .unwrap();
+        assert!(!trust.exists());
+    }
 
     #[test]
     fn hosts_payload_preserves_the_selected_loopback_address() {

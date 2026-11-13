@@ -5,7 +5,7 @@ use std::{
     process::{Output, Stdio},
 };
 use tokio::{
-    io::{AsyncRead, AsyncReadExt},
+    io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
     process::{Child, Command},
 };
 
@@ -58,8 +58,26 @@ pub fn terminate_tree(pid: u32) -> io::Result<Output> {
 ///
 /// Returns an error when spawning, reading output, or waiting fails.
 pub async fn output(command: &mut Command, cap: usize) -> io::Result<Output> {
+    output_with_input(command, cap, None).await
+}
+
+/// Runs an owned command with optional stdin and bounded output.
+/// Dropping the future stops the command tree and closes its input pipe.
+///
+/// # Errors
+///
+/// Returns an error when spawning, writing input, reading, or waiting fails.
+pub async fn output_with_input(
+    command: &mut Command,
+    cap: usize,
+    input: Option<&[u8]>,
+) -> io::Result<Output> {
     command
-        .stdin(Stdio::null())
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
@@ -76,13 +94,28 @@ pub async fn output(command: &mut Command, cap: usize) -> io::Result<Output> {
         .stderr
         .take()
         .ok_or_else(|| io::Error::other("stderr is unavailable"))?;
-    let (stdout, stderr) =
-        tokio::join!(read_stream(&mut stdout, cap), read_stream(&mut stderr, cap));
+    let stdin = child.0.stdin.take();
+    let write_input = async move {
+        if let (Some(mut stdin), Some(input)) = (stdin, input) {
+            stdin.write_all(input).await?;
+            stdin.shutdown().await?;
+        }
+        io::Result::Ok(())
+    };
+    let (written, stdout, stderr) = tokio::join!(
+        write_input,
+        read_stream(&mut stdout, cap),
+        read_stream(&mut stderr, cap)
+    );
     // Keep the parent unreaped while descendants may still own pipe handles.
     // Cancellation can then safely identify and stop its process tree.
     let stdout = stdout?;
     let stderr = stderr?;
     let status = child.0.wait().await?;
+    // Preserve the child's useful denial/error output when it closes stdin.
+    if status.success() {
+        written?;
+    }
     Ok(Output {
         status,
         stdout,
@@ -139,6 +172,41 @@ mod tests {
         assert!(result.status.success());
         assert_eq!(result.stdout.len(), 16385);
         assert_eq!(result.stderr.len(), 16385);
+    }
+
+    #[test]
+    fn input_fixture() {
+        if std::env::var_os("LOCALWEB_TEST_INPUT_FIXTURE").is_some() {
+            use std::io::{Read as _, Write as _};
+            // Write more than pipe capacity before reading input. The parent
+            // must drain output while feeding stdin to avoid a deadlock.
+            std::io::stdout().write_all(&vec![b'x'; 131_072]).unwrap();
+            let mut input = Vec::new();
+            std::io::stdin().read_to_end(&mut input).unwrap();
+            assert_eq!(input, vec![b'i'; 131_072]);
+        }
+    }
+
+    #[tokio::test]
+    async fn feeds_input_while_draining_output() {
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", "process::tests::input_fixture", "--nocapture"])
+            .env("LOCALWEB_TEST_INPUT_FIXTURE", "1");
+        let input = vec![b'i'; 131_072];
+        let output = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            output_with_input(&mut command, 1024, Some(&input)),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout.len(), 1025);
     }
 
     #[test]

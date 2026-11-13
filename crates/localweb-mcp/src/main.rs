@@ -33,47 +33,117 @@ struct Session {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let stdin = std::io::stdin();
-    let mut stdout = std::io::stdout();
-    let mut reader = stdin.lock();
+    // A detached reader does not hold up cancellation or runtime shutdown while
+    // a client keeps stdin open. Bound both the queue and individual frames.
+    let (sender, receiver) = tokio::sync::mpsc::channel(8);
+    std::thread::spawn(move || {
+        let mut reader = std::io::stdin().lock();
+        loop {
+            let mut line = Vec::new();
+            let result = reader
+                .by_ref()
+                .take((localweb_core::MAX_MESSAGE_BYTES + 1) as u64)
+                .read_until(b'\n', &mut line);
+            match result {
+                Ok(0) => break,
+                Ok(_) => {
+                    let oversized = line.len() > localweb_core::MAX_MESSAGE_BYTES;
+                    if sender.blocking_send(Ok(line)).is_err() || oversized {
+                        break;
+                    }
+                }
+                Err(error) => {
+                    let _ = sender.blocking_send(Err(error));
+                    break;
+                }
+            }
+        }
+    });
+    serve(receiver, &mut std::io::stdout()).await
+}
+
+async fn serve(
+    mut input: tokio::sync::mpsc::Receiver<std::io::Result<Vec<u8>>>,
+    stdout: &mut impl Write,
+) -> Result<()> {
     let mut session = Session::default();
-    let mut line = Vec::new();
-    loop {
-        line.clear();
-        if reader
-            .by_ref()
-            .take((localweb_core::MAX_MESSAGE_BYTES + 1) as u64)
-            .read_until(b'\n', &mut line)?
-            == 0
-        {
-            break;
+    let mut calls = tokio::task::JoinSet::new();
+    let mut active_id = None;
+    let result = loop {
+        tokio::select! {
+            frame = input.recv() => {
+                let Some(frame) = frame else { break Ok(()); };
+                let line = match frame { Ok(line) => line, Err(error) => break Err(error.into()) };
+                if line.len() > localweb_core::MAX_MESSAGE_BYTES {
+                    write_reply(stdout, &error_response(&Value::Null, -32600, "request too large"))?;
+                    break Ok(());
+                }
+                if line.iter().all(u8::is_ascii_whitespace) { continue; }
+                let message: Value = match serde_json::from_slice(&line) {
+                    Ok(message) => message,
+                    Err(error) => {
+                        write_reply(stdout, &error_response(&Value::Null, -32700, &format!("parse error: {error}")))?;
+                        continue;
+                    }
+                };
+                if is_cancellation(&message, active_id.as_ref()) {
+                    // No reply is sent for a cancelled MCP request. Aborting and
+                    // joining releases its owned commands before accepting more.
+                    calls.abort_all();
+                    while calls.join_next().await.is_some() {}
+                    active_id = None;
+                    continue;
+                }
+                if session.phase == Phase::Ready && is_tool_request(&message) {
+                    let id = message["id"].clone();
+                    if active_id.is_some() {
+                        write_reply(stdout, &error_response(&id, -32000, "Another tool is running. Wait for it or cancel it first."))?;
+                        continue;
+                    }
+                    let params = message.get("params").cloned().unwrap_or(Value::Null);
+                    active_id = Some(id.clone());
+                    calls.spawn(async move {
+                        match tools_call(&params).await {
+                            Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
+                            Err((code, message)) => error_response(&id, code, &message),
+                        }
+                    });
+                } else if let Some(reply) = session.handle(message).await {
+                    write_reply(stdout, &reply)?;
+                }
+            }
+            reply = calls.join_next(), if !calls.is_empty() => {
+                if let Some(reply) = reply {
+                    let id = active_id.take().unwrap_or(Value::Null);
+                    let reply = reply.unwrap_or_else(|_| error_response(&id, -32603, "Tool execution stopped unexpectedly. Refresh before retrying."));
+                    write_reply(stdout, &reply)?;
+                }
+            }
         }
-        if line.len() > localweb_core::MAX_MESSAGE_BYTES {
-            writeln!(
-                stdout,
-                "{}",
-                error_response(&Value::Null, -32600, "request too large")
-            )?;
-            stdout.flush()?;
-            break;
-        }
-        if line.iter().all(u8::is_ascii_whitespace) {
-            continue;
-        }
-        let reply = match serde_json::from_slice::<Value>(&line) {
-            Ok(message) => session.handle(message).await,
-            Err(error) => Some(error_response(
-                &Value::Null,
-                -32700,
-                &format!("parse error: {error}"),
-            )),
-        };
-        if let Some(reply) = reply {
-            writeln!(stdout, "{reply}")?;
-            stdout.flush()?;
-        }
-    }
-    Ok(())
+    };
+    calls.abort_all();
+    while calls.join_next().await.is_some() {}
+    result
+}
+
+fn write_reply(stdout: &mut impl Write, reply: &Value) -> std::io::Result<()> {
+    writeln!(stdout, "{reply}")?;
+    stdout.flush()
+}
+
+fn is_tool_request(message: &Value) -> bool {
+    message["jsonrpc"] == "2.0"
+        && message["method"] == "tools/call"
+        && message
+            .get("id")
+            .is_some_and(|id| id.is_string() || id.as_i64().is_some() || id.as_u64().is_some())
+}
+
+fn is_cancellation(message: &Value, active_id: Option<&Value>) -> bool {
+    message["jsonrpc"] == "2.0"
+        && message["method"] == "notifications/cancelled"
+        && message.get("id").is_none()
+        && active_id.is_some_and(|id| message.pointer("/params/requestId") == Some(id))
 }
 
 /// Turns one incoming message into an optional JSON-RPC response.
@@ -194,6 +264,22 @@ fn error_response(id: &Value, code: i64, message: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cancellation_only_matches_a_wellformed_inflight_notification() {
+        let request = json!({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": 9}});
+        assert!(is_cancellation(&request, Some(&json!(9))));
+        assert!(!is_cancellation(&request, Some(&json!("9"))));
+        assert!(!is_cancellation(&request, None));
+        assert!(!is_cancellation(
+            &json!({"id": 4, "jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": 9}}),
+            Some(&json!(9))
+        ));
+        assert!(!is_cancellation(
+            &json!({"method": "notifications/cancelled", "params": {"requestId": 9}}),
+            Some(&json!(9))
+        ));
+    }
 
     async fn ready_session() -> Session {
         let mut session = Session::default();

@@ -55,7 +55,13 @@ Inside `runtime/mariadb`, the directory layout mirrors a `/usr` basedir (`bin/`,
 
 Startup validates the selected runtime, generates the leaf certificate, checks hosts, provisions MariaDB/MySQL/PostgreSQL/SQLite, starts requested Redis/Mailpit, renders PHP-FPM and the selected web server, updates routes, starts the worker and checks HTTP startup. Failure attempts to restore the previous active configuration and stop new services.
 
-Stop applies the remaining active configuration, then stops project services and unused shared databases. Global shutdown attempts every owned service. Cron runs at most once per matching minute with overlap protection; an already-running cron command currently finishes independently of project stop.
+Stop applies the remaining active configuration, then stops project services and unused shared databases. Global shutdown inventories owned project services independently of readable project configuration. A failed shared-service rewrite marks every affected project as needing recovery. Cron runs at most once per matching minute with overlap protection; project stop cancels and joins its running jobs and owned descendants. Editing cron preserves the minute history of unchanged entries, including reordered entries.
+
+CLI and desktop edits use an optional conditional update that rejects a stale project snapshot before side effects. The original unconditional update remains supported. MCP keeps reading control messages while one tool runs; cancellation and EOF release its owned commands. A daemon request already accepted may still complete after cancellation or timeout, so clients must refresh before retrying a mutation.
+
+Privileged integration changes share a system-wide lock. Failed Linux trust-store refreshes retain the CA anchor for a retry; trust checks require both the anchor and its compiled bundle entry. Database initialization records an in-progress marker before running the native initializer; interrupted or nonempty incomplete directories require inspection and are never deleted automatically.
+
+Rolling downloads are published by a separate, serialized workflow after native acceptance succeeds. The publisher stages and verifies all assets, retains the previous bundle, and records recovery metadata before promotion. GitHub does not offer an atomic multi-asset swap: a brief mixed-version window remains possible during promotion; interrupted promotions are recovered from the journal before the next publication.
 
 ## Packaging
 

@@ -207,10 +207,34 @@ impl TrustStore {
         }
         #[cfg(all(unix, not(target_os = "macos")))]
         {
-            fs::read(certificate).ok().filter(|bytes| !bytes.is_empty())
-                == fs::read(self.certificate_path()).ok()
+            let Ok(expected) = fs::read(certificate) else {
+                return false;
+            };
+            let Ok(anchor) = fs::read(self.certificate_path()) else {
+                return false;
+            };
+            certificate_der(&expected).is_some_and(|der| {
+                certificate_der(&anchor).as_ref() == Some(&der)
+                    && fs::read("/etc/ssl/certs/ca-certificates.crt")
+                        .is_ok_and(|bundle| bundle_contains_certificate(&der, &bundle))
+            })
         }
     }
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn bundle_contains_certificate(expected_der: &[u8], bundle: &[u8]) -> bool {
+    const BEGIN: &str = "-----BEGIN CERTIFICATE-----";
+    const END: &str = "-----END CERTIFICATE-----";
+    String::from_utf8_lossy(bundle)
+        .split(BEGIN)
+        .skip(1)
+        .any(|part| {
+            part.find(END).is_some_and(|end| {
+                certificate_der(format!("{BEGIN}{}{END}", &part[..end]).as_bytes())
+                    .is_some_and(|der| der == expected_der)
+            })
+        })
 }
 
 /// Installs the `LocalWeb` CA into the per-user NSS database used by
@@ -462,14 +486,56 @@ fn macos_trust() -> Result<()> {
 
 #[cfg(target_os = "macos")]
 fn macos_untrust() -> Result<()> {
-    let status = Command::new("/usr/bin/security")
-        .args(["delete-certificate", "-c", CA_COMMON_NAME, MACOS_KEYCHAIN])
-        .status()?;
-    if !status.success() {
-        // `security` exits non-zero when the certificate is already absent.
+    let certificate = TrustStore::Macos.certificate_path();
+    let fingerprint = sha1_fingerprint(&certificate).ok_or_else(|| {
+        LocalWebError::Service("cannot identify the HTTPS certificate to revoke".into())
+    })?;
+    if !macos_certificate_present(&fingerprint)? {
         return Ok(());
     }
+    let output = Command::new("/usr/bin/security")
+        .args(["delete-certificate", "-Z", &fingerprint, MACOS_KEYCHAIN])
+        .output()?;
+    if !output.status.success() {
+        return Err(LocalWebError::Service(format!(
+            "could not revoke HTTPS trust: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    if macos_certificate_present(&fingerprint)? {
+        return Err(LocalWebError::Service(
+            "macOS still trusts the HTTPS certificate".into(),
+        ));
+    }
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn macos_certificate_present(fingerprint: &str) -> Result<bool> {
+    let output = Command::new("/usr/bin/security")
+        .args([
+            "find-certificate",
+            "-Z",
+            "-a",
+            "-c",
+            CA_COMMON_NAME,
+            MACOS_KEYCHAIN,
+        ])
+        .output()?;
+    if !output.status.success() {
+        // errSecItemNotFound (-25300), represented by security's exit status.
+        if output.status.code() == Some(44) {
+            return Ok(false);
+        }
+        return Err(LocalWebError::Service(format!(
+            "cannot inspect HTTPS trust: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.split_once(':'))
+        .any(|(_, value)| normalize_fingerprint(value) == fingerprint))
 }
 
 #[cfg(target_os = "macos")]
@@ -477,20 +543,7 @@ fn macos_keychain_contains(certificate: &Path) -> bool {
     let Some(fingerprint) = sha1_fingerprint(certificate) else {
         return false;
     };
-    let Ok(output) = Command::new("/usr/bin/security")
-        .args(["find-certificate", "-Z", "-a", "-c", CA_COMMON_NAME])
-        .arg(MACOS_KEYCHAIN)
-        .output()
-    else {
-        return false;
-    };
-    if !output.status.success() {
-        return false;
-    }
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| line.split_once(':'))
-        .any(|(_, value)| normalize_fingerprint(value) == fingerprint)
+    macos_certificate_present(&fingerprint).unwrap_or(false)
 }
 
 #[cfg(target_os = "macos")]
@@ -691,6 +744,34 @@ mod windows_tests {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn compiled_trust_bundle_requires_the_exact_certificate() {
+        let base = std::env::temp_dir().join(format!("lw-bundle-{}", uuid::Uuid::new_v4()));
+        let paths = crate::Paths {
+            config: base.join("config"),
+            data: base.join("data"),
+            state: base.join("state"),
+            runtime: base.join("run"),
+        };
+        paths.create().unwrap();
+        let ca = crate::certificate::CaPaths::new(&paths);
+        ca.ensure_ca().unwrap();
+        let pem = fs::read(&ca.cert).unwrap();
+        let der = certificate_der(&pem).unwrap();
+        assert!(bundle_contains_certificate(&der, &pem));
+        assert!(bundle_contains_certificate(
+            &der,
+            &[b"preamble\n".as_slice(), &pem, b"\ntrailing"].concat()
+        ));
+        assert!(!bundle_contains_certificate(b"different CA", &pem));
+        assert!(!bundle_contains_certificate(
+            &der,
+            b"-----BEGIN CERTIFICATE-----\ntruncated"
+        ));
+        fs::remove_dir_all(base).unwrap();
+    }
 
     #[test]
     fn detects_supported_linux_trust_stores_and_derivatives() {

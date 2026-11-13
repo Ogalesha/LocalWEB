@@ -344,6 +344,12 @@ async fn restore_services(
     let task_state = Arc::clone(state);
     let recovery = tokio::task::spawn_blocking(move || -> localweb_core::Result<BTreeSet<String>> {
         let mut recovery = BTreeSet::new();
+        for unit in backend::project_units(&task_state.paths)? {
+            let belongs_to_active = active.iter().any(|name| {
+                ["redis", "mailpit", "supervisor"].iter().any(|kind| unit == format!("localweb-project-{name}-{kind}"))
+            });
+            if !belongs_to_active { backend::stop(&unit)?; }
+        }
         for project in load_projects(&task_state.paths)? {
             if !active.contains(&project.name) && let Err(error) = stop_project_owned_services(&project) {
                 warn!(project = %project.name, %error, "inactive project cleanup needs recovery");
@@ -450,6 +456,10 @@ async fn dispatch(request: Request, state: &Arc<State>) -> Response {
     reason = "protocol dispatch keeps request handling auditable in one match"
 )]
 async fn execute(request: Request, state: &Arc<State>) -> localweb_core::Result<Response> {
+    let expected_project = match &request {
+        Request::ProjectUpdateIfCurrent { expected, .. } => Some(expected.clone()),
+        _ => None,
+    };
     match request {
         Request::Status => {
             let projects = load_projects(&state.paths)?;
@@ -589,9 +599,16 @@ async fn execute(request: Request, state: &Arc<State>) -> localweb_core::Result<
                 mail_web_url: None,
             }))
         }
-        Request::ProjectUpdate { name, input } => {
+        Request::ProjectUpdate { name, input }
+        | Request::ProjectUpdateIfCurrent { name, input, .. } => {
             let _operations = state.begin_operation().await?;
             let existing = find_project(&state.paths, &name)?;
+            if expected_project
+                .as_deref()
+                .is_some_and(|expected| expected != &existing)
+            {
+                return Err(LocalWebError::Config("The project changed while you were editing it. Reload its settings and try again.".into()));
+            }
             let mut updated = Project::from_update(&existing, input, &state.config)?;
             let projects = load_projects(&state.paths)?;
             let mut used: BTreeSet<u16> = projects
@@ -659,6 +676,11 @@ async fn execute(request: Request, state: &Arc<State>) -> localweb_core::Result<
             } else {
                 false
             };
+            remap_cron_history(
+                &mut *state.cron_last_minute.lock().await,
+                &existing,
+                &updated,
+            );
             Ok(Response::Project(ProjectStatus {
                 public_url: active_gateway_endpoint(&state.paths)
                     .map(|endpoint| gateway_url(&updated.hostname, endpoint)),
@@ -1109,7 +1131,11 @@ async fn stop_project_locked(state: &Arc<State>, name: &str) -> localweb_core::R
     .map_err(|error| join_failed(&error))
     .and_then(std::convert::identity);
     if let Err(error) = stopped {
-        require_recovery(state, &BTreeSet::from([name.to_owned()])).await;
+        // The failed rewrite may already have restarted PHP or a shared web
+        // server. Its other projects cannot retain a known-good running state.
+        let mut affected = active;
+        affected.insert(name.to_owned());
+        require_recovery(state, &affected).await;
         error!(project = %name, %error, "project stop failed; recovery is required");
         return Err(error);
     }
@@ -1606,6 +1632,20 @@ fn shutdown_services(state: &State) -> localweb_core::Result<()> {
         }
         Err(error) => failures.push(format!("could not inspect project-owned services: {error}")),
     }
+    // A malformed or deleted project file must not hide a live worker, Redis
+    // or Mailpit instance. Native inventory retains the ownership boundary.
+    match backend::project_units(&state.paths) {
+        Ok(units) => {
+            for unit in units {
+                record(
+                    &mut failures,
+                    &format!("stop {unit}"),
+                    Services::stop(&unit),
+                );
+            }
+        }
+        Err(error) => failures.push(error.to_string()),
+    }
     for version in localweb_core::PHP_VERSIONS {
         if let Err(error) = Services::stop(&php_unit(version)) {
             failures.push(error.to_string());
@@ -1964,6 +2004,36 @@ async fn cron_loop(state: Arc<State>) {
         tokio::select! {
             _ = shutdown.changed() => break,
             _ = ticker.tick() => cron_tick(&state).await,
+        }
+    }
+}
+
+fn remap_cron_history(
+    history: &mut BTreeMap<(String, usize), i64>,
+    old: &Project,
+    updated: &Project,
+) {
+    let mut previous = BTreeMap::new();
+    history.retain(|(name, index), minute| {
+        if name == &old.name {
+            previous.insert(*index, *minute);
+            false
+        } else {
+            true
+        }
+    });
+    let mut used = BTreeSet::new();
+    for (index, entry) in updated.cron.iter().enumerate() {
+        if let Some((old_index, _)) = old
+            .cron
+            .iter()
+            .enumerate()
+            .find(|(old_index, old_entry)| !used.contains(old_index) && *old_entry == entry)
+        {
+            used.insert(old_index);
+            if let Some(minute) = previous.get(&old_index) {
+                history.insert((updated.name.clone(), index), *minute);
+            }
         }
     }
 }
@@ -2501,6 +2571,65 @@ mod tests {
         let input = serde_json::from_value(serde_json::json!({"path": source, "name": "demo", "hostname": "demo.test", "autostart": false})).unwrap();
         let project = Project::from_new(input, &GlobalConfig::default()).unwrap();
         (base, paths, project)
+    }
+
+    #[tokio::test]
+    async fn stale_conditional_update_is_rejected_before_configuration_or_services_change() {
+        let (base, paths, project) = project_fixture();
+        save_project(&paths, &project).unwrap();
+        let mut outdated = project.clone();
+        outdated.mail = !project.mail;
+        let input = serde_json::from_value(
+            serde_json::json!({"path": project.path, "name": project.name, "mail": true, "autostart": false}),
+        )
+        .unwrap();
+        let state = test_state(paths);
+        let response = dispatch(
+            Request::ProjectUpdateIfCurrent {
+                name: project.name.clone(),
+                input,
+                expected: Box::new(outdated),
+            },
+            &state,
+        )
+        .await;
+        let Response::Error { message, .. } = response else {
+            panic!("stale edit was accepted");
+        };
+        assert!(message.contains("changed while you were editing"));
+        assert_eq!(find_project(&state.paths, &project.name).unwrap(), project);
+        assert_eq!(
+            fs::read_dir(state.paths.config.join("generated"))
+                .unwrap()
+                .count(),
+            0
+        );
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn cron_edits_preserve_reordered_entries_and_release_changed_entries() {
+        let (base, _, mut project) = project_fixture();
+        let first = localweb_core::parse_cron_line("* * * * * @php first.php").unwrap();
+        let second = localweb_core::parse_cron_line("* * * * * @php second.php").unwrap();
+        project.cron = vec![first.clone(), second.clone()];
+        let mut updated = project.clone();
+        updated.cron = vec![
+            second,
+            first,
+            localweb_core::parse_cron_line("* * * * * @php changed.php").unwrap(),
+        ];
+        let mut history = BTreeMap::from([
+            ((project.name.clone(), 0), 10),
+            ((project.name.clone(), 1), 11),
+            (("other".into(), 0), 12),
+        ]);
+        remap_cron_history(&mut history, &project, &updated);
+        assert_eq!(history.get(&(project.name.clone(), 0)), Some(&11));
+        assert_eq!(history.get(&(project.name.clone(), 1)), Some(&10));
+        assert!(!history.contains_key(&(project.name.clone(), 2)));
+        assert_eq!(history.get(&("other".into(), 0)), Some(&12));
+        fs::remove_dir_all(base).unwrap();
     }
 
     #[test]

@@ -417,7 +417,7 @@ pub struct CronEntry {
 }
 
 /// Complete persisted configuration of one project.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Project {
     /// Schema version of this file.
     pub schema_version: u32,
@@ -474,7 +474,7 @@ pub struct Project {
 }
 
 /// Resource limits applied to generated service configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ResourceSettings {
     /// Maximum concurrent PHP-FPM workers.
     pub fpm_max_children: u16,
@@ -1298,6 +1298,16 @@ pub enum Request {
         name: String,
         /// New runtime settings.
         input: NewProject,
+    },
+    /// Updates only if the project still matches the client's snapshot.
+    /// Older unconditional update requests remain supported.
+    ProjectUpdateIfCurrent {
+        /// Project name.
+        name: String,
+        /// Complete replacement runtime settings.
+        input: NewProject,
+        /// Snapshot used to prepare the edit; checked before any side effect.
+        expected: Box<Project>,
     },
     /// Deletes a project and its managed services.
     ProjectRemove {

@@ -315,6 +315,7 @@ struct LocalWebApp {
     view: View,
     lang: Lang,
     daemon: DaemonState,
+    startup_deadline: Option<Instant>,
     status: Option<Status>,
     ca: Option<CaStatus>,
     projects: Vec<ProjectStatus>,
@@ -375,6 +376,7 @@ impl LocalWebApp {
             receiver,
             view: View::Dashboard,
             daemon: DaemonState::Checking,
+            startup_deadline: None,
             status: None,
             ca: None,
             projects: Vec::new(),
@@ -463,11 +465,14 @@ impl LocalWebApp {
         let ticket = self.requests.begin(None);
         let sender = self.sender.clone();
         thread::spawn(move || {
-            let result = Command::new(program)
-                .args(args)
-                .output()
-                .map_err(|error| error.to_string())
-                .and_then(|output| {
+            let result = tokio::runtime::Builder::new_current_thread().enable_all().build()
+                .map_err(|error| error.to_string()).and_then(|runtime| runtime.block_on(async {
+                    let mut command = tokio::process::Command::new(program);
+                    command.args(args);
+                    tokio::time::timeout(Duration::from_secs(300), localweb_core::process::output(&mut command, 65_536))
+                        .await.map_err(|_elapsed| "The command timed out. Its outcome may be incomplete; refresh before retrying.".to_owned())?
+                        .map_err(|error| error.to_string())
+                })).and_then(|output| {
                     if output.status.success() {
                         Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
                     } else {
@@ -515,12 +520,18 @@ impl LocalWebApp {
                 match action {
                     Action::RefreshStatus => {
                         self.daemon = self.daemon.after_status_error();
+                        self.expire_startup();
                     }
                     Action::Shutdown => {
                         self.daemon = self.daemon.after_stop_error();
                         self.notice = Some(Notice::error(error));
                     }
-                    Action::LoadProjects => self.projects_error = Some(error),
+                    Action::LoadProjects => {
+                        self.projects_error = Some(error);
+                        if self.requests.foreground_pending() == 0 {
+                            self.project_transition = None;
+                        }
+                    }
                     Action::LoadCa => self.ca_error = Some(error),
                     Action::LoadEnvironment(name) if self.details.as_ref() == Some(&name) => {
                         self.environment_error = Some(error);
@@ -545,7 +556,12 @@ impl LocalWebApp {
             }
             let error = format!("{code}: {message}");
             match action {
-                Action::LoadProjects => self.projects_error = Some(error),
+                Action::LoadProjects => {
+                    self.projects_error = Some(error);
+                    if self.requests.foreground_pending() == 0 {
+                        self.project_transition = None;
+                    }
+                }
                 Action::LoadCa => self.ca_error = Some(error),
                 Action::LoadEnvironment(name) if self.details.as_ref() == Some(&name) => {
                     self.environment_error = Some(error);
@@ -565,6 +581,13 @@ impl LocalWebApp {
                 } else {
                     self.daemon.after_status_not_ready()
                 };
+                if status.ready {
+                    self.startup_deadline = None;
+                } else {
+                    self.startup_deadline
+                        .get_or_insert_with(|| Instant::now() + Duration::from_secs(60));
+                    self.expire_startup();
+                }
                 let ready = status.ready;
                 self.status = Some(status);
                 if ready && let Some(request) = self.queued_add.take() {
@@ -635,6 +658,12 @@ impl LocalWebApp {
                 self.remove_confirmation = None;
                 self.request(Action::LoadProjects, Request::ProjectList);
                 self.sync_hosts();
+            }
+            (Action::LoadProjects, unexpected) => {
+                self.projects_error = Some(self.lang.notice_unexpected(&format!("{unexpected:?}")));
+                if self.requests.foreground_pending() == 0 {
+                    self.project_transition = None;
+                }
             }
             (_, unexpected) => {
                 if shutdown {
@@ -724,12 +753,26 @@ impl LocalWebApp {
             state => state,
         };
         self.daemon = DaemonState::Starting;
+        self.startup_deadline = Some(Instant::now() + Duration::from_secs(60));
         match localweb_cli_path() {
             Ok(program) => self.run_command(Action::StartDaemon, program, vec!["start".into()]),
             Err(error) => {
                 self.daemon = previous;
                 self.notice = Some(Notice::error(error));
             }
+        }
+    }
+
+    fn expire_startup(&mut self) {
+        if self.daemon == DaemonState::Starting
+            && self.requests.foreground_pending() == 0
+            && self
+                .startup_deadline
+                .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            self.daemon = DaemonState::Unavailable;
+            self.queued_add = None;
+            self.notice = Some(Notice::error(self.lang.notice_startup_timeout()));
         }
     }
 
@@ -2227,7 +2270,8 @@ impl LocalWebApp {
                     if let Some(project) = self.edit_project.clone() {
                         self.request(
                             Action::UpdateProject(project.name.clone()),
-                            Request::ProjectUpdate {
+                            Request::ProjectUpdateIfCurrent {
+                                expected: Box::new(project.clone()),
                                 name: project.name,
                                 input: request,
                             },
@@ -2819,11 +2863,9 @@ impl eframe::App for LocalWebApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let context = ui.ctx().clone();
         self.receive_events();
-        if self.requests.foreground_pending() == 0
-            && self.requests.background_pending() == 0
-            && self.last_refresh.elapsed() > REFRESH_INTERVAL
+        if self.requests.background_pending() == 0 && self.last_refresh.elapsed() > REFRESH_INTERVAL
         {
-            if self.daemon_online() {
+            if self.daemon_online() && self.requests.foreground_pending() == 0 {
                 self.request(Action::RefreshStatus, Request::Status);
                 self.request(Action::LoadProjects, Request::ProjectList);
             } else {
@@ -3733,6 +3775,36 @@ mod tests {
         assert_eq!(app.daemon, DaemonState::Stopped);
         assert!(app.status.is_none());
         assert_eq!(app.requests.background_pending(), 0);
+    }
+
+    #[test]
+    fn startup_deadline_recovers_controls_after_daemon_disappears() {
+        let mut app = LocalWebApp::state(None, Lang::English, None);
+        app.daemon = DaemonState::Starting;
+        app.startup_deadline = Some(Instant::now());
+        app.handle_response(Action::RefreshStatus, Err("connection refused".into()));
+        assert_eq!(app.daemon, DaemonState::Unavailable);
+        assert!(app.notice.is_some());
+        assert_eq!(app.requests.foreground_pending(), 0);
+    }
+
+    #[test]
+    fn failed_project_refresh_exits_completed_transition_but_preserves_active_mutation() {
+        let mut app = LocalWebApp::state(None, Lang::English, None);
+        let mutation = app.requests.begin(None);
+        app.project_transition = Some(("demo".into(), ProjectTransition::Starting));
+        app.handle_response(Action::LoadProjects, Err("offline".into()));
+        assert!(app.project_transition.is_some());
+        assert!(app.requests.complete(mutation));
+        app.handle_response(
+            Action::LoadProjects,
+            Ok(Response::Error {
+                code: "IoError".into(),
+                message: "offline".into(),
+            }),
+        );
+        assert!(app.project_transition.is_none());
+        assert!(app.projects_error.is_some());
     }
 
     #[test]

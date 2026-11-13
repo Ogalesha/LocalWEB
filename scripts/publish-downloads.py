@@ -10,6 +10,8 @@ import re
 import shutil
 import subprocess
 import time
+import tempfile
+import uuid
 
 VERSION = r"(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)"
 PACKAGES = (
@@ -142,28 +144,151 @@ def obsolete_asset(name):
     return name not in CURRENT_ASSETS and any(re.fullmatch(pattern, name) for pattern, _, _ in PACKAGES)
 
 
+JOURNAL = "localweb-publication.json"
+
+
+def release_state(repository):
+    return json.loads(gh("api", f"repos/{repository}/releases/tags/rolling"))
+
+
+def rename_asset(repository, asset_id, name):
+    gh("api", "--method", "PATCH", f"repos/{repository}/releases/assets/{asset_id}", "-f", f"name={name}")
+
+
+def set_source(repository, sha):
+    gh("api", "--method", "PATCH", f"repos/{repository}/git/refs/tags/rolling", "-f", f"sha={sha}", "-F", "force=true")
+
+
+def set_notes(repository, release_id, body):
+    gh("api", "--method", "PATCH", f"repos/{repository}/releases/{release_id}", "-f", f"body={body}")
+
+
+def verify_asset(repository, asset, expected, directory):
+    # GitHub computes digests server-side. Older assets can lack that field;
+    # download those instead of assuming an upload succeeded intact.
+    if asset.get("digest"):
+        if asset["digest"] != f"sha256:{expected}":
+            raise ValueError(f"Uploaded checksum mismatch: {asset['name']}")
+    else:
+        with tempfile.TemporaryDirectory(dir=directory) as temp:
+            gh("release", "download", "rolling", "--repo", repository, "--pattern", asset["name"], "--dir", temp)
+            if digest(Path(temp) / asset["name"]) != expected:
+                raise ValueError(f"Downloaded checksum mismatch: {asset['name']}")
+
+
+def recover_publication(repository, release):
+    pending = next((asset for asset in release["assets"] if asset["name"] == JOURNAL), None)
+    if pending is None:
+        return
+    transaction = json.loads(gh("api", f"repos/{repository}/releases/assets/{pending['id']}", "-H", "Accept: application/octet-stream"))
+    ids = {asset["id"] for asset in release["assets"]}
+    if (not re.fullmatch(r"[0-9a-f]{40}", transaction.get("old_sha", ""))
+            or not re.fullmatch(r"[0-9a-f]{40}", transaction.get("new_sha", ""))
+            or {a["name"] for a in transaction["new_assets"]} != CURRENT_ASSETS
+            or any(item["name"] not in CURRENT_ASSETS or item["id"] not in ids for item in transaction["old_assets"])
+            or any(item["name"] not in CURRENT_ASSETS or item["id"] not in ids
+                   or not re.fullmatch(r"candidate-[0-9a-f]{32}-" + re.escape(item["name"]), item["staged_name"])
+                   for item in transaction["new_assets"])):
+        raise ValueError("Invalid publication journal; retain the assets for manual recovery")
+    current = {asset["id"]: asset for asset in release["assets"]}
+    source = json.loads(gh("api", f"repos/{repository}/git/ref/tags/rolling"))["object"]["sha"]
+    committed = (source == transaction["new_sha"] and release["body"] == transaction["new_body"]
+                 and all(current[item["id"]]["name"] == item["name"] for item in transaction["new_assets"]))
+    if not committed:
+        # Move candidates out of the public namespace before restoring old IDs.
+        # Re-running this recovery after another interruption is idempotent.
+        for item in transaction["new_assets"]:
+            if current[item["id"]]["name"] != item["staged_name"]:
+                rename_asset(repository, item["id"], item["staged_name"])
+        for item in transaction["old_assets"]:
+            if current[item["id"]]["name"] != item["name"]:
+                rename_asset(repository, item["id"], item["name"])
+        set_source(repository, transaction["old_sha"])
+        set_notes(repository, release["id"], transaction["old_body"])
+    else:
+        with tempfile.TemporaryDirectory() as temp:
+            for item in transaction["new_assets"]:
+                verify_asset(repository, current[item["id"]], item["sha256"], Path(temp))
+    gh("release", "delete-asset", "rolling", JOURNAL, "--repo", repository, "--yes")
+    return committed
+
+
 def publish(destination, notes_path, repository, sha):
-    result = subprocess.run(["gh", "release", "view", "rolling", "--json", "id"],
+    result = subprocess.run(["gh", "release", "view", "rolling", "--repo", repository, "--json", "id"],
                             text=True, capture_output=True)
     if result.returncode:
         if "release not found" not in result.stderr.lower() and "404" not in result.stderr:
             raise RuntimeError(result.stderr)
-        gh("release", "create", "rolling", "--prerelease", "--latest=false", "--target", sha,
-           "--title", "LocalWeb — latest verified build", "--notes-file", str(notes_path))
-    assets = [str(destination / name) for name in sorted(CURRENT_ASSETS)]
-    gh("release", "upload", "rolling", *assets, "--clobber")
-    # Keep the rolling source archives aligned with the installers, too.
+        gh("release", "create", "rolling", "--repo", repository, "--prerelease", "--latest=false", "--target", sha,
+           "--title", "LocalWeb — latest verified build", "--notes", "Preparing the first verified build.")
+    recover_publication(repository, release_state(repository))
+    release = release_state(repository)
+    notes = notes_path.read_text()
+    previous_run = re.search(r"/actions/runs/(\d+)", release.get("body") or "")
+    next_run = re.search(r"/actions/runs/(\d+)", notes)
+    if previous_run and (not next_run or int(next_run[1]) < int(previous_run[1])):
+        raise ValueError("A newer build is already published; keep the current downloads")
     ref = json.loads(gh("api", f"repos/{repository}/git/ref/tags/rolling"))
-    if ref["object"]["sha"] != sha:
-        gh("api", "--method", "PATCH", f"repos/{repository}/git/refs/tags/rolling",
-           "-f", f"sha={sha}", "-F", "force=true")
-    gh("release", "edit", "rolling", "--prerelease", "--latest=false",
-       "--title", "LocalWeb — latest verified build", "--notes-file", str(notes_path))
-    release = json.loads(gh("release", "view", "rolling", "--json", "assets"))
-    # Remove old versioned installers only after all replacements are uploaded.
-    for asset in release["assets"]:
-        if obsolete_asset(asset["name"]):
-            gh("release", "delete-asset", "rolling", asset["name"], "--yes")
+    old_sha = ref["object"]["sha"]
+    transaction = {"old_sha": old_sha, "old_body": release.get("body") or "",
+                   "new_sha": sha, "new_body": notes,
+                   "old_assets": [{"id": a["id"], "name": a["name"]} for a in release["assets"] if a["name"] in CURRENT_ASSETS],
+                   "new_assets": []}
+    with tempfile.TemporaryDirectory(dir=destination.parent) as temp:
+        staging = Path(temp)
+        token = uuid.uuid4().hex
+        # Stage and verify the whole bundle before changing a public URL.
+        for name in sorted(CURRENT_ASSETS):
+            staged_name = f"candidate-{token}-{name}"
+            path = staging / staged_name
+            os.link(destination / name, path)
+            gh("release", "upload", "rolling", str(path), "--repo", repository)
+        assets = {a["name"]: a for a in release_state(repository)["assets"]}
+        for name in sorted(CURRENT_ASSETS):
+            staged_name = f"candidate-{token}-{name}"
+            asset = assets[staged_name]
+            expected = digest(destination / name)
+            verify_asset(repository, asset, expected, staging)
+            transaction["new_assets"].append({"id": asset["id"], "name": name, "staged_name": staged_name, "sha256": expected})
+        journal = staging / JOURNAL
+        journal.write_text(json.dumps(transaction))
+        gh("release", "upload", "rolling", str(journal), "--repo", repository)
+        try:
+            # SHA256SUMS is promoted after every installer. Metadata is committed
+            # last. The durable journal can recover even a terminated runner.
+            order = sorted(CURRENT_ASSETS - {"SHA256SUMS"}) + ["SHA256SUMS"]
+            old = {a["name"]: a for a in transaction["old_assets"]}
+            new = {a["name"]: a for a in transaction["new_assets"]}
+            for name in order:
+                if name in old:
+                    rename_asset(repository, old[name]["id"], f"previous-{old_sha[:12]}-{old[name]['id']}-{name}")
+                rename_asset(repository, new[name]["id"], name)
+            public = {a["name"]: a for a in release_state(repository)["assets"]}
+            for name in order:
+                verify_asset(repository, public[name], new[name]["sha256"], staging)
+            set_source(repository, sha)
+            set_notes(repository, release["id"], notes)
+            # Read back metadata before marking the transaction committed.
+            final = release_state(repository)
+            final_sha = json.loads(gh("api", f"repos/{repository}/git/ref/tags/rolling"))["object"]["sha"]
+            if final_sha != sha or final["body"] != notes:
+                raise ValueError("Published source metadata did not match the verified bundle")
+        except BaseException as error:
+            try:
+                if recover_publication(repository, release_state(repository)):
+                    return  # The server committed before its response was lost.
+            except (ValueError, RuntimeError, OSError) as recovery:
+                raise RuntimeError(f"Publication failed: {error}; recovery is pending: {recovery}. Previous assets and the recovery journal were retained.") from error
+            raise
+        gh("release", "delete-asset", "rolling", JOURNAL, "--repo", repository, "--yes")
+    # Retain the immediately previous bundle. Remove only older transaction
+    # leftovers and legacy installers after the new bundle is fully committed.
+    retained = {f"previous-{old_sha[:12]}-{a['id']}-{a['name']}" for a in transaction["old_assets"]}
+    for asset in release_state(repository)["assets"]:
+        name = asset["name"]
+        temporary = re.fullmatch(r"(?:candidate-[0-9a-f]{32}|previous-[0-9a-f]{12}-\d+)-(.+)", name)
+        if obsolete_asset(name) or (temporary and temporary[1] in CURRENT_ASSETS and name not in retained):
+            gh("release", "delete-asset", "rolling", name, "--repo", repository, "--yes")
 
 
 def main():

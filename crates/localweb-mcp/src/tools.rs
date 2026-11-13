@@ -6,9 +6,7 @@
 
 use localweb_core::{
     Cache, Database, ExecutionSpec, NewProject, Paths, Request, Response, SupervisorConfig,
-    WebServer,
-    certificate::CaPaths,
-    copy,
+    WebServer, copy,
     hosts::{HostsSync, HostsSyncLock},
     parse_cron_line, send_request, validate_php_version,
 };
@@ -349,8 +347,8 @@ async fn daemon(request: Request) -> Result<Response, String> {
 async fn converse(paths: &Paths, request: Request) -> Result<Response, String> {
     let response = timeout(DAEMON_TIMEOUT, send_request(paths, request))
         .await
-        .map_err(|_elapsed| copy::NO_RESPONSE.to_owned())?
-        .map_err(|error| format!("Can't reach LocalWeb ({error}). Call localweb_daemon_start."))?;
+        .map_err(|_elapsed| "LocalWeb did not respond in time. The operation may still complete. Check localweb_status and the project before retrying.".to_owned())?
+        .map_err(|error| format!("Can't reach LocalWeb ({error}). Check localweb_status before restarting."))?;
     if let Response::Error { code, message } = &response {
         return Err(format!("{code}: {message}"));
     }
@@ -369,23 +367,24 @@ fn unexpected() -> String {
 
 /// Reports daemon and gateway health; stays useful while the daemon is down.
 async fn status() -> Result<String, String> {
-    match daemon(Request::Status).await {
-        Ok(Response::Status(status)) => render(&status),
-        Ok(_) => Err(unexpected()),
-        Err(reason) => render(&json!({
-            "daemon_running": false,
-            "error": reason,
-            "hint": "Call localweb_daemon_start to start LocalWeb.",
-        })),
+    let paths = paths()?;
+    match timeout(DAEMON_TIMEOUT, send_request(&paths, Request::Status)).await {
+        Ok(Ok(Response::Status(status))) => render(&status),
+        Ok(Err(localweb_core::LocalWebError::Io(error)))
+            if matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused) => render(&json!({
+                "daemon_running": false,
+                "error": error.to_string(),
+                "hint": "Call localweb_daemon_start to start LocalWeb.",
+            })),
+        Ok(Err(error)) => Err(format!("LocalWeb state is unknown: {error}. Check again before restarting.")),
+        Ok(Ok(_)) => Err(unexpected()),
+        Err(_) => Err("LocalWeb state is unknown: the status request timed out. Check again before restarting.".into()),
     }
 }
 
 /// Starts the user daemon and waits until restoration finished.
 async fn daemon_start() -> Result<String, String> {
-    tokio::task::spawn_blocking(localweb_core::service::restart_daemon)
-        .await
-        .map_err(|error| format!("Couldn't start LocalWeb: {error}"))?
-        .map_err(|error| format!("Couldn't start LocalWeb: {error}"))?;
+    run_cli(&["start"]).await?;
     let paths = paths()?;
     let mut last = String::new();
     let deadline = tokio::time::Instant::now() + STARTUP_READY_TIMEOUT;
@@ -700,25 +699,7 @@ async fn ca_status() -> Result<String, String> {
 
 /// Ensures the CA exists and installs it into the system trust store.
 async fn ca_install() -> Result<String, String> {
-    let paths = paths()?;
-    let ca = CaPaths::new(&paths);
-    ca.ensure_ca().map_err(|error| error.to_string())?;
-    #[cfg(windows)]
-    let certificate = ca.cert.clone();
-    #[cfg(windows)]
-    tokio::task::spawn_blocking(move || {
-        localweb_core::platform::install_current_user_ca(&certificate)
-    })
-    .await
-    .map_err(|error| error.to_string())?
-    .map_err(|error| error.to_string())?;
-    #[cfg(not(windows))]
-    let certificate = tokio::fs::read(&ca.cert)
-        .await
-        .map_err(|error| format!("Couldn't read the HTTPS certificate: {error}"))?;
-    #[cfg(not(windows))]
-    run_helper("install-ca", certificate).await?;
-    localweb_core::platform::install_browser_ca(&ca.cert).map_err(|error| error.to_string())?;
+    run_cli(&["ca", "install"]).await?;
     Ok(copy::HTTPS_TRUSTED.to_owned())
 }
 
@@ -727,7 +708,19 @@ async fn hosts_sync() -> Result<String, String> {
     let paths = paths()?;
     // Serialize with CLI and other MCP processes before reading the project
     // snapshot and invoking the privileged helper.
-    let _lock = HostsSyncLock::acquire(&paths).map_err(|error| error.to_string())?;
+    let _lock = timeout(Duration::from_secs(300), async {
+        loop {
+            if let Some(lock) = HostsSyncLock::try_acquire(&paths)? {
+                break localweb_core::Result::Ok(lock);
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .map_err(|_elapsed| {
+        "Another hosts update is still running. Refresh before retrying.".to_owned()
+    })?
+    .map_err(|error| error.to_string())?;
     let hostnames = project_hostnames(&paths).await?;
     let Response::Status(status) = converse(&paths, Request::Status).await? else {
         return Err(unexpected());
@@ -776,10 +769,7 @@ async fn login_autostart(arguments: &Value) -> Result<String, String> {
         .and_then(Value::as_bool)
         .ok_or("missing required boolean argument `enable`")?;
     let action = if enable { "enable" } else { "disable" };
-    tokio::task::spawn_blocking(move || localweb_core::service::set_autostart(enable))
-        .await
-        .map_err(|error| format!("cannot update login autostart: {error}"))?
-        .map_err(|error| format!("cannot update login autostart: {error}"))?;
+    run_cli(&["autostart", action]).await?;
     Ok(format!("LocalWeb login autostart {action}d"))
 }
 
@@ -843,13 +833,31 @@ async fn logs(arguments: &Value) -> Result<String, String> {
 /// Runs one privileged helper operation through pkexec.
 async fn run_helper(operation: &str, input: Vec<u8>) -> Result<(), String> {
     let helper = helper_path()?;
-    let operation = operation.to_owned();
-    tokio::task::spawn_blocking(move || {
-        localweb_core::privilege::run_helper(&helper, &operation, &input)
-    })
+    localweb_core::privilege::run_helper_async(&helper, operation, &input)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// Runs a sibling CLI action with owned cancellation and a bounded prompt.
+async fn run_cli(arguments: &[&str]) -> Result<(), String> {
+    let binary = std::env::current_exe()
+        .map_err(|error| error.to_string())?
+        .with_file_name(format!("localweb{}", std::env::consts::EXE_SUFFIX));
+    let mut command = Command::new(binary);
+    command.args(arguments);
+    let output = timeout(
+        Duration::from_secs(300),
+        localweb_core::process::output(&mut command, OUTPUT_CAP),
+    )
     .await
-    .map_err(|error| format!("cannot run the privileged helper: {error}"))?
-    .map_err(|error| error.to_string())
+    .map_err(|_elapsed| {
+        "The action timed out. Refresh the current state before retrying.".to_owned()
+    })?
+    .map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());
+    }
+    Ok(())
 }
 
 /// Finds the installed helper, falling back to a development build.
