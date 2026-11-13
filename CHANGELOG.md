@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-11-13
+
 ### Fixed
 
 - Regenerate partial leaf certificates and serialize concurrent first-run CA creation.
