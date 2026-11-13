@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
 import urllib.request
 
 binary_dir = Path(sys.argv[1]).resolve()
@@ -73,13 +74,13 @@ def wait_for_daemon(process):
     for _ in range(240):
         if sock.is_socket():
             try:
-                request("status")
-                return
+                if request("status")["ready"]:
+                    return
             except OSError:
                 pass
         assert process.poll() is None, "Daemon did not start"
         time.sleep(0.25)
-    raise AssertionError("Daemon did not accept connections")
+    raise AssertionError("Daemon did not finish restoring projects")
 
 
 mcp = None
@@ -128,6 +129,23 @@ try:
     assert ca["browser_trusted"], ca
     assert ca["trusted"], ca
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+    def fetch(url):
+        """Reads a gateway URL, retrying startup failures from a just-restarted service."""
+        last = None
+        for _ in range(20):
+            try:
+                with opener.open(url, timeout=20) as response:
+                    return response.read().decode()
+            except urllib.error.HTTPError as error:
+                if error.code not in (502, 503, 504):
+                    raise
+                last = error
+            except (urllib.error.URLError, OSError) as error:
+                last = error
+            time.sleep(0.25)
+        raise AssertionError(f"{url} did not become available: {last}")
+
     update_name = "php-update"
     update_path = base / update_name
     update_path.mkdir()
@@ -136,8 +154,7 @@ try:
     added = request("project_add", update_spec)
     request("project_start", {"name": update_name})
     web_port = added["project"]["web_port"]
-    with opener.open(f"https://{update_name}.test", timeout=20) as response:
-        assert response.read().decode() == "8.5"
+    assert fetch(f"https://{update_name}.test") == "8.5"
     changed = update_spec | {"web_server": "apache", "php": "8.4", "database": "mariadb", "cache": "redis", "mail": True, "autostart": True}
     updated = request("project_update", {"name": update_name, "input": changed})
     project = updated["project"]
@@ -149,8 +166,7 @@ try:
     assert project["php"] == "8.4" and project["web_server"] == "apache"
     assert project["database"] == "mariadb" and project["cache"] == "redis"
     assert project["database_port"] and project["database_port"] != project["web_port"]
-    with opener.open(f"https://{update_name}.test", timeout=20) as response:
-        assert response.read().decode() == "8.4"
+    assert fetch(f"https://{update_name}.test") == "8.4"
     with opener.open(f"http://127.0.0.1:{web_port}/", timeout=20) as response:
         assert response.read().decode() == "8.4"
     request("project_stop", {"name": update_name})
@@ -194,9 +210,8 @@ try:
                 source = f"<?php $pdo = new PDO({quote(dsn)}, {quote(values.get('DB_USERNAME', ''))}, {quote(values.get('DB_PASSWORD', ''))}); if ($pdo->query('SELECT 1')->fetchColumn() != 1) {{ http_response_code(500); exit('database failed'); }} echo PHP_MAJOR_VERSION.'.'.PHP_MINOR_VERSION.' database OK';"
                 (path / "index.php").write_text(source)
                 request("project_start", {"name": name})
-                with opener.open(f"https://{name}.test", timeout=20) as response:
-                    body = response.read().decode()
-                    assert body == f"8.{minor} database OK", f"https://{name}.test returned {body!r}"
+                body = fetch(f"https://{name}.test")
+                assert body == f"8.{minor} database OK", f"https://{name}.test returned {body!r}"
                 status = request("project_get", {"name": name})
                 assert status["running"]
                 web_port = status["project"]["web_port"]
@@ -208,8 +223,7 @@ try:
                     if not mac:
                         subprocess.run(["systemctl", "--user", "stop", "localweb-nginx"], env=env, check=True)
                         request("project_start", {"name": name})
-                        with opener.open(f"https://{name}.test", timeout=20) as response:
-                            assert response.read().decode() == "8.0 database OK", "Start did not recover the stopped web server"
+                        assert fetch(f"https://{name}.test") == "8.0 database OK", "Start did not recover the stopped web server"
                     daemon.kill()
                     daemon.wait(timeout=30)
                     daemon = subprocess.Popen([str(binary_dir / "localwebd")], env=env)
@@ -220,9 +234,8 @@ try:
                         time.sleep(0.5)
                     else:
                         raise AssertionError("the restored project did not become running")
-                    with opener.open(f"https://{name}.test", timeout=20) as response:
-                        body = response.read().decode()
-                        assert body == f"8.{minor} database OK", f"recovered project returned {body!r}"
+                    body = fetch(f"https://{name}.test")
+                    assert body == f"8.{minor} database OK", f"recovered project returned {body!r}"
                     print("PASS daemon SIGKILL recovery: project restored and serving", flush=True)
                 try:
                     socket.create_connection(("127.0.0.1", 80), timeout=0.5)

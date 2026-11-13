@@ -247,6 +247,15 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn stale_socket_fixture() {
+        let Some(path) = std::env::var_os("LOCALWEB_TEST_STALE_SOCKET") else {
+            return;
+        };
+        drop(std::os::unix::net::UnixListener::bind(path).unwrap());
+    }
+
+    #[cfg(unix)]
     #[tokio::test]
     #[expect(
         clippy::used_underscore_binding,
@@ -261,8 +270,23 @@ mod tests {
         first.cleanup().unwrap();
         drop(first);
         // Recover the stale socket left by a process that died without cleanup.
-        let stale = std::os::unix::net::UnixListener::bind(paths.socket()).unwrap();
-        drop(stale);
+        // Create it in a child process: a listener created here could be
+        // inherited by a concurrent fork and keep answering until exec, which
+        // would make the recovery check nondeterministic.
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "transport::tests::stale_socket_fixture",
+                "--nocapture",
+            ])
+            .env("LOCALWEB_TEST_STALE_SOCKET", paths.socket())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "stale socket fixture failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         let recovered = DaemonListener::bind(&paths).await.unwrap();
         recovered.cleanup().unwrap();
         drop(recovered);

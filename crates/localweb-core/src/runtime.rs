@@ -1044,7 +1044,17 @@ mod tests {
         assert!(!php_pair_matches(&php, &fpm, "8.4"));
         assert!(!php_pair_matches(&php, &fpm, "8.5"));
         fs::write(&fpm, "#!/bin/sh\nprintf 'PHP 8.4.26 (fpm-fcgi)'\n").unwrap();
-        assert!(php_pair_matches(&php, &fpm, "8.4"));
+        // Another test thread can fork while this script is open for writing;
+        // until that child execs, Linux rejects a new exec with ETXTBSY.
+        let mut matched = false;
+        for _ in 0..50 {
+            if php_pair_matches(&php, &fpm, "8.4") {
+                matched = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(matched);
         fs::remove_dir_all(root).unwrap();
     }
     #[test]

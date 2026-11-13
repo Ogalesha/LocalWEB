@@ -26,6 +26,7 @@ All notable changes to this project are documented here. The format follows
 - Serialize hosts synchronization across CLI and MCP processes with a shared per-user lock.
 - Recover the Windows daemon pipe listener when the replacement instance cannot be created.
 - Build the legacy PHP 8.1 runtime against bundled OpenSSL so hosts shipping OpenSSL 4 can package it.
+- Make native release verification deterministic by creating stale endpoint fixtures in a child process, retrying transient PHP script execution, and waiting for daemon readiness before HTTPS acceptance checks.
 
 ## [0.1.4] - 2026-11-08
 
